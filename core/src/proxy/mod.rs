@@ -12,20 +12,13 @@
 
 mod auth;
 pub mod block_engine_stage;
-pub mod fetch_stage_manager;
-pub mod relayer_stage;
-
 use {
-    std::{
-        net::{AddrParseError, SocketAddr},
-        result,
-    },
+    std::{net::AddrParseError, result},
     thiserror::Error,
     tonic::Status,
 };
 
 type Result<T> = result::Result<T, ProxyError>;
-type HeartbeatEvent = (SocketAddr, SocketAddr);
 
 #[derive(Error, Debug)]
 pub enum ProxyError {

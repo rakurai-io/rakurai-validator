@@ -70,8 +70,6 @@ const MAX_SNAPSHOT_DOWNLOAD_ABORT: u32 = 5;
 const MINIMUM_TICKS_PER_SLOT: u64 = 2;
 
 const DEFAULT_PREALLOCATED_BUNDLE_COST: &str = "3000000";
-const DEFAULT_RELAYER_EXPECTED_HEARTBEAT_INTERVAL_MS: &str = "500";
-const DEFAULT_RELAYER_MAX_FAILED_HEARTBEATS: &str = "3";
 
 pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
     return App::new(crate_name!())
@@ -91,32 +89,6 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                 .long("block-engine-url")
                 .help("Block engine url.  Set to empty string to disable block engine connection.")
                 .takes_value(true)
-        )
-        .arg(
-            Arg::with_name("relayer_url")
-                .long("relayer-url")
-                .help("Relayer url. Set to empty string to disable relayer connection.")
-                .takes_value(true)
-        )
-        .arg(
-            Arg::with_name("trust_relayer_packets")
-                .long("trust-relayer-packets")
-                .takes_value(false)
-                .help("Skip signature verification on relayer packets. Not recommended unless the relayer is trusted.")
-        )
-        .arg(
-            Arg::with_name("relayer_expected_heartbeat_interval_ms")
-                .long("relayer-expected-heartbeat-interval-ms")
-                .takes_value(true)
-                .help("Interval at which the Relayer is expected to send heartbeat messages.")
-                .default_value(DEFAULT_RELAYER_EXPECTED_HEARTBEAT_INTERVAL_MS)
-        )
-        .arg(
-            Arg::with_name("relayer_max_failed_heartbeats")
-                .long("relayer-max-failed-heartbeats")
-                .takes_value(true)
-                .help("Maximum number of heartbeats the Relayer can miss before falling back to the normal TPU pipeline.")
-                .default_value(DEFAULT_RELAYER_MAX_FAILED_HEARTBEATS)
         )
         .arg(
             Arg::with_name("trust_block_engine_packets")
@@ -1761,39 +1733,6 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
                         .long("trust-block-engine-packets")
                         .takes_value(false)
                         .help("Skip signature verification on block engine packets. Not recommended unless the block engine is trusted.")
-                )
-        )
-        .subcommand(
-            SubCommand::with_name("set-relayer-config")
-                .about("Set configuration for connection to a relayer")
-                .arg(
-                    Arg::with_name("relayer_url")
-                        .long("relayer-url")
-                        .help("Relayer url. Set to empty string to disable relayer connection.")
-                        .takes_value(true)
-                        .required(true)
-                )
-                .arg(
-                    Arg::with_name("trust_relayer_packets")
-                        .long("trust-relayer-packets")
-                        .takes_value(false)
-                        .help("Skip signature verification on relayer packets. Not recommended unless the relayer is trusted.")
-                )
-                .arg(
-                    Arg::with_name("relayer_expected_heartbeat_interval_ms")
-                        .long("relayer-expected-heartbeat-interval-ms")
-                        .takes_value(true)
-                        .help("Interval at which the Relayer is expected to send heartbeat messages.")
-                        .required(false)
-                        .default_value(DEFAULT_RELAYER_EXPECTED_HEARTBEAT_INTERVAL_MS)
-                )
-                .arg(
-                    Arg::with_name("relayer_max_failed_heartbeats")
-                        .long("relayer-max-failed-heartbeats")
-                        .takes_value(true)
-                        .help("Maximum number of heartbeats the Relayer can miss before falling back to the normal TPU pipeline.")
-                        .required(false)
-                        .default_value(DEFAULT_RELAYER_MAX_FAILED_HEARTBEATS)
                 )
         )
         .subcommand(

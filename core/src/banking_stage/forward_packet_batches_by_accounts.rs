@@ -1,6 +1,4 @@
 use {
-    super::immutable_deserialized_packet::ImmutableDeserializedPacket,
-    core::num::NonZeroU64,
     solana_cost_model::{
         block_cost_limits,
         cost_model::CostModel,
@@ -9,7 +7,7 @@ use {
     solana_feature_set::FeatureSet,
     solana_perf::packet::Packet,
     solana_sdk::transaction::SanitizedTransaction,
-    std::sync::Arc,
+    std::num::NonZeroU64,
 };
 
 /// `ForwardBatch` to have half of default cost_tracker limits, as smaller batch
@@ -29,14 +27,12 @@ const DEFAULT_NUMBER_OF_BATCHES: u32 = 100;
 pub struct ForwardBatch {
     // `forwardable_packets` keeps forwardable packets in a vector in its
     // original fee prioritized order
-    forwardable_packets: Vec<Arc<ImmutableDeserializedPacket>>,
+    forwardable_packets: Vec<Packet>,
 }
 
 impl ForwardBatch {
     pub fn get_forwardable_packets(&self) -> impl Iterator<Item = &Packet> {
-        self.forwardable_packets
-            .iter()
-            .map(|immutable_packet| immutable_packet.original_packet())
+        self.forwardable_packets.iter()
     }
 
     pub fn len(&self) -> usize {
@@ -115,7 +111,7 @@ impl ForwardPacketBatchesByAccounts {
     pub fn try_add_packet(
         &mut self,
         sanitized_transaction: &SanitizedTransaction,
-        immutable_packet: Arc<ImmutableDeserializedPacket>,
+        packet: &Packet,
         feature_set: &FeatureSet,
     ) -> bool {
         let tx_cost = CostModel::calculate_cost(sanitized_transaction, feature_set);
@@ -124,7 +120,7 @@ impl ForwardPacketBatchesByAccounts {
             let batch_index = self.get_batch_index_by_updated_costs(&updated_costs);
 
             if let Some(forward_batch) = self.forward_batches.get_mut(batch_index) {
-                forward_batch.forwardable_packets.push(immutable_packet);
+                forward_batch.forwardable_packets.push(packet.clone());
             } else {
                 // A successfully added tx_cost means it does not exceed block limit, nor vote
                 // limit, nor account limit. batch_index calculated as quotient from division
@@ -230,7 +226,10 @@ mod tests {
         {
             assert!(forward_packet_batches_by_accounts.try_add_packet(
                 &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
+                packet_high_priority
+                    .immutable_section()
+                    .clone()
+                    .original_packet(),
                 &FeatureSet::all_enabled(),
             ));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
@@ -244,7 +243,10 @@ mod tests {
         {
             assert!(forward_packet_batches_by_accounts.try_add_packet(
                 &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
+                packet_high_priority
+                    .immutable_section()
+                    .clone()
+                    .original_packet(),
                 &FeatureSet::all_enabled(),
             ));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
@@ -257,7 +259,10 @@ mod tests {
         {
             assert!(!forward_packet_batches_by_accounts.try_add_packet(
                 &tx_high_priority,
-                packet_high_priority.immutable_section().clone(),
+                packet_high_priority
+                    .immutable_section()
+                    .clone()
+                    .original_packet(),
                 &FeatureSet::all_enabled(),
             ));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
@@ -271,7 +276,10 @@ mod tests {
         {
             assert!(forward_packet_batches_by_accounts.try_add_packet(
                 &tx_low_priority,
-                packet_low_priority.immutable_section().clone(),
+                packet_low_priority
+                    .immutable_section()
+                    .clone()
+                    .original_packet(),
                 &FeatureSet::all_enabled(),
             ));
             let mut batches = forward_packet_batches_by_accounts.iter_batches();
@@ -300,7 +308,7 @@ mod tests {
         {
             assert!(forward_packet_batches_by_accounts.try_add_packet(
                 &tx,
-                packet.immutable_section().clone(),
+                packet.immutable_section().clone().original_packet(),
                 &FeatureSet::all_enabled()
             ));
 
@@ -312,7 +320,7 @@ mod tests {
         {
             assert!(!forward_packet_batches_by_accounts.try_add_packet(
                 &tx,
-                packet.immutable_section().clone(),
+                packet.immutable_section().clone().original_packet(),
                 &FeatureSet::all_enabled()
             ));
 
@@ -328,7 +336,7 @@ mod tests {
 
             assert!(forward_packet_batches_by_accounts.try_add_packet(
                 &tx2,
-                packet2.immutable_section().clone(),
+                packet2.immutable_section().clone().original_packet(),
                 &FeatureSet::all_enabled()
             ));
 

@@ -12,10 +12,7 @@ use {
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         consensus::{tower_storage::TowerStorage, Tower},
-        proxy::{
-            block_engine_stage::{BlockEngineConfig, BlockEngineStage},
-            relayer_stage::{RelayerConfig, RelayerStage},
-        },
+        proxy::block_engine_stage::{BlockEngineConfig, BlockEngineStage},
         repair::repair_service,
         validator::ValidatorStartProgress,
     },
@@ -255,16 +252,6 @@ pub trait AdminRpc {
         meta: Self::Metadata,
         block_engine_url: String,
         trust_packets: bool,
-    ) -> Result<()>;
-
-    #[rpc(meta, name = "setRelayerConfig")]
-    fn set_relayer_config(
-        &self,
-        meta: Self::Metadata,
-        relayer_url: String,
-        trust_packets: bool,
-        expected_heartbeat_interval_ms: u64,
-        max_failed_heartbeats: u64,
     ) -> Result<()>;
 
     #[rpc(meta, name = "setShredReceiverAddress")]
@@ -535,37 +522,6 @@ impl AdminRpc for AdminRpcImpl {
         })?;
 
         AdminRpcImpl::set_identity_keypair(meta, identity_keypair, require_tower)
-    }
-
-    fn set_relayer_config(
-        &self,
-        meta: Self::Metadata,
-        relayer_url: String,
-        trust_packets: bool,
-        expected_heartbeat_interval_ms: u64,
-        max_failed_heartbeats: u64,
-    ) -> Result<()> {
-        debug!("set_relayer_config request received");
-        let expected_heartbeat_interval = Duration::from_millis(expected_heartbeat_interval_ms);
-        let oldest_allowed_heartbeat =
-            Duration::from_millis(max_failed_heartbeats * expected_heartbeat_interval_ms);
-        let config = RelayerConfig {
-            relayer_url,
-            expected_heartbeat_interval,
-            oldest_allowed_heartbeat,
-            trust_packets,
-        };
-        // Detailed log messages are printed inside validate function
-        if RelayerStage::is_valid_relayer_config(&config) {
-            meta.with_post_init(|post_init| {
-                *post_init.relayer_config.lock().unwrap() = config;
-                Ok(())
-            })
-        } else {
-            Err(jsonrpc_core::error::Error::invalid_params(
-                "failed to set relayer config. see logs for details.",
-            ))
-        }
     }
 
     fn set_shred_receiver_address(&self, meta: Self::Metadata, addr: String) -> Result<()> {
@@ -1061,7 +1017,6 @@ mod tests {
             let start_progress = Arc::new(RwLock::new(ValidatorStartProgress::default()));
             let repair_whitelist = Arc::new(RwLock::new(HashSet::new()));
             let block_engine_config = Arc::new(Mutex::new(BlockEngineConfig::default()));
-            let relayer_config = Arc::new(Mutex::new(RelayerConfig::default()));
             let shred_receiver_address = Arc::new(RwLock::new(None));
             let shred_retransmit_receiver_address = Arc::new(RwLock::new(None));
             let meta = AdminRpcRequestMetadata {
@@ -1085,7 +1040,6 @@ mod tests {
                         solana_core::cluster_slots_service::cluster_slots::ClusterSlots::default(),
                     ),
                     block_engine_config,
-                    relayer_config,
                     shred_receiver_address,
                     shred_retransmit_receiver_address,
                 }))),

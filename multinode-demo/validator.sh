@@ -88,9 +88,6 @@ while [[ -n $1 ]]; do
     elif [[ $1 == --block-engine-url ]]; then
       args+=("$1" "$2")
       shift 2
-    elif [[ $1 == --relayer-url ]]; then
-      args+=("$1" "$2")
-      shift 2
     elif [[ $1 = --merkle-root-upload-authority ]]; then
       args+=("$1" "$2")
       shift 2
@@ -212,9 +209,6 @@ while [[ -n $1 ]]; do
     elif [[ $1 == --geyser-plugin-config ]]; then
       args+=("$1" "$2")
       shift 2
-    elif [[ $1 == --trust-relayer-packets ]]; then
-      args+=("$1")
-      shift
     elif [[ $1 == --rpc-threads ]]; then
       args+=("$1" "$2")
       shift 2

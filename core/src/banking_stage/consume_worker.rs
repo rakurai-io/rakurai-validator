@@ -176,7 +176,8 @@ fn try_drain_iter<T>(work: T, receiver: &Receiver<T>) -> impl Iterator<Item = T>
 /// These are atomic, and intended to be reported by the scheduling thread
 /// since the consume worker thread is sleeping unless there is work to be
 /// done.
-pub(crate) struct ConsumeWorkerMetrics {
+#[repr(C)]
+pub struct ConsumeWorkerMetrics {
     id: String,
     has_data: AtomicBool,
     slot: AtomicU64,

@@ -1,7 +1,7 @@
 use {
     crate::{
         cluster_slots_service::cluster_slots::ClusterSlots,
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::block_engine_stage::BlockEngineConfig,
         repair::{outstanding_requests::OutstandingRequests, serve_repair::ShredRepairType},
     },
     solana_gossip::cluster_info::ClusterInfo,
@@ -25,7 +25,6 @@ pub struct AdminRpcRequestMetadataPostInit {
     pub outstanding_repair_requests: Arc<RwLock<OutstandingRequests<ShredRepairType>>>,
     pub cluster_slots: Arc<ClusterSlots>,
     pub block_engine_config: Arc<Mutex<BlockEngineConfig>>,
-    pub relayer_config: Arc<Mutex<RelayerConfig>>,
     pub shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
     pub shred_retransmit_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
 }

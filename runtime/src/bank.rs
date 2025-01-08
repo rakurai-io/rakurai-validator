@@ -228,7 +228,7 @@ mod address_lookup_table;
 pub mod bank_hash_details;
 mod builtin_programs;
 pub mod builtins;
-mod check_transactions;
+pub mod check_transactions;
 pub mod epoch_accounts_hash_utils;
 mod fee_distribution;
 mod metrics;
@@ -293,6 +293,15 @@ impl CollectorFeeDetails {
         self.priority_fee = self
             .priority_fee
             .saturating_add(fee_details.prioritization_fee());
+    }
+
+    pub(crate) fn total_block_rewards(&self, fee_rate_governor: FeeRateGovernor) -> u64 {
+        let (deposit, _burn) = if self.transaction_fee != 0 {
+            fee_rate_governor.burn(self.transaction_fee)
+        } else {
+            (0, 0)
+        };
+        deposit.saturating_add(self.priority_fee)
     }
 
     pub(crate) fn total(&self) -> u64 {
@@ -756,6 +765,7 @@ struct HashOverride {
 
 /// Manager for the state of all accounts and programs after processing its entries.
 #[derive(Debug)]
+#[repr(C)]
 pub struct Bank {
     /// References to accounts, parent and signature status
     pub rc: BankRc,
@@ -764,7 +774,7 @@ pub struct Bank {
     pub status_cache: Arc<RwLock<BankStatusCache>>,
 
     /// FIFO queue of `recent_blockhash` items
-    blockhash_queue: RwLock<BlockhashQueue>,
+    pub blockhash_queue: RwLock<BlockhashQueue>,
 
     /// The set of parents including this bank
     pub ancestors: Ancestors,
@@ -5623,7 +5633,8 @@ impl Bank {
             ("accounts_delta_hash_us", accounts_delta_hash_us, i64),
         );
         info!(
-            "bank frozen: {slot} hash: {hash} accounts_delta: {} signature_count: {} last_blockhash: {} capitalization: {}{}, stats: {bank_hash_stats:?}{}",
+            "bank frozen: {slot}, block_rewards: {}, hash: {hash} accounts_delta: {} signature_count: {} last_blockhash: {} capitalization: {}{}, stats: {bank_hash_stats:?}{}",
+            self.collector_fee_details.read().unwrap().total_block_rewards(self.fee_rate_governor.clone()),
             accounts_delta_hash.0,
             self.signature_count(),
             self.last_blockhash(),

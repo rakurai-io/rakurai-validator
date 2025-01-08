@@ -489,6 +489,7 @@ impl BlockEngineStage {
             .bundles
             .into_iter()
             .filter_map(|bundle| {
+                info!("Blcok Engine Bundle Received, ID: {:?}", bundle.uuid);
                 Some(PacketBundle {
                     batch: PacketBatch::new(
                         bundle
@@ -502,6 +503,7 @@ impl BlockEngineStage {
                 })
             })
             .collect();
+        info!("Blcok Engine Bundle Received: {:?}", bundles.len());
 
         saturating_add_assign!(block_engine_stats.num_bundles, bundles.len() as u64);
         saturating_add_assign!(
@@ -537,7 +539,7 @@ impl BlockEngineStage {
             );
 
             saturating_add_assign!(block_engine_stats.num_packets, packet_batch.len() as u64);
-
+            info!("Blcok Engine Packets Received {:?}", packet_batch.len());
             if trust_packets {
                 banking_packet_sender
                     .send(Arc::new((vec![packet_batch], None)))

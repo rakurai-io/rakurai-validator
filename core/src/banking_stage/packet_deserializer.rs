@@ -26,9 +26,10 @@ pub struct ReceivePacketResults {
     pub packet_stats: PacketReceiverStats,
 }
 
+#[repr(C)]
 pub struct PacketDeserializer {
     /// Receiver for packet batches from sigverify stage
-    packet_batch_receiver: BankingPacketReceiver,
+    pub packet_batch_receiver: BankingPacketReceiver,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -188,7 +189,7 @@ impl PacketDeserializer {
         Ok((num_packets_received, messages))
     }
 
-    fn generate_packet_indexes(packet_batch: &PacketBatch) -> Vec<usize> {
+    pub fn generate_packet_indexes(packet_batch: &PacketBatch) -> Vec<usize> {
         packet_batch
             .iter()
             .enumerate()

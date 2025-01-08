@@ -53,6 +53,7 @@ impl MaxAge {
 
 /// Message: [Scheduler -> Worker]
 /// Transactions to be consumed (i.e. executed, recorded, and committed)
+#[repr(C)]
 pub struct ConsumeWork {
     pub batch_id: TransactionBatchId,
     pub ids: Vec<TransactionId>,
@@ -62,6 +63,7 @@ pub struct ConsumeWork {
 
 /// Message: [Worker -> Scheduler]
 /// Processed transactions.
+#[repr(C)]
 pub struct FinishedConsumeWork {
     pub work: ConsumeWork,
     pub retryable_indexes: Vec<usize>,

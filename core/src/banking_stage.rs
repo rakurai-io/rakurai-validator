@@ -18,7 +18,9 @@ use {
     crate::{
         banking_stage::{
             consume_worker::ConsumeWorker,
+            consume_worker::ConsumeWorkerMetrics,
             packet_deserializer::PacketDeserializer,
+            scheduler_messages::{ConsumeWork, FinishedConsumeWork},
             transaction_scheduler::{
                 prio_graph_scheduler::PrioGraphScheduler,
                 scheduler_controller::SchedulerController, scheduler_error::SchedulerError,
@@ -43,6 +45,7 @@ use {
     },
     solana_sdk::{pubkey::Pubkey, timing::AtomicInterval},
     std::{
+        any::Any,
         cmp,
         collections::HashSet,
         env,
@@ -65,30 +68,54 @@ pub mod qos_service;
 pub mod unprocessed_packet_batches;
 pub mod unprocessed_transaction_storage;
 
-mod consume_worker;
-pub(crate) mod decision_maker;
+pub mod consume_worker;
+pub mod decision_maker;
 mod forward_packet_batches_by_accounts;
-pub(crate) mod immutable_deserialized_packet;
+pub mod immutable_deserialized_packet;
 mod latest_unprocessed_votes;
 pub(crate) mod leader_slot_timing_metrics;
 mod multi_iterator_scanner;
-mod packet_deserializer;
-pub(crate) mod packet_filter;
+pub mod packet_deserializer;
+pub mod packet_filter;
 mod packet_receiver;
-mod read_write_account_set;
-mod scheduler_messages;
-mod transaction_scheduler;
+pub mod read_write_account_set;
+#[allow(dead_code)]
+pub mod scheduler_messages;
+pub mod transaction_scheduler;
 
 // Fixed thread size seems to be fastest on GCP setup
 pub const NUM_THREADS: u32 = 6;
 
-const TOTAL_BUFFERED_PACKETS: usize = 100_000;
+const TOTAL_BUFFERED_PACKETS: usize = 700_000;
 
 const NUM_VOTE_PROCESSING_THREADS: u32 = 2;
 const MIN_THREADS_BANKING: u32 = 1;
 const MIN_TOTAL_THREADS: u32 = NUM_VOTE_PROCESSING_THREADS + MIN_THREADS_BANKING;
 
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
+
+#[cfg(feature = "build_validator")]
+extern "C" {
+    #[allow(improper_ctypes)]
+    fn run_rakurai_scheduler(
+        work_senders: Vec<Sender<ConsumeWork>>,
+        finished_work_receiver: Receiver<FinishedConsumeWork>,
+        decision_maker: DecisionMaker,
+        packet_deserializer: PacketDeserializer,
+        bank_forks: Arc<RwLock<BankForks>>,
+        worker_metrics: Vec<Arc<ConsumeWorkerMetrics>>,
+        forwarder: Option<Forwarder<Arc<ClusterInfo>>>,
+    ) -> Result<(), SchedulerError>;
+}
+
+fn to_arc_cluster_info(cluster_info: &impl LikeClusterInfo) -> Option<Arc<ClusterInfo>> {
+    // Attempt to downcast to Arc<ClusterInfo>
+    if let Some(arc_cluster_info) = (cluster_info as &dyn Any).downcast_ref::<Arc<ClusterInfo>>() {
+        Some(arc_cluster_info.clone())
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct BankingStageStats {
@@ -571,8 +598,8 @@ impl BankingStage {
         );
         let transaction_recorder = poh_recorder.read().unwrap().new_recorder();
 
-        // + 1 for the central scheduler thread
-        let mut bank_thread_hdls = Vec::with_capacity(num_threads as usize + 1);
+        // + 2 for the central scheduler threads
+        let mut bank_thread_hdls = Vec::with_capacity(num_threads as usize + 2);
 
         // Spawn legacy voting threads first: 1 gossip, 1 tpu
         for (id, packet_receiver, vote_source) in [
@@ -638,39 +665,73 @@ impl BankingStage {
             )
         }
 
+        let arc_cluster_info = to_arc_cluster_info(cluster_info);
+
         let forwarder = enable_forwarding.then(|| {
             Forwarder::new(
                 poh_recorder.clone(),
                 bank_forks.clone(),
-                cluster_info.clone(),
+                arc_cluster_info.unwrap().clone(),
                 connection_cache.clone(),
                 data_budget.clone(),
             )
         });
+        let packet_deserializer = PacketDeserializer::new(non_vote_receiver);
+        #[cfg(feature = "build_validator")]
+        {
+            info!("running rakurai scheduler");
+            // Spawn the central rakurai scheduler thread
+            bank_thread_hdls.push({
+                unsafe {
+                    Builder::new()
+                        .name("solBnkTxSched".to_string())
+                        .spawn(move || {
+                            match run_rakurai_scheduler(
+                                work_senders,
+                                finished_work_receiver,
+                                decision_maker,
+                                packet_deserializer,
+                                bank_forks,
+                                worker_metrics,
+                                forwarder,
+                            ) {
+                                Ok(_) => {}
+                                Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                                Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                                    warn!("Unexpected worker disconnect from scheduler")
+                                }
+                            }
+                        })
+                        .unwrap()
+                }
+            });
+        }
 
-        // Spawn the central scheduler thread
-        bank_thread_hdls.push({
-            let packet_deserializer = PacketDeserializer::new(non_vote_receiver);
-            let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
-            let scheduler_controller = SchedulerController::new(
-                decision_maker.clone(),
-                packet_deserializer,
-                bank_forks,
-                scheduler,
-                worker_metrics,
-                forwarder,
-            );
-            Builder::new()
-                .name("solBnkTxSched".to_string())
-                .spawn(move || match scheduler_controller.run() {
-                    Ok(_) => {}
-                    Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
-                    Err(SchedulerError::DisconnectedSendChannel(_)) => {
-                        warn!("Unexpected worker disconnect from scheduler")
-                    }
-                })
-                .unwrap()
-        });
+        #[cfg(not(feature = "build_validator"))]
+        {
+            // Spawn the central scheduler thread
+            bank_thread_hdls.push({
+                let scheduler = PrioGraphScheduler::new(work_senders, finished_work_receiver);
+                let scheduler_controller = SchedulerController::new(
+                    decision_maker.clone(),
+                    packet_deserializer,
+                    bank_forks,
+                    scheduler,
+                    worker_metrics,
+                    forwarder,
+                );
+                Builder::new()
+                    .name("solBnkTxSched".to_string())
+                    .spawn(move || match scheduler_controller.run() {
+                        Ok(_) => {}
+                        Err(SchedulerError::DisconnectedRecvChannel(_)) => {}
+                        Err(SchedulerError::DisconnectedSendChannel(_)) => {
+                            warn!("Unexpected worker disconnect from scheduler")
+                        }
+                    })
+                    .unwrap()
+            });
+        }
 
         Self { bank_thread_hdls }
     }

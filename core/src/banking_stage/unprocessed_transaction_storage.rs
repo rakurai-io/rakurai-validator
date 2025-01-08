@@ -985,7 +985,7 @@ impl ThreadLocalUnprocessedPackets {
                 packets_to_process[forwardable_packet_index].clone();
             if !forward_buffer.try_add_packet(
                 sanitized_transaction,
-                immutable_deserialized_packet,
+                &immutable_deserialized_packet.original_packet,
                 feature_set,
             ) {
                 break;

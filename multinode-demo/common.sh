@@ -63,7 +63,7 @@ else
       )
     fi
 
-    printf "cargo $CARGO_TOOLCHAIN run $maybe_release  --bin %s %s -- " "$program"
+    printf "cargo $CARGO_TOOLCHAIN run $maybe_release --features build_validator --bin %s %s -- " "$program"
   }
 fi
 

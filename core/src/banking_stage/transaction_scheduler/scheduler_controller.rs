@@ -46,7 +46,7 @@ use {
 };
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
-pub(crate) struct SchedulerController<T: LikeClusterInfo> {
+pub struct SchedulerController<T: LikeClusterInfo> {
     /// Decision maker for determining what should be done with transactions.
     decision_maker: DecisionMaker,
     /// Packet/Transaction ingress.
@@ -73,6 +73,7 @@ pub(crate) struct SchedulerController<T: LikeClusterInfo> {
     forwarder: Option<Forwarder<T>>,
 }
 
+#[allow(private_interfaces)]
 impl<T: LikeClusterInfo> SchedulerController<T> {
     pub fn new(
         decision_maker: DecisionMaker,
@@ -304,7 +305,7 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
                 if state.should_forward()
                     && forwarder.try_add_packet(
                         sanitized_transaction,
-                        immutable_packet,
+                        &immutable_packet,
                         feature_set,
                     )
                 {
@@ -436,7 +437,7 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
         Ok(())
     }
 
-    /// Returns whether the packet receiver is still connected.
+    /// Returns whether the packet receiver is stireceive_and_buffer_packetsll connected.
     fn receive_and_buffer_packets(&mut self, decision: &BufferedPacketsDecision) -> bool {
         const MAX_RECEIVE_PACKETS: usize = 5_000;
 
@@ -600,8 +601,8 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
 
                 if self.container.insert_new_transaction(
                     transaction_id,
-                    transaction_ttl,
-                    packet,
+                    &transaction_ttl,
+                    &packet.original_packet,
                     priority,
                     cost,
                 ) {
@@ -657,7 +658,7 @@ impl<T: LikeClusterInfo> SchedulerController<T> {
     /// from user input. They should never be zero.
     /// Any difference in the prioritization is negligible for
     /// the current transaction costs.
-    fn calculate_priority_and_cost(
+    pub fn calculate_priority_and_cost(
         transaction: &SanitizedTransaction,
         fee_budget_limits: &FeeBudgetLimits,
         bank: &Bank,

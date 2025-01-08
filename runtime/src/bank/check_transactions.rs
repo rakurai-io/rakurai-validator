@@ -101,7 +101,7 @@ impl Bank {
             .collect()
     }
 
-    fn check_transaction_age(
+    pub fn check_transaction_age(
         &self,
         tx: &SanitizedTransaction,
         max_age: usize,

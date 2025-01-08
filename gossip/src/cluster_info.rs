@@ -163,6 +163,7 @@ pub enum ClusterInfoError {
     TooManyIncrementalSnapshotHashes,
 }
 
+#[repr(C)]
 pub struct ClusterInfo {
     /// The network
     pub gossip: CrdsGossip,

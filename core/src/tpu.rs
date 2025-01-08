@@ -12,11 +12,7 @@ use {
             VerifiedVoteSender, VoteTracker,
         },
         fetch_stage::FetchStage,
-        proxy::{
-            block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
-            fetch_stage_manager::FetchStageManager,
-            relayer_stage::{RelayerConfig, RelayerStage},
-        },
+        proxy::block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
         sigverify::TransactionSigVerifier,
         sigverify_stage::SigVerifyStage,
         staked_nodes_updater_service::StakedNodesUpdaterService,
@@ -90,9 +86,7 @@ pub struct Tpu {
     tpu_entry_notifier: Option<TpuEntryNotifier>,
     staked_nodes_updater_service: StakedNodesUpdaterService,
     tracer_thread_hdl: TracerThread,
-    relayer_stage: RelayerStage,
     block_engine_stage: BlockEngineStage,
-    fetch_stage_manager: FetchStageManager,
     bundle_stage: BundleStage,
 }
 
@@ -135,7 +129,6 @@ impl Tpu {
         enable_block_production_forwarding: bool,
         _generator_config: Option<GeneratorConfig>, /* vestigial code for replay invalidator */
         block_engine_config: Arc<Mutex<BlockEngineConfig>>,
-        relayer_config: Arc<Mutex<RelayerConfig>>,
         tip_manager_config: TipManagerConfig,
         shred_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
         preallocated_bundle_cost: u64,
@@ -149,10 +142,7 @@ impl Tpu {
             transactions_forwards_quic: transactions_forwards_quic_sockets,
         } = sockets;
 
-        // Packets from fetch stage and quic server are intercepted and sent through fetch_stage_manager
-        // If relayer is connected, packets are dropped. If not, packets are forwarded on to packet_sender
-        let (packet_intercept_sender, packet_intercept_receiver) = unbounded();
-
+        let (packet_sender, packet_receiver) = unbounded();
         let (vote_packet_sender, vote_packet_receiver) = unbounded();
         let (forwarded_packet_sender, forwarded_packet_receiver) = unbounded();
         let fetch_stage = FetchStage::new_with_sender(
@@ -160,7 +150,7 @@ impl Tpu {
             tpu_forwards_sockets,
             tpu_vote_sockets,
             exit.clone(),
-            &packet_intercept_sender,
+            &packet_sender.clone(),
             &vote_packet_sender,
             &forwarded_packet_sender,
             forwarded_packet_receiver,
@@ -188,7 +178,7 @@ impl Tpu {
             "quic_streamer_tpu",
             transactions_quic_sockets,
             keypair,
-            packet_intercept_sender,
+            packet_sender.clone(),
             exit.clone(),
             MAX_QUIC_CONNECTIONS_PER_PEER,
             staked_nodes.clone(),
@@ -222,8 +212,6 @@ impl Tpu {
             tpu_coalesce,
         )
         .unwrap();
-
-        let (packet_sender, packet_receiver) = unbounded();
 
         let sigverify_stage = {
             let verifier = TransactionSigVerifier::new(non_vote_sender.clone());
@@ -259,24 +247,6 @@ impl Tpu {
             non_vote_sender.clone(),
             exit.clone(),
             &block_builder_fee_info,
-        );
-
-        let (heartbeat_tx, heartbeat_rx) = unbounded();
-        let fetch_stage_manager = FetchStageManager::new(
-            cluster_info.clone(),
-            heartbeat_rx,
-            packet_intercept_receiver,
-            packet_sender.clone(),
-            exit.clone(),
-        );
-
-        let relayer_stage = RelayerStage::new(
-            relayer_config,
-            cluster_info.clone(),
-            heartbeat_tx,
-            packet_sender,
-            non_vote_sender,
-            exit.clone(),
         );
 
         let cluster_info_vote_listener = ClusterInfoVoteListener::new(
@@ -375,8 +345,6 @@ impl Tpu {
                 staked_nodes_updater_service,
                 tracer_thread_hdl,
                 block_engine_stage,
-                relayer_stage,
-                fetch_stage_manager,
                 bundle_stage,
             },
             vec![key_updater, forwards_key_updater],
@@ -394,9 +362,7 @@ impl Tpu {
             self.tpu_quic_t.join(),
             self.tpu_forwards_quic_t.join(),
             self.bundle_stage.join(),
-            self.relayer_stage.join(),
             self.block_engine_stage.join(),
-            self.fetch_stage_manager.join(),
         ];
         let broadcast_result = self.broadcast_stage.join();
         for result in results {

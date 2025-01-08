@@ -137,9 +137,11 @@ test-case = { workspace = true }
 sysctl = { workspace = true }
 
 [build-dependencies]
+rustc_version = "0.4"
 tonic-build = { workspace = true }
 
 [features]
+build_validator = []
 dev-context-only-utils = ["solana-runtime/dev-context-only-utils"]
 frozen-abi = [
     "dep:solana-frozen-abi",

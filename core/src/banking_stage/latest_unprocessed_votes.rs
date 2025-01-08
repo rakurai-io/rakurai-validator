@@ -432,7 +432,7 @@ impl LatestUnprocessedVotes {
 
             let forwarding_successful = forward_packet_batches_by_accounts.try_add_packet(
                 &sanitized_vote_transaction,
-                deserialized_vote_packet,
+                &deserialized_vote_packet.original_packet,
                 &bank.feature_set,
             );
 

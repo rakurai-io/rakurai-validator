@@ -18,6 +18,22 @@ pub enum BufferedPacketsDecision {
     Hold,
 }
 
+impl PartialEq for BufferedPacketsDecision {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (BufferedPacketsDecision::Consume(bank1), BufferedPacketsDecision::Consume(bank2)) => {
+                bank1.working_bank.slot() == bank2.working_bank.slot()
+            }
+            (BufferedPacketsDecision::Forward, BufferedPacketsDecision::Forward) => true,
+            (BufferedPacketsDecision::ForwardAndHold, BufferedPacketsDecision::ForwardAndHold) => {
+                true
+            }
+            (BufferedPacketsDecision::Hold, BufferedPacketsDecision::Hold) => true,
+            _ => false,
+        }
+    }
+}
+
 impl BufferedPacketsDecision {
     /// Returns the `BankStart` if the decision is `Consume`. Otherwise, returns `None`.
     pub fn bank_start(&self) -> Option<&BankStart> {
@@ -29,6 +45,7 @@ impl BufferedPacketsDecision {
 }
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct DecisionMaker {
     my_pubkey: Pubkey,
     poh_recorder: Arc<RwLock<PohRecorder>>,
@@ -42,7 +59,7 @@ impl DecisionMaker {
         }
     }
 
-    pub(crate) fn make_consume_or_forward_decision(&self) -> BufferedPacketsDecision {
+    pub fn make_consume_or_forward_decision(&self) -> BufferedPacketsDecision {
         let decision;
         {
             let poh_recorder = self.poh_recorder.read().unwrap();

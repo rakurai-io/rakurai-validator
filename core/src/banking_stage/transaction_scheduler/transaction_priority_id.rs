@@ -6,9 +6,9 @@ use {
 
 /// A unique identifier tied with priority ordering for a transaction/packet:
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct TransactionPriorityId {
-    pub(crate) priority: u64,
-    pub(crate) id: TransactionId,
+pub struct TransactionPriorityId {
+    pub priority: u64,
+    pub id: TransactionId,
 }
 
 impl TransactionPriorityId {

@@ -49,12 +49,12 @@ lazy_static::lazy_static! {
 
 #[derive(Debug, Eq)]
 pub struct ImmutableDeserializedPacket {
-    original_packet: Packet,
-    transaction: SanitizedVersionedTransaction,
-    message_hash: Hash,
-    is_simple_vote: bool,
-    compute_unit_price: u64,
-    compute_unit_limit: u32,
+    pub original_packet: Packet,
+    pub transaction: SanitizedVersionedTransaction,
+    pub message_hash: Hash,
+    pub is_simple_vote: bool,
+    pub compute_unit_price: u64,
+    pub compute_unit_limit: u32,
 }
 
 impl ImmutableDeserializedPacket {
@@ -147,7 +147,7 @@ impl ImmutableDeserializedPacket {
         Some((tx, deactivation_slot))
     }
 
-    fn resolve_addresses_with_deactivation(
+    pub fn resolve_addresses_with_deactivation(
         transaction: &SanitizedVersionedTransaction,
         bank: &Bank,
     ) -> Result<(LoadedAddresses, Slot), AddressLoaderError> {
@@ -184,7 +184,7 @@ impl Ord for ImmutableDeserializedPacket {
 }
 
 /// Read the transaction message from packet data
-fn packet_message(packet: &Packet) -> Result<&[u8], DeserializedPacketError> {
+pub fn packet_message(packet: &Packet) -> Result<&[u8], DeserializedPacketError> {
     let (sig_len, sig_size) = packet
         .data(..)
         .and_then(|bytes| decode_shortu16_len(bytes).ok())

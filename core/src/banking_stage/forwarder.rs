@@ -3,12 +3,9 @@ use {
         forward_packet_batches_by_accounts::ForwardPacketBatchesByAccounts,
         leader_slot_metrics::LeaderSlotMetricsTracker,
         unprocessed_transaction_storage::UnprocessedTransactionStorage, BankingStageStats,
-        ForwardOption,
+        ForwardOption, LikeClusterInfo,
     },
     crate::{
-        banking_stage::{
-            immutable_deserialized_packet::ImmutableDeserializedPacket, LikeClusterInfo,
-        },
         next_leader::{next_leader, next_leader_tpu_vote},
         tracer_packet_stats::TracerPacketStats,
     },
@@ -65,12 +62,12 @@ impl<T: LikeClusterInfo> Forwarder<T> {
     pub fn try_add_packet(
         &mut self,
         sanitized_transaction: &SanitizedTransaction,
-        immutable_packet: Arc<ImmutableDeserializedPacket>,
+        packet: &Packet,
         feature_set: &FeatureSet,
     ) -> bool {
         self.forward_packet_batches_by_accounts.try_add_packet(
             sanitized_transaction,
-            immutable_packet,
+            packet,
             feature_set,
         )
     }

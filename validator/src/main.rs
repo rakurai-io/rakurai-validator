@@ -33,7 +33,7 @@ use {
     solana_core::{
         banking_trace::DISABLED_BAKING_TRACE_DIR,
         consensus::tower_storage,
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::block_engine_stage::BlockEngineConfig,
         system_monitor_service::SystemMonitorService,
         tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
         tpu::DEFAULT_TPU_COALESCE,
@@ -497,32 +497,6 @@ pub fn main() {
                 })
                 .unwrap_or_else(|err| {
                     println!("set block engine config failed: {}", err);
-                    exit(1);
-                });
-            return;
-        }
-        ("set-relayer-config", Some(subcommand_matches)) => {
-            let relayer_url = value_t_or_exit!(subcommand_matches, "relayer_url", String);
-            let trust_packets = subcommand_matches.is_present("trust_relayer_packets");
-            let expected_heartbeat_interval_ms: u64 =
-                value_of(subcommand_matches, "relayer_expected_heartbeat_interval_ms").unwrap();
-            let max_failed_heartbeats: u64 =
-                value_of(subcommand_matches, "relayer_max_failed_heartbeats").unwrap();
-            let admin_client = admin_rpc_service::connect(&ledger_path);
-            admin_rpc_service::runtime()
-                .block_on(async move {
-                    admin_client
-                        .await?
-                        .set_relayer_config(
-                            relayer_url,
-                            trust_packets,
-                            expected_heartbeat_interval_ms,
-                            max_failed_heartbeats,
-                        )
-                        .await
-                })
-                .unwrap_or_else(|err| {
-                    println!("set relayer config failed: {}", err);
                     exit(1);
                 });
             return;
@@ -1583,32 +1557,6 @@ pub fn main() {
         trust_packets: matches.is_present("trust_block_engine_packets"),
     };
 
-    // Defaults are set in cli definition, safe to use unwrap() here
-    let expected_heartbeat_interval_ms: u64 =
-        value_of(&matches, "relayer_expected_heartbeat_interval_ms").unwrap();
-    assert!(
-        expected_heartbeat_interval_ms > 0,
-        "relayer-max-failed-heartbeats must be greater than zero"
-    );
-    let max_failed_heartbeats: u64 = value_of(&matches, "relayer_max_failed_heartbeats").unwrap();
-    assert!(
-        max_failed_heartbeats > 0,
-        "relayer-max-failed-heartbeats must be greater than zero"
-    );
-
-    let relayer_config = RelayerConfig {
-        relayer_url: if matches.is_present("relayer_url") {
-            value_of(&matches, "relayer_url").expect("couldn't parse relayer_url")
-        } else {
-            "".to_string()
-        },
-        expected_heartbeat_interval: Duration::from_millis(expected_heartbeat_interval_ms),
-        oldest_allowed_heartbeat: Duration::from_millis(
-            max_failed_heartbeats * expected_heartbeat_interval_ms,
-        ),
-        trust_packets: matches.is_present("trust_relayer_packets"),
-    };
-
     let mut validator_config = ValidatorConfig {
         require_tower: matches.is_present("require_tower"),
         tower_storage,
@@ -1740,7 +1688,6 @@ pub fn main() {
             log_messages_bytes_limit: value_of(&matches, "log_messages_bytes_limit"),
             ..RuntimeConfig::default()
         },
-        relayer_config: Arc::new(Mutex::new(relayer_config)),
         block_engine_config: Arc::new(Mutex::new(block_engine_config)),
         tip_manager_config,
         shred_receiver_address: Arc::new(RwLock::new(

@@ -190,21 +190,15 @@ impl BundleConsumer {
         // grabbing those locks so BundleStage can process as fast as possible.
         // A LockedBundle is similar to TransactionBatch; once its dropped the locks are released.
         #[allow(clippy::needless_collect)]
-        let (locked_bundle_results, locked_bundles_elapsed_us) = measure_us!(bundles
+        let mut total_locked_bundles_elapsed_us = 0;
+        let (execution_results, execute_locked_bundles_elapsed_us) = measure_us!(bundles
             .iter()
             .map(|(_, sanitized_bundle)| {
-                bundle_account_locker
-                    .prepare_locked_bundle(sanitized_bundle, &bank_start.working_bank)
-            })
-            .collect::<Vec<_>>());
-        bundle_stage_leader_metrics
-            .bundle_stage_metrics_tracker()
-            .increment_locked_bundle_elapsed_us(locked_bundles_elapsed_us);
-
-        let (execution_results, execute_locked_bundles_elapsed_us) =
-            measure_us!(locked_bundle_results
-                .into_iter()
-                .map(|r| match r {
+                let (locked_bundle_results, locked_bundles_elapsed_us) =
+                    measure_us!(bundle_account_locker
+                        .prepare_locked_bundle(sanitized_bundle, &bank_start.working_bank));
+                total_locked_bundles_elapsed_us += locked_bundles_elapsed_us;
+                match locked_bundle_results {
                     Ok(locked_bundle) => {
                         let (r, measure) = measure_us!(Self::process_bundle(
                             bundle_account_locker,
@@ -228,11 +222,15 @@ impl BundleConsumer {
                         r
                     }
                     Err(_) => {
+                        // Consider logging or including more detailed error information here.
                         Err(BundleExecutionError::LockError)
                     }
-                })
-                .collect::<Vec<_>>());
-
+                }
+            })
+            .collect::<Vec<_>>());
+        bundle_stage_leader_metrics
+            .bundle_stage_metrics_tracker()
+            .increment_locked_bundle_elapsed_us(total_locked_bundles_elapsed_us);
         bundle_stage_leader_metrics
             .bundle_stage_metrics_tracker()
             .increment_execute_locked_bundles_elapsed_us(execute_locked_bundles_elapsed_us);
