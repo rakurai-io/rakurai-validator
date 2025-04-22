@@ -174,7 +174,7 @@ impl PacketBatch {
             Self::Bytes(batch) => batch.get(index).map(PacketRef::from),
         }
     }
-
+    
     pub fn get_mut(&mut self, index: usize) -> Option<PacketRefMut<'_>> {
         match self {
             Self::Pinned(batch) => batch.get_mut(index).map(PacketRefMut::from),
@@ -611,7 +611,7 @@ impl IndexedParallelIterator for PacketBatchParIterMut<'_> {
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PinnedPacketBatch {
-    packets: PinnedVec<Packet>,
+    pub packets: PinnedVec<Packet>,
 }
 
 pub type PacketBatchRecycler = Recycler<PinnedVec<Packet>>;

@@ -5,7 +5,10 @@ use {
         qos_service::QosService,
         scheduler_messages::MaxAge,
     },
-    crate::bundle_stage::bundle_account_locker::BundleAccountLocker,
+    crate::{
+        banking_stage::house_keeper::{AggregatedTxError, TxOutputStatus},
+        bundle_stage::bundle_account_locker::BundleAccountLocker,
+    },
     itertools::Itertools,
     solana_accounts_db::contains::Contains,
     solana_clock::MAX_PROCESSING_AGE,
@@ -114,7 +117,7 @@ impl Consumer {
                 Err(err) => Err(err),
             })
             .collect();
-        let mut output = self.process_and_record_transactions_with_pre_results(
+        let (mut output, _) = self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
             check_results.into_iter(),
@@ -135,7 +138,10 @@ impl Consumer {
         txs: &[impl TransactionWithMeta],
         max_ages: &[MaxAge],
         reservation_cb: &impl Fn(&Bank) -> u64,
-    ) -> ProcessTransactionBatchOutput {
+    ) -> (
+        ProcessTransactionBatchOutput,
+        Option<(Vec<usize>, Vec<usize>)>,
+    ) {
         // Need to filter out transactions since they were sanitized earlier.
         // This means that the transaction may cross and epoch boundary (not allowed),
         //  or account lookup tables may have been closed.
@@ -176,7 +182,10 @@ impl Consumer {
         txs: &[impl TransactionWithMeta],
         pre_results: impl Iterator<Item = Result<(), TransactionError>>,
         reservation_cb: &impl Fn(&Bank) -> u64,
-    ) -> ProcessTransactionBatchOutput {
+    ) -> (
+        ProcessTransactionBatchOutput,
+        Option<(Vec<usize>, Vec<usize>)>,
+    ) {
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -186,6 +195,23 @@ impl Consumer {
             pre_results,
             reservation_cb
         ));
+
+        let mut cu_account_err_indexes = Vec::with_capacity(64);
+        let mut cu_block_err_indexes = Vec::with_capacity(64);
+
+        for (i, transaction_qos_cost_result) in transaction_qos_cost_results.iter().enumerate() {
+            if let Err(err) = transaction_qos_cost_result {
+                match err {
+                    TransactionError::WouldExceedMaxAccountCostLimit => {
+                        cu_account_err_indexes.push(i);
+                    }
+                    TransactionError::WouldExceedMaxBlockCostLimit => {
+                        cu_block_err_indexes.push(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -238,11 +264,14 @@ impl Consumer {
             txs.len(),
         );
 
-        ProcessTransactionBatchOutput {
-            cost_model_throttled_transactions_count,
-            cost_model_us,
-            execute_and_commit_transactions_output,
-        }
+        (
+            ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count,
+                cost_model_us,
+                execute_and_commit_transactions_output,
+            },
+            Some((cu_account_err_indexes, cu_block_err_indexes)),
+        )
     }
 
     fn execute_and_commit_transactions_locked(
@@ -392,6 +421,51 @@ impl Consumer {
                 |(index, processing_result)| processing_result.was_processed().then_some(index),
             ));
 
+            // -----------------------------------------------------------------------------
+            // TX Output Status Reporting
+            //
+            // This block sends the status of failed transactions to the HouseKeeper
+            // (or side-car/OMS) via `output_tx_signature_sender`. Only transactions
+            // that fail with non-retryable errors are reported. Retryable errors
+            // such as AccountInUse or exceeding cost limits are ignored.
+            //
+            // See the "tx_io_check_readme.md" for details on how these
+            // tx_out_signature messages are recorded and analyzed:
+            //   <repo-root>/tx_io_check_readme.md
+            //
+            // The reported TxOutputStatus includes the transaction signature and
+            // the aggregated error type. This enables end-to-end auditing of
+            // transaction processing, ensuring no silent failures are missed.
+            // -----------------------------------------------------------------------------
+            if let Some(output_tx_signature_sender) = &self.committer.output_tx_signature_sender {
+                let sanitized_transactions = batch.sanitized_transactions();
+
+                let _ = processing_results
+                    .iter()
+                    .zip(sanitized_transactions.iter())
+                    .for_each(|(processing_result, tx)| {
+                        if let Err(error) = processing_result {
+                            match error {
+                                TransactionError::AccountInUse
+                                | TransactionError::WouldExceedMaxBlockCostLimit
+                                | TransactionError::WouldExceedMaxVoteCostLimit
+                                | TransactionError::WouldExceedMaxAccountCostLimit
+                                | TransactionError::WouldExceedAccountDataBlockLimit => {
+                                    // do nothing for retries
+                                }
+                                _ => {
+                                    let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                                        signature: tx.signature().to_string(),
+                                        status: Err(AggregatedTxError::ConventionalErrorCode(
+                                            error.clone(),
+                                        )),
+                                    });
+                                }
+                            }
+                        }
+                    });
+            }
+
             // retryable indexes are expected to be sorted - in this case the
             // `extend` can cause that assumption to be violated.
             retryable_transaction_indexes.sort_unstable();
@@ -405,6 +479,57 @@ impl Consumer {
                 min_prioritization_fees,
                 max_prioritization_fees,
             };
+        }
+
+        // -----------------------------------------------------------------------------
+        // TX Output Status Reporting
+        //
+        // This block sends the status of failed transactions to the HouseKeeper
+        // (or side-car/OMS) via `output_tx_signature_sender`. Only transactions
+        // that fail with non-retryable errors are reported. Retryable errors
+        // such as AccountInUse or exceeding cost limits are ignored.
+        //
+        // See the "tx_io_check_readme.md" for details on how these
+        // tx_out_signature messages are recorded and analyzed:
+        //   <repo-root>/tx_io_check_readme.md
+        //
+        // The reported TxOutputStatus includes the transaction signature and
+        // the aggregated error type. This enables end-to-end auditing of
+        // transaction processing, ensuring no silent failures are missed.
+        // -----------------------------------------------------------------------------
+        if let Some(output_tx_signature_sender) = &self.committer.output_tx_signature_sender {
+            let sanitized_transactions = batch.sanitized_transactions();
+
+            let _ = processing_results
+                .iter()
+                .zip(sanitized_transactions.iter())
+                .for_each(|(processing_result, tx)| match processing_result {
+                    Ok(_) => {
+                        let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                            signature: tx.signature().to_string(),
+                            status: Ok(()),
+                        });
+                    }
+                    Err(error) => {
+                        match error {
+                            TransactionError::AccountInUse
+                            | TransactionError::WouldExceedMaxBlockCostLimit
+                            | TransactionError::WouldExceedMaxVoteCostLimit
+                            | TransactionError::WouldExceedMaxAccountCostLimit
+                            | TransactionError::WouldExceedAccountDataBlockLimit => {
+                                // do nothing for retries
+                            }
+                            _ => {
+                                let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                                    signature: tx.signature().to_string(),
+                                    status: Err(AggregatedTxError::ConventionalErrorCode(
+                                        error.clone(),
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                });
         }
 
         let (commit_time_us, commit_transaction_statuses) =

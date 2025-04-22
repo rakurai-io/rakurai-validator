@@ -1,6 +1,7 @@
 //! Control flow for BankingStage's transaction scheduler.
 //!
 
+use crate::banking_stage::{DecisionState, LeaderMetaData};
 use {
     super::{
         receive_and_buffer::{DisconnectedError, ReceiveAndBuffer},
@@ -18,12 +19,33 @@ use {
         transaction_scheduler::transaction_state_container::StateContainer,
         TOTAL_BUFFERED_PACKETS,
     },
+    solana_clock::MAX_PROCESSING_AGE,
     solana_measure::measure_us,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
-    solana_clock::MAX_PROCESSING_AGE,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
-    std::{num::Saturating, sync::{Arc, RwLock}},
+    std::{
+        num::Saturating,
+        sync::{Arc, RwLock},
+    },
 };
+
+#[cfg(feature = "build_validator")]
+extern "C" {
+    #[allow(improper_ctypes)]
+    fn check_state(
+        is_priority_queue_empty: bool,
+        decision_state: &DecisionState,
+        in_flight_txns: bool,
+        block_reception: &mut bool,
+        is_switching_point_detected: bool,
+    );
+}
+
+#[cfg(feature = "build_validator")]
+extern "C" {
+    #[allow(improper_ctypes)]
+    fn initial_check_state_for_standard();
+}
 
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
 pub(crate) struct SchedulerController<R, S>
@@ -81,6 +103,14 @@ where
     }
 
     pub fn run(mut self) -> Result<(), SchedulerError> {
+        #[allow(unused_mut)]
+        let mut block_reception = false;
+        #[cfg(feature = "build_validator")]
+        unsafe {
+            initial_check_state_for_standard();
+        };
+        #[cfg(feature = "build_validator")]
+        let mut decision_state: DecisionState;
         loop {
             // BufferedPacketsDecision is shared with legacy BankingStage, which will forward
             // packets. Initially, not renaming these decision variants but the actions taken
@@ -92,7 +122,8 @@ where
             // `Forward` will drop packets from the buffer instead of forwarding.
             // During receiving, since packets would be dropped from buffer anyway, we can
             // bypass sanitization and buffering and immediately drop the packets.
-            let (decision, decision_time_us) =
+            #[allow(unused_variables)]
+            let ((decision, is_switching_point_detected, _), decision_time_us) =
                 measure_us!(self.decision_maker.make_consume_or_forward_decision());
             self.timing_metrics.update(|timing_metrics| {
                 timing_metrics.decision_time_us += decision_time_us;
@@ -107,9 +138,26 @@ where
 
             self.receive_completed()?;
             self.process_transactions(&decision)?;
-            if self.receive_and_buffer_packets(&decision).is_err() {
-                break;
+            if !block_reception {
+                if self.receive_and_buffer_packets(&decision).is_err() {
+                    break;
+                }
             }
+
+            #[cfg(feature = "build_validator")]
+            {
+                decision_state = translate_decision_into_decision_state(&decision);
+                unsafe {
+                    check_state(
+                        self.container.is_empty(),
+                        &decision_state,
+                        self.scheduler.in_flight_txns(),
+                        &mut block_reception,
+                        is_switching_point_detected,
+                    );
+                };
+            }
+
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
             let should_report = self.count_metrics.interval_has_data();
@@ -147,19 +195,22 @@ where
                             MAX_PROCESSING_AGE,
                         )
                     },
-                    |_| PreLockFilterAction::AttemptToSchedule // no pre-lock filter for now
+                    |_| PreLockFilterAction::AttemptToSchedule, // no pre-lock filter for now
+                    None,
+                    None,
                 )?);
 
                 self.count_metrics.update(|count_metrics| {
                     count_metrics.num_scheduled += scheduling_summary.num_scheduled;
-                    count_metrics.num_unschedulable_conflicts += scheduling_summary.num_unschedulable_conflicts;
-                    count_metrics.num_unschedulable_threads += scheduling_summary.num_unschedulable_threads;
+                    count_metrics.num_unschedulable_conflicts +=
+                        scheduling_summary.num_unschedulable_conflicts;
+                    count_metrics.num_unschedulable_threads +=
+                        scheduling_summary.num_unschedulable_threads;
                     count_metrics.num_schedule_filtered_out += scheduling_summary.num_filtered_out;
                 });
 
                 self.timing_metrics.update(|timing_metrics| {
-                    timing_metrics.schedule_filter_time_us +=
-                        scheduling_summary.filter_time_us;
+                    timing_metrics.schedule_filter_time_us += scheduling_summary.filter_time_us;
                     timing_metrics.schedule_time_us += schedule_time_us;
                 });
                 self.scheduling_details.update(&scheduling_summary);
@@ -233,7 +284,7 @@ where
 
         while transaction_ids.len() < MAX_TRANSACTION_CHECKS {
             let Some(id) = self.container.pop() else {
-                break
+                break;
             };
             transaction_ids.push(id);
         }
@@ -286,8 +337,9 @@ where
 
     /// Receives completed transactions from the workers and updates metrics.
     fn receive_completed(&mut self) -> Result<(), SchedulerError> {
-        let ((num_transactions, num_retryable), receive_completed_time_us) =
-            measure_us!(self.scheduler.receive_completed(&mut self.container)?);
+        let ((num_transactions, num_retryable, _), receive_completed_time_us) = measure_us!(self
+            .scheduler
+            .receive_completed(&mut self.container, None)?);
 
         self.count_metrics.update(|count_metrics| {
             count_metrics.num_finished += num_transactions;
@@ -309,13 +361,30 @@ where
             &mut self.container,
             &mut self.timing_metrics,
             &mut self.count_metrics,
-            decision,
+            Some(decision),
+            None,
         )
+    }
+}
+
+pub fn translate_decision_into_decision_state(decision: &BufferedPacketsDecision) -> DecisionState {
+    match decision {
+        BufferedPacketsDecision::Consume(bank_start) => {
+            let bank = &bank_start.working_bank;
+            DecisionState::Consume(LeaderMetaData {
+                slot: bank.slot(),
+                bank_creation_time: *bank_start.bank_creation_time,
+            })
+        }
+        BufferedPacketsDecision::ForwardAndHold => DecisionState::ForwardAndHold,
+        BufferedPacketsDecision::Forward => DecisionState::Forward,
+        BufferedPacketsDecision::Hold => DecisionState::Hold,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use {
         super::*,
         crate::banking_stage::{
@@ -332,21 +401,21 @@ mod tests {
         agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
         crossbeam_channel::{unbounded, Receiver, Sender},
         itertools::Itertools,
+        solana_compute_budget_interface::ComputeBudgetInstruction,
+        solana_fee_calculator::FeeRateGovernor,
+        solana_hash::Hash,
+        solana_keypair::Keypair,
         solana_ledger::{
             blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
             get_tmp_ledger_path_auto_delete, leader_schedule_cache::LeaderScheduleCache,
         },
+        solana_message::Message,
         solana_perf::packet::{to_packet_batches, PacketBatch, NUM_PACKETS},
         solana_poh::poh_recorder::PohRecorder,
-        solana_runtime::bank::Bank,
-        solana_runtime_transaction::transaction_meta::StaticMeta,
-        solana_compute_budget_interface::ComputeBudgetInstruction,
-        solana_fee_calculator::FeeRateGovernor,
-        solana_hash::Hash,
-        solana_message::Message,
         solana_poh_config::PohConfig,
         solana_pubkey::Pubkey,
-        solana_keypair::Keypair,
+        solana_runtime::bank::Bank,
+        solana_runtime_transaction::transaction_meta::StaticMeta,
         solana_signer::Signer,
         solana_system_interface::instruction as system_instruction,
         solana_transaction::Transaction,
@@ -354,7 +423,6 @@ mod tests {
         tempfile::TempDir,
         test_case::test_case,
     };
-    use std::collections::HashSet;
 
     fn create_channels<T>(num: usize) -> (Vec<Sender<T>>, Vec<Receiver<T>>) {
         (0..num).map(|_| unbounded()).unzip()
@@ -510,7 +578,7 @@ mod tests {
     fn test_receive_then_schedule<R: ReceiveAndBuffer>(
         scheduler_controller: &mut SchedulerController<R, impl Scheduler<R::Transaction>>,
     ) {
-        let decision = scheduler_controller
+        let (decision, _, _) = scheduler_controller
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
@@ -553,6 +621,7 @@ mod tests {
                     max_ages: vec![],
                 },
                 retryable_indexes: vec![],
+                cu_err_indexes: None,
             })
             .unwrap();
 
@@ -906,6 +975,7 @@ mod tests {
             .send(FinishedConsumeWork {
                 work: consume_work,
                 retryable_indexes: vec![1],
+                cu_err_indexes: None,
             })
             .unwrap();
 

@@ -1,0 +1,13 @@
+{
+    "stake_pool_ids": [
+        "HtSH1AkxTH9gsXws46dfYYYZ29x4yKGBRBSXbaqeoEHL"
+    ],
+    "validator_authority_filter": {
+        "6No5zMEn7SYhrBLQe47sprXzzhNPW2UW1nHzm4dbC1df": {
+            "stake_authorities": [
+                "spa8QF2uL9Z5EkYKFeVKNWjgTJgkwV5CMkdKHZwn3P6"
+            ],
+            "filter_mode": "exclude"
+        }
+    }
+}

@@ -1451,6 +1451,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "block-rewards-distributor"
+version = "2.1.11"
+dependencies = [
+ "anchor-lang",
+ "block_reward_distribution",
+ "clap 4.3.21",
+ "crossbeam-channel",
+ "env_logger",
+ "futures 0.3.31",
+ "gethostname",
+ "im",
+ "itertools 0.12.1",
+ "log",
+ "num-traits",
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "solana-accounts-db",
+ "solana-client",
+ "solana-genesis-utils",
+ "solana-ledger",
+ "solana-measure",
+ "solana-merkle-tree",
+ "solana-metrics",
+ "solana-program",
+ "solana-program-runtime",
+ "solana-rpc-client-api",
+ "solana-runtime",
+ "solana-sdk",
+ "solana-stake-program",
+ "solana-transaction-status",
+ "solana-vote",
+ "spl-stake-pool",
+ "thiserror 1.0.65",
+ "tokio",
+]
+
+[[package]]
+name = "block_reward_distribution"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "default-env",
+ "jito-programs-vote-state",
+ "solana-program",
+ "solana-security-txt",
+]
+
+[[package]]
 name = "borsh"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12388,6 +12437,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "spl-stake-pool"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc2b2908579aefbdb1ed3e941252cab09e7e471e5b52efd5ecc54d20829ef5e8"
+dependencies = [
+ "arrayref",
+ "bincode",
+ "borsh 1.5.5",
+ "bytemuck",
+ "num-derive",
+ "num-traits",
+ "num_enum",
+ "serde",
+ "serde_derive",
+ "solana-program",
+ "solana-security-txt",
+ "spl-pod",
+ "spl-token-2022",
+ "thiserror 2.0.3",
+]
+
+[[package]]
 name = "spl-tlv-account-resolution"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12924,6 +12995,15 @@ dependencies = [
  "quote 1.0.40",
  "syn 2.0.101",
  "test-case-core",
+]
+
+[[package]]
+name = "tests"
+version = "0.1.0"
+dependencies = [
+ "block_reward_distribution",
+ "solana-client",
+ "solana-sdk",
 ]
 
 [[package]]

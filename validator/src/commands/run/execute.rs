@@ -26,6 +26,7 @@ use {
     },
     solana_clock::{Slot, DEFAULT_SLOTS_PER_EPOCH},
     solana_core::{
+        banking_stage::reward_distributor::RewardDistributionConfig,
         banking_trace::DISABLED_BAKING_TRACE_DIR,
         consensus::tower_storage,
         proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
@@ -642,6 +643,34 @@ pub fn execute(
         trust_packets: matches.is_present("trust_block_engine_packets"),
     }));
 
+    let reward_distribution_config = RewardDistributionConfig {
+        rewards_merkle_root_authority:pubkey_of(&matches, "rewards_merkle_root_authority")
+        .unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rewards-merkle-root-authority argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        vote_account: pubkey_of(&matches, "vote_account").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--vote-account argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        rakurai_activation_program_id: pubkey_of(&matches, "rakurai_activation_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rakurai-activation-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        reward_distribution_program_id: pubkey_of(&matches, "reward_distribution_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--reward-distribution-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+    };
+
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
         value_of(matches, "relayer_expected_heartbeat_interval_ms").unwrap();
@@ -837,6 +866,7 @@ pub fn execute(
         tip_manager_config,
         preallocated_bundle_cost: value_of(matches, "preallocated_bundle_cost")
             .expect("preallocated_bundle_cost set as default"),
+        reward_distribution_config,
         ..ValidatorConfig::default()
     };
 
@@ -857,6 +887,46 @@ pub fn execute(
         let available = available.difference(&reserved);
         set_cpu_affinity(available.into_iter().copied()).unwrap();
     }
+
+    // Defaults are set in cli definition, safe to use unwrap() here
+    let banking_packet_delay_ms: u64 =
+        if let Some(banking_packet_delay_ms) = value_of(&matches, "banking_packet_delay_ms") {
+            banking_packet_delay_ms
+        } else {
+            // default to 0 if not specified
+            0
+        };
+    validator_config.banking_packet_delay_ms = banking_packet_delay_ms;
+    info!("Banking packet delay set to {banking_packet_delay_ms} ms");
+
+    let target_slot_adjustment_ms: u64 =
+        if let Some(target_slot_adjustment_ms) = value_of(&matches, "target_slot_adjustment_ms") {
+            target_slot_adjustment_ms
+        } else {
+            // default to 0 if not specified
+            50
+        };
+    validator_config.target_slot_adjustment_ms = target_slot_adjustment_ms;
+    info!("target_slot_adjustment_ms set to {target_slot_adjustment_ms} ms");
+
+    let tx_io_check: Option<String> = if matches.is_present("tx_io_check") {
+        // if user provided a value, use it; otherwise use default
+        Some(
+            matches
+                .value_of("tx_io_check")
+                .unwrap_or("/var/tmp/tx_io.log")
+                .to_string(),
+        )
+    } else {
+        // flag not used at all
+        None
+    };
+    validator_config.tx_io_check = tx_io_check.clone();
+    info!("tx_io_check set to {:?}", tx_io_check);
+
+    let oms_connector = matches.is_present("oms_connector");
+    validator_config.oms_connector = oms_connector;
+    info!("oms_connector set to {oms_connector}");
 
     let vote_account = pubkey_of(matches, "vote_account").unwrap_or_else(|| {
         if !validator_config.voting_disabled {
@@ -1120,11 +1190,12 @@ pub fn execute(
         "block_production_method",
         BlockProductionMethod
     );
-    validator_config.transaction_struct = value_t_or_exit!(
-        matches, // comment to align formatting...
-        "transaction_struct",
-        TransactionStructure
-    );
+    // validator_config.transaction_struct = value_t_or_exit!(
+    //     matches, // comment to align formatting...
+    //     "transaction_struct",
+    //     TransactionStructure
+    // );
+    validator_config.transaction_struct = TransactionStructure::Sdk; // this is to override the CLI arg as we are not currently supporting the transaction view at the time
     validator_config.enable_block_production_forwarding = staked_nodes_overrides_path.is_some();
     validator_config.unified_scheduler_handler_threads =
         value_t!(matches, "unified_scheduler_handler_threads", usize).ok();

@@ -52,6 +52,7 @@ pub type IndexOfAccount = u16;
 ///
 /// It also contains indices to other structures for faster lookup.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct InstructionAccount {
     /// Points to the account and its key in the `TransactionContext`
     pub index_in_transaction: IndexOfAccount,
@@ -73,6 +74,7 @@ pub struct InstructionAccount {
 pub type TransactionAccount = (Pubkey, AccountSharedData);
 
 #[derive(Clone, Debug, PartialEq)]
+#[repr(C)]
 pub struct TransactionAccounts {
     accounts: Vec<RefCell<AccountSharedData>>,
     touched_flags: RefCell<Box<[bool]>>,
@@ -158,6 +160,7 @@ impl TransactionAccounts {
 ///
 /// This context is valid for the entire duration of a transaction being processed.
 #[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
 pub struct TransactionContext {
     account_keys: Pin<Box<[Pubkey]>>,
     accounts: Rc<TransactionAccounts>,
@@ -516,6 +519,7 @@ impl TransactionContext {
     derive(serde_derive::Deserialize, serde_derive::Serialize)
 )]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct TransactionReturnData {
     pub program_id: Pubkey,
     pub data: Vec<u8>,
@@ -525,6 +529,7 @@ pub struct TransactionReturnData {
 ///
 /// This context is valid for the entire duration of a (possibly cross program) instruction being processed.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
+#[repr(C)]
 pub struct InstructionContext {
     nesting_level: usize,
     instruction_accounts_lamport_sum: u128,

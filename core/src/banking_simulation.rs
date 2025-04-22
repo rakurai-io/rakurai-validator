@@ -2,36 +2,49 @@
 use {
     crate::{
         banking_stage::{
-            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, LikeClusterInfo,
+            house_keeper::HouseKeeper, reward_distributor::RewardDistributionConfig,
+            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, DecisionState,
+            LikeClusterInfo,
         },
         banking_trace::{
-            BankingTracer, ChannelLabel, Channels, TimedTracedEvent, TracedEvent, TracedSender,
-            TracerThread, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT, BASENAME,
+            BankingTracer, BundleBatch, ChannelLabel, Channels, TimedTracedEvent, TracedEvent,
+            TracedSender, TracerThread, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT, BASENAME,
         },
-        bundle_stage::bundle_account_locker::BundleAccountLocker,
+        bundle_stage::{bundle_account_locker::BundleAccountLocker, BundleStage},
+        packet_bundle::PacketBundle,
+        proxy::{block_engine_stage::BlockBuilderFeeInfo, fetch_stage_manager::FetchStageManager},
+        sigverify::TransactionSigVerifier,
+        sigverify_stage::SigVerifyStage,
+        tip_manager::{TipManager, TipManagerConfig},
         validator::{BlockProductionMethod, TransactionStructure},
     },
     agave_banking_stage_ingress_types::BankingPacketBatch,
     assert_matches::assert_matches,
     bincode::deserialize_from,
-    crossbeam_channel::{unbounded, Sender},
+    crossbeam_channel::{bounded, unbounded, Sender},
     itertools::Itertools,
     log::*,
+    serde::de::DeserializeOwned,
     solana_clock::{Slot, DEFAULT_MS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
     solana_genesis_config::GenesisConfig,
     solana_gossip::{
         cluster_info::{ClusterInfo, Node},
-        contact_info::ContactInfoQuery,
+        contact_info::{ContactInfo, ContactInfoQuery},
     },
+    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::{Blockstore, PurgeType},
         leader_schedule_cache::LeaderScheduleCache,
     },
     solana_net_utils::bind_to_localhost,
+    solana_perf::packet::{PacketBatch, PinnedPacketBatch},
     solana_poh::{
         poh_recorder::{PohRecorder, GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS},
-        poh_service::{PohService, DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE},
+        poh_service::{
+            PohService, DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE,
+            TARGET_SLOT_ADJUSTMENT_NS,
+        },
         transaction_recorder::TransactionRecorder,
     },
     solana_pubkey::Pubkey,
@@ -46,19 +59,20 @@ use {
     solana_streamer::socket::SocketAddrSpace,
     solana_turbine::broadcast_stage::{BroadcastStage, BroadcastStageType},
     std::{
-        collections,
-        collections::BTreeMap,
+        collections::{self, BTreeMap},
         fmt::Display,
         fs::File,
         io::{self, BufRead, BufReader},
         path::PathBuf,
+        str::FromStr,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
         },
         thread::{self, sleep, JoinHandle},
         time::{Duration, Instant, SystemTime},
     },
+    strum_macros::{Display, EnumIter, EnumVariantNames, IntoStaticStr},
     thiserror::Error,
 };
 
@@ -116,6 +130,97 @@ use {
 ///
 /// Warm-up starts at T=-WARMUP_DURATION (~ 13 secs). As soon as warm up is initiated, we invoke
 /// `BankingStage::new_num_threads()` as well to simulate the pre-leader slot's tx-buffering time.
+#[derive(Clone, EnumVariantNames, Default, IntoStaticStr, Display, EnumIter)]
+#[strum(serialize_all = "kebab-case")]
+pub enum DeserializeVersion {
+    #[default]
+    V2_3,
+    V2_2,
+}
+
+impl FromStr for DeserializeVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let mut normalized = s.to_ascii_lowercase().replace(['-', '.', '_'], ".");
+
+        if normalized.starts_with('v') {
+            normalized = normalized.trim_start_matches('v').to_string();
+        }
+
+        let mut parts = normalized.split('.');
+
+        let major = parts.next();
+        let minor = parts.next();
+        match (major, minor) {
+            (Some("2"), Some("2")) => Ok(DeserializeVersion::V2_2),
+            (Some("2"), Some("3")) => Ok(DeserializeVersion::V2_3),
+            _ => Err(format!("Invalid version: {}", s)),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum UnifiedTimedTracedEvent {
+    V2_2(TimedTracedEventV2_2),
+    V2_3(TimedTracedEvent),
+}
+
+#[cfg_attr(
+    feature = "frozen-abi",
+    derive(AbiExample),
+    frozen_abi(digest = "91baCBT3aY2nXSAuzY3S5dnMhWabVsHowgWqYPLjfyg7")
+)]
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TimedTracedEventV2_2(pub std::time::SystemTime, pub TracedEventV2_2);
+
+#[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
+#[derive(Serialize, Deserialize, Debug)]
+pub enum TracedEventV2_2 {
+    PacketBatch(ChannelLabel, BankingPacketBatchV2_2),
+    BlockAndBankHash(Slot, Hash, Hash),
+    Bundles(BundleBatchV2_2),
+}
+
+pub type BankingPacketBatchV2_2 = Arc<Vec<PinnedPacketBatch>>;
+pub type BundleBatchV2_2 = Arc<PacketBundleV2_2>;
+
+// #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
+// #[derive(Debug, Default, Clone, Serialize, Deserialize)]
+// pub struct PacketBatchV2_2 {
+//     packets: PinnedVec<Packet>,
+// }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PacketBundleV2_2 {
+    pub batch: PinnedPacketBatch,
+    pub bundle_id: String,
+}
+
+fn convert_v2_2_to_v2_3_batch(v2_2_batch: BankingPacketBatchV2_2) -> BankingPacketBatch {
+    let converted: Vec<PacketBatch> = v2_2_batch
+        .iter()
+        .map(|pinned| {
+            PacketBatch::Pinned(PinnedPacketBatch {
+                packets: pinned.packets.clone(),
+            })
+        })
+        .collect();
+
+    Arc::new(converted)
+}
+
+fn convert_bundle_v2_2_to_v2_3_bundle(v2_2: BundleBatchV2_2) -> BundleBatch {
+    let bundle = PacketBundle {
+        batch: PacketBatch::Pinned(PinnedPacketBatch {
+            packets: v2_2.batch.packets.clone(),
+        }),
+        bundle_id: v2_2.bundle_id.clone(),
+    };
+
+    Arc::new(bundle)
+}
+
 pub struct BankingSimulator {
     banking_trace_events: BankingTraceEvents,
     first_simulated_slot: Slot,
@@ -136,6 +241,7 @@ const WARMUP_DURATION: Duration =
 
 /// BTreeMap is intentional because events could be unordered slightly due to tracing jitter.
 type PacketBatchesByTime = BTreeMap<SystemTime, (ChannelLabel, BankingPacketBatch)>;
+type BundlesByTime = BTreeMap<SystemTime, BundleBatch>;
 
 type FreezeTimeBySlot = BTreeMap<Slot, SystemTime>;
 
@@ -144,19 +250,25 @@ type TimedBatchesToSend = Vec<(
     (usize, usize),
 )>;
 
-type EventSenderThread = JoinHandle<(TracedSender, TracedSender, TracedSender)>;
+type TimedBundlesToSend = Vec<((Duration, BundleBatch), (usize, usize))>;
+
+type EventSenderThread = (
+    JoinHandle<(TracedSender, TracedSender, TracedSender)>,
+    JoinHandle<Sender<Vec<PacketBundle>>>,
+);
 
 #[derive(Default)]
 pub struct BankingTraceEvents {
     packet_batches_by_time: PacketBatchesByTime,
+    bundles_by_time: BundlesByTime,
     freeze_time_by_slot: FreezeTimeBySlot,
     hash_overrides: HashOverrides,
 }
 
 impl BankingTraceEvents {
-    fn read_event_file(
+    fn read_event_file<T: DeserializeOwned>(
         event_file_path: &PathBuf,
-        mut callback: impl FnMut(TimedTracedEvent),
+        mut callback: impl FnMut(T),
     ) -> Result<(), SimulateError> {
         let mut reader = BufReader::new(File::open(event_file_path)?);
 
@@ -169,15 +281,29 @@ impl BankingTraceEvents {
         Ok(())
     }
 
-    pub fn load(event_file_paths: &[PathBuf]) -> Result<Self, SimulateError> {
+    pub fn load(
+        event_file_paths: &[PathBuf],
+        version: DeserializeVersion,
+    ) -> Result<Self, SimulateError> {
         let mut event_count = 0;
         let mut events = Self::default();
         for event_file_path in event_file_paths {
             let old_event_count = event_count;
-            let read_result = Self::read_event_file(event_file_path, |event| {
-                event_count += 1;
-                events.load_event(event);
-            });
+            let read_result = match version {
+                DeserializeVersion::V2_2 => {
+                    Self::read_event_file(event_file_path, |event: TimedTracedEventV2_2| {
+                        event_count += 1;
+                        events.load_event(UnifiedTimedTracedEvent::V2_2(event));
+                    })
+                }
+                DeserializeVersion::V2_3 => {
+                    Self::read_event_file(event_file_path, |event: TimedTracedEvent| {
+                        event_count += 1;
+                        events.load_event(UnifiedTimedTracedEvent::V2_3(event));
+                    })
+                }
+            };
+
             info!(
                 "Read {} events from {:?}",
                 event_count - old_event_count,
@@ -206,29 +332,57 @@ impl BankingTraceEvents {
         Ok(events)
     }
 
-    fn load_event(&mut self, TimedTracedEvent(event_time, event): TimedTracedEvent) {
-        match event {
-            TracedEvent::PacketBatch(label, batch) => {
-                // Deserialized PacketBatches will mostly be ordered by event_time, but this
-                // isn't guaranteed when traced, because time are measured by multiple _sender_
-                // threads without synchronization among them to avoid overhead.
-                //
-                // Also, there's a possibility of system clock change. In this case,
-                // the simulation is meaningless, though...
-                //
-                // Somewhat naively assume that event_times (nanosecond resolution) won't
-                // collide.
-                let is_new = self
-                    .packet_batches_by_time
-                    .insert(event_time, (label, batch))
-                    .is_none();
-                assert!(is_new);
+    fn load_event(&mut self, timed_traced_event: UnifiedTimedTracedEvent) {
+        match timed_traced_event {
+            UnifiedTimedTracedEvent::V2_2(TimedTracedEventV2_2(event_time, event)) => {
+                match event {
+                    TracedEventV2_2::PacketBatch(label, batch) => {
+                        // Deserialized PacketBatches will mostly be ordered by event_time, but this
+                        // isn't guaranteed when traced, because time are measured by multiple _sender_
+                        // threads without synchronization among them to avoid overhead.
+                        //
+                        // Also, there's a possibility of system clock change. In this case,
+                        // the simulation is meaningless, though...
+                        //
+                        // Somewhat naively assume that event_times (nanosecond resolution) won't
+                        // collide.
+                        let batch = convert_v2_2_to_v2_3_batch(batch);
+                        let is_new = self
+                            .packet_batches_by_time
+                            .insert(event_time, (label, batch))
+                            .is_none();
+                        assert!(is_new);
+                    }
+                    TracedEventV2_2::BlockAndBankHash(slot, blockhash, bank_hash) => {
+                        let is_new = self.freeze_time_by_slot.insert(slot, event_time).is_none();
+                        self.hash_overrides.add_override(slot, blockhash, bank_hash);
+                        assert!(is_new);
+                    }
+                    TracedEventV2_2::Bundles(batch) => {
+                        let batch = convert_bundle_v2_2_to_v2_3_bundle(batch);
+                        let is_new = self.bundles_by_time.insert(event_time, batch).is_none();
+                        assert!(is_new);
+                    }
+                }
             }
-            TracedEvent::BlockAndBankHash(slot, blockhash, bank_hash) => {
-                let is_new = self.freeze_time_by_slot.insert(slot, event_time).is_none();
-                self.hash_overrides.add_override(slot, blockhash, bank_hash);
-                assert!(is_new);
-            }
+            UnifiedTimedTracedEvent::V2_3(TimedTracedEvent(event_time, event)) => match event {
+                TracedEvent::PacketBatch(label, batch) => {
+                    let is_new = self
+                        .packet_batches_by_time
+                        .insert(event_time, (label, batch))
+                        .is_none();
+                    assert!(is_new);
+                }
+                TracedEvent::BlockAndBankHash(slot, blockhash, bank_hash) => {
+                    let is_new = self.freeze_time_by_slot.insert(slot, event_time).is_none();
+                    self.hash_overrides.add_override(slot, blockhash, bank_hash);
+                    assert!(is_new);
+                }
+                TracedEvent::Bundles(batch) => {
+                    let is_new = self.bundles_by_time.insert(event_time, batch).is_none();
+                    assert!(is_new);
+                }
+            },
         }
     }
 
@@ -250,6 +404,14 @@ impl LikeClusterInfo for Arc<DummyClusterInfo> {
 
     fn lookup_contact_info<R>(&self, _: &Pubkey, _: impl ContactInfoQuery<R>) -> Option<R> {
         None
+    }
+
+    fn my_contact(&self) -> Arc<RwLock<ContactInfo>> {
+        Arc::new(RwLock::new(ContactInfo::default()))
+    }
+
+    fn keypair(&self) -> Arc<Keypair> {
+        Arc::new(Keypair::new())
     }
 }
 
@@ -333,6 +495,7 @@ impl SimulatorLoopLogger {
     }
 }
 
+#[derive(Clone)]
 struct SenderLoop {
     parent_slot: Slot,
     first_simulated_slot: Slot,
@@ -342,7 +505,11 @@ struct SenderLoop {
     exit: Arc<AtomicBool>,
     raw_base_event_time: SystemTime,
     total_batch_count: usize,
+    total_bundle_count: usize,
     timed_batches_to_send: TimedBatchesToSend,
+    timed_bundles_to_send: TimedBundlesToSend,
+    bundle_sender: Sender<Vec<PacketBundle>>,
+    packet_intercept_sender: Sender<PacketBatch>,
 }
 
 impl SenderLoop {
@@ -353,13 +520,26 @@ impl SenderLoop {
             SenderLoopLogger::format_as_timestamp(self.raw_base_event_time),
             self.parent_slot, WARMUP_DURATION,
         );
+        info!(
+            "simulating bundles: {} (out of {}), starting at slot {} (based on {} from traced event slot: {}) (warmup: -{:?})",
+            self.timed_bundles_to_send.len(), self.total_bundle_count, self.first_simulated_slot,
+            SenderLoopLogger::format_as_timestamp(self.raw_base_event_time),
+            self.parent_slot, WARMUP_DURATION,
+        );
     }
 
     fn spawn(self, base_simulation_time: SystemTime) -> Result<EventSenderThread, SimulateError> {
+        let bundle_self = self.clone();
+
         let handle = thread::Builder::new()
             .name("solSimSender".into())
             .spawn(move || self.start(base_simulation_time))?;
-        Ok(handle)
+
+        let bundle_handle = thread::Builder::new()
+            .name("solSimBundles".into())
+            .spawn(move || bundle_self.start_bundles(base_simulation_time))?;
+
+        Ok((handle, bundle_handle))
     }
 
     fn start(
@@ -383,13 +563,28 @@ impl SenderLoop {
                     .unwrap();
             }
 
-            let sender = match label {
-                ChannelLabel::NonVote => &self.non_vote_sender,
-                ChannelLabel::TpuVote => &self.tpu_vote_sender,
-                ChannelLabel::GossipVote => &self.gossip_vote_sender,
+            match label {
+                ChannelLabel::NonVote => {
+                    for i in batches_with_stats.iter() {
+                        let _ = &self.packet_intercept_sender.send(i.clone()).unwrap();
+                    }
+                }
+                ChannelLabel::TpuVote => {
+                    let _ = &self
+                        .tpu_vote_sender
+                        .send(batches_with_stats, &None)
+                        .unwrap();
+                }
+
+                ChannelLabel::GossipVote => {
+                    let _ = &self
+                        .gossip_vote_sender
+                        .send(batches_with_stats, &None)
+                        .unwrap();
+                }
+
                 ChannelLabel::Dummy => unreachable!(),
             };
-            sender.send(batches_with_stats).unwrap();
 
             logger.on_sending_batches(&simulation_duration, label, batch_count, tx_count);
             if self.exit.load(Ordering::Relaxed) {
@@ -404,6 +599,39 @@ impl SenderLoop {
             self.tpu_vote_sender,
             self.gossip_vote_sender,
         )
+    }
+
+    fn start_bundles(mut self, base_simulation_time: SystemTime) -> Sender<Vec<PacketBundle>> {
+        // let mut logger = SenderLoopLogger::new(
+        //     &self.non_vote_sender,
+        //     &self.tpu_vote_sender,
+        //     &self.gossip_vote_sender,
+        // );
+        let mut simulation_duration = Duration::default();
+        for ((required_duration, bundle_with_stats), (_batch_count, _tx_count)) in
+            self.timed_bundles_to_send.drain(..)
+        {
+            // Busy loop for most accurate sending timings
+            while simulation_duration < required_duration {
+                let current_simulation_time = SystemTime::now();
+                simulation_duration = current_simulation_time
+                    .duration_since(base_simulation_time)
+                    .unwrap();
+            }
+
+            let sender = &self.bundle_sender;
+            sender.send(vec![(*bundle_with_stats).clone()]).unwrap();
+
+            // logger.on_sending_batches(&simulation_duration, label, batch_count, tx_count);
+            if self.exit.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        // logger.on_terminating();
+        drop(self.timed_bundles_to_send);
+        // hold these senders in join_handle to control banking stage termination!
+
+        self.bundle_sender
     }
 }
 
@@ -480,7 +708,7 @@ impl SimulatorLoop {
                 if new_leader != self.simulated_leader {
                     logger.on_new_leader(&bank, bank_created.elapsed(), new_slot, new_leader);
                     break;
-                } else if sender_thread.is_finished() {
+                } else if sender_thread.0.is_finished() && sender_thread.1.is_finished() {
                     warn!("sender thread existed maybe due to completion of sending traced events");
                     break;
                 } else {
@@ -527,9 +755,13 @@ impl SimulatorLoop {
 struct SimulatorThreads {
     poh_service: PohService,
     banking_stage: BankingStage,
+    bundle_stage: BundleStage,
     broadcast_stage: BroadcastStage,
     retracer_thread: TracerThread,
     exit: Arc<AtomicBool>,
+    fetch_stage_manager: FetchStageManager,
+    sigverify_stage: SigVerifyStage,
+    house_keeper_thread: HouseKeeper,
 }
 
 impl SimulatorThreads {
@@ -540,9 +772,14 @@ impl SimulatorThreads {
 
         // The order is important. Consuming sender_thread by joining will drop some channels. That
         // triggers termination of banking_stage, in turn retracer thread will be terminated.
-        sender_thread.join().unwrap();
+        sender_thread.0.join().unwrap();
+        sender_thread.1.join().unwrap();
         self.banking_stage.join().unwrap();
+        self.bundle_stage.join().unwrap();
+        self.house_keeper_thread.join().unwrap();
         self.poh_service.join().unwrap();
+        self.fetch_stage_manager.join().unwrap();
+        self.sigverify_stage.join().unwrap();
         if let Some(retracer_thread) = self.retracer_thread {
             retracer_thread.join().unwrap().unwrap();
         }
@@ -695,6 +932,7 @@ impl BankingSimulator {
     ) -> (SenderLoop, SimulatorLoop, SimulatorThreads) {
         let parent_slot = self.parent_slot().unwrap();
         let mut packet_batches_by_time = self.banking_trace_events.packet_batches_by_time;
+        let mut bundles_by_time = self.banking_trace_events.bundles_by_time;
         let freeze_time_by_slot = self.banking_trace_events.freeze_time_by_slot;
         let bank = bank_forks.read().unwrap().working_bank_with_scheduler();
 
@@ -739,6 +977,7 @@ impl BankingSimulator {
             &leader_schedule_cache,
             &genesis_config.poh_config,
             exit.clone(),
+            TARGET_SLOT_ADJUSTMENT_NS,
         );
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
         let (record_sender, record_receiver) = unbounded();
@@ -751,6 +990,7 @@ impl BankingSimulator {
             DEFAULT_PINNED_CPU_CORE,
             DEFAULT_HASHES_PER_BATCH,
             record_receiver,
+            TARGET_SLOT_ADJUSTMENT_NS,
         );
 
         // Enable BankingTracer to approximate the real environment as close as possible because
@@ -788,6 +1028,8 @@ impl BankingSimulator {
             gossip_vote_receiver,
         } = retracer.create_channels(false);
 
+        let (bundle_sender, bundle_receiver) = unbounded();
+
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let (retransmit_slots_sender, retransmit_slots_receiver) = unbounded();
         let shred_version = compute_shred_version(
@@ -820,6 +1062,63 @@ impl BankingSimulator {
             Arc::new(RwLock::new(None)),
         );
 
+        let bundle_account_locker = BundleAccountLocker::default();
+
+        let (_heartbeat_tx, heartbeat_rx) = unbounded();
+        let (packet_intercept_sender, packet_intercept_receiver) = unbounded();
+        let (packet_sender, packet_receiver) = unbounded();
+
+        let fetch_stage_manager = FetchStageManager::new(
+            cluster_info_for_broadcast.clone(),
+            heartbeat_rx,
+            packet_intercept_receiver,
+            packet_sender.clone(),
+            exit.clone(),
+        );
+
+        let tx_io_check = None;
+        let oms_connector = false;
+
+        // uncomment this to enable tx_io_check and oms_connector
+        // let tx_io_check = Some("/var/tmp/tx_io.log".to_string());
+        // let oms_connector = true;
+
+        const TX_IO_CHANNEL_SZIE: usize = 1024;
+        let (input_tx_signature_sender, input_tx_signature_receiver) = if tx_io_check.is_some() {
+            let (input_tx_signature_sender, input_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some((input_tx_signature_sender, exit.clone())),
+                Some(input_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
+        let (output_tx_signature_sender, output_tx_signature_receiver) =
+            if tx_io_check.is_some() || oms_connector {
+                let (output_tx_signature_sender, output_tx_signature_receiver) =
+                    bounded(TX_IO_CHANNEL_SZIE);
+                (
+                    Some(output_tx_signature_sender),
+                    Some(output_tx_signature_receiver),
+                )
+            } else {
+                (None, None)
+            };
+
+        let sigverify_stage = {
+            let verifier = TransactionSigVerifier::new(
+                non_vote_sender.clone(),
+                None,
+                input_tx_signature_sender.clone(),
+            );
+            SigVerifyStage::new(packet_receiver, verifier, "solSigVerTpu", "tpu-verifier")
+        };
+
+        let shared_decision = (
+            Arc::new(RwLock::new(DecisionState::Hold)),
+            Arc::new(AtomicBool::new(false)),
+        );
         info!("Start banking stage!...");
         let prioritization_fee_cache = &Arc::new(PrioritizationFeeCache::new(0u64));
         let banking_stage = BankingStage::new_num_threads(
@@ -827,19 +1126,59 @@ impl BankingSimulator {
             transaction_struct.clone(),
             &cluster_info_for_banking,
             &poh_recorder,
-            transaction_recorder,
+            transaction_recorder.clone(),
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
             BankingStage::num_threads(),
             None,
-            replay_vote_sender,
+            replay_vote_sender.clone(),
             None,
             bank_forks.clone(),
             prioritization_fee_cache,
             collections::HashSet::default(),
-            BundleAccountLocker::default(),
+            bundle_account_locker.clone(),
             |_| 0,
+            blockstore.clone(),
+            RewardDistributionConfig::default(),
+            200, // 200 ms packet delay is a reasonable default for simulation
+            input_tx_signature_sender,
+            output_tx_signature_sender,
+            shared_decision.clone(),
+            exit.clone(),
+        );
+
+        let tip_manager = TipManager::new(TipManagerConfig::default());
+        let block_builder_fee_info = Arc::new(Mutex::new(BlockBuilderFeeInfo {
+            block_builder: simulated_leader,
+            block_builder_commission: 0,
+        }));
+
+        info!("Starting bundle stage!...");
+        let bundle_stage = BundleStage::new(
+            &cluster_info_for_broadcast,
+            &poh_recorder,
+            transaction_recorder,
+            bundle_receiver,
+            None,
+            replay_vote_sender,
+            None,
+            exit.clone(),
+            tip_manager,
+            bundle_account_locker,
+            &block_builder_fee_info,
+            prioritization_fee_cache,
+            non_vote_sender.clone(),
+        );
+
+        // House keeper
+        let house_keeper_thread = HouseKeeper::new(
+            input_tx_signature_receiver,
+            output_tx_signature_receiver,
+            tx_io_check.clone(),
+            oms_connector,
+            shared_decision,
+            exit.clone(),
         );
 
         let (&_slot, &raw_base_event_time) = freeze_time_by_slot
@@ -869,6 +1208,23 @@ impl BankingSimulator {
             .zip_eq(batch_and_tx_counts)
             .collect::<Vec<_>>();
 
+        // The same for bundles
+        let total_bundle_count = bundles_by_time.len();
+        let timed_bundles_to_send = bundles_by_time.split_off(&base_event_time);
+        let bundle_and_tx_counts = timed_bundles_to_send
+            .values()
+            .map(|bundle| (1, bundle.batch.len()))
+            .collect::<Vec<_>>();
+        // Convert to a large plain old Vec and drain on it, finally dropping it outside
+        // the simulation loop to avoid jitter due to interleaved deallocs of BTreeMap.
+        let timed_bundles_to_send = timed_bundles_to_send
+            .into_iter()
+            .map(|(event_time, batches)| {
+                (event_time.duration_since(base_event_time).unwrap(), batches)
+            })
+            .zip_eq(bundle_and_tx_counts)
+            .collect::<Vec<_>>();
+
         let sender_loop = SenderLoop {
             parent_slot,
             first_simulated_slot: self.first_simulated_slot,
@@ -878,7 +1234,11 @@ impl BankingSimulator {
             exit: exit.clone(),
             raw_base_event_time,
             total_batch_count,
+            total_bundle_count,
             timed_batches_to_send,
+            timed_bundles_to_send,
+            bundle_sender,
+            packet_intercept_sender,
         };
 
         let simulator_loop = SimulatorLoop {
@@ -899,9 +1259,13 @@ impl BankingSimulator {
         let simulator_threads = SimulatorThreads {
             poh_service,
             banking_stage,
+            bundle_stage,
             broadcast_stage,
             retracer_thread,
             exit,
+            fetch_stage_manager,
+            sigverify_stage,
+            house_keeper_thread,
         };
 
         (sender_loop, simulator_loop, simulator_threads)
@@ -917,11 +1281,25 @@ impl BankingSimulator {
     ) -> Result<(), SimulateError> {
         let (sender_loop, simulator_loop, simulator_threads) = self.prepare_simulation(
             genesis_config,
-            bank_forks,
+            bank_forks.clone(),
             blockstore,
             block_production_method,
             transaction_struct,
         );
+
+        let jito_tip_accounts = [
+            "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+            "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+            "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+            "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+            "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+            "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+            "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+            "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+        ];
+
+        let bank1 = bank_forks.read().unwrap().working_bank();
+        let total_balance_before = Self::accumulate_tip_balances(&bank1, &jito_tip_accounts);
 
         sender_loop.log_starting();
         let base_simulation_time = SystemTime::now();
@@ -930,6 +1308,10 @@ impl BankingSimulator {
         let sender_thread = sender_loop.spawn(base_simulation_time)?;
         let (sender_thread, retransmit_slots_sender) =
             simulator_loop.enter(base_simulation_time, sender_thread);
+
+        let bank2 = bank_forks.read().unwrap().working_bank();
+        let total_balance_after = Self::accumulate_tip_balances(&bank2, &jito_tip_accounts);
+        info!("Total Jito tip account balance before: {} lamports, after: {} lamports, Total tips: {} lamports", total_balance_before, total_balance_after, (total_balance_after-total_balance_before));
 
         simulator_threads.finish(sender_thread, retransmit_slots_sender);
 
@@ -942,5 +1324,13 @@ impl BankingSimulator {
         } else {
             format!("{BASENAME}.{index}")
         }
+    }
+
+    fn accumulate_tip_balances(bank: &Bank, account_strs: &[&str]) -> u64 {
+        account_strs
+            .iter()
+            .filter_map(|s| Pubkey::from_str(s).ok())
+            .map(|pk| bank.get_balance(&pk))
+            .sum()
     }
 }

@@ -52,6 +52,7 @@ pub type StakeAccount = stake_account::StakeAccount<Delegation>;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct StakesCache(RwLock<Stakes<StakeAccount>>);
 
 impl StakesCache {
@@ -156,6 +157,7 @@ impl StakesCache {
 /// stake-delegations.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[repr(C)]
 pub struct Stakes<T: Clone> {
     /// vote accounts
     vote_accounts: VoteAccounts,
@@ -183,6 +185,7 @@ pub struct Stakes<T: Clone> {
 // boundaries and startup with the conversion overhead.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub enum StakesEnum {
     Accounts(Stakes<StakeAccount>),
     Delegations(Stakes<Delegation>),

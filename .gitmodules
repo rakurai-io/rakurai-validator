@@ -7,3 +7,13 @@
 [submodule "jito-protos/protos"]
 	path = jito-protos/protos
 	url = https://github.com/jito-labs/mev-protos.git
+[submodule "rakurai_programs"]
+	path = rakurai_programs
+	url = git@github.com:rakurai-io/rakurai_programs.git
+[submodule "solana-sdk"]
+	path = solana-sdk
+	url = https://github.com/rakurai-io/solana-sdk.git
+	branch = solana-sdk-with-rakurai-mod
+[submodule "parking_lot"]
+	path = parking_lot
+	url = https://github.com/rakurai-io/parking_lot.git

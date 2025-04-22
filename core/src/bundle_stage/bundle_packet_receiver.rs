@@ -6,6 +6,7 @@ use {
             bundle_packet_deserializer::{BundlePacketDeserializer, ReceiveBundleResults},
             bundle_stage_leader_metrics::BundleStageLeaderMetrics,
             bundle_storage::BundleStorage,
+            BankingPacketSender,
         },
         immutable_deserialized_bundle::ImmutableDeserializedBundle,
         packet_bundle::PacketBundle,
@@ -42,12 +43,14 @@ impl BundleReceiver {
         bundle_storage: &mut BundleStorage,
         bundle_stage_metrics: &mut BundleStageLoopMetrics,
         bundle_stage_leader_metrics: &mut BundleStageLeaderMetrics,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<(), RecvTimeoutError> {
         let (result, recv_time_us) = measure_us!({
             let recv_timeout = Self::get_receive_timeout(bundle_storage);
             let mut recv_and_buffer_measure = Measure::start("recv_and_buffer");
             self.bundle_packet_deserializer
                 .receive_bundles(
+                    non_vote_sender,
                     recv_timeout,
                     bundle_storage.max_receive_size(),
                     &|packet: ImmutableDeserializedPacket| {

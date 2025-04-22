@@ -12,12 +12,31 @@ use {
     },
 };
 
+const SWITCHING_OFFSET: u64 = 26;
+
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub enum BufferedPacketsDecision {
     Consume(BankStart),
     Forward,
     ForwardAndHold,
     Hold,
+}
+
+impl PartialEq for BufferedPacketsDecision {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (BufferedPacketsDecision::Consume(bank1), BufferedPacketsDecision::Consume(bank2)) => {
+                bank1.working_bank.slot() == bank2.working_bank.slot()
+            }
+            (BufferedPacketsDecision::Forward, BufferedPacketsDecision::Forward) => true,
+            (BufferedPacketsDecision::ForwardAndHold, BufferedPacketsDecision::ForwardAndHold) => {
+                true
+            }
+            (BufferedPacketsDecision::Hold, BufferedPacketsDecision::Hold) => true,
+            _ => false,
+        }
+    }
 }
 
 impl BufferedPacketsDecision {
@@ -31,12 +50,13 @@ impl BufferedPacketsDecision {
 }
 
 #[derive(Clone, derive_more::Debug)]
+#[repr(C)]
 pub struct DecisionMaker {
     my_pubkey: Pubkey,
     #[debug("{poh_recorder:p}")]
     poh_recorder: Arc<RwLock<PohRecorder>>,
 
-    cached_decision: Option<BufferedPacketsDecision>,
+    cached_decision: Option<(BufferedPacketsDecision, bool, u64)>,
     last_decision_time: Instant,
 }
 
@@ -50,14 +70,16 @@ impl DecisionMaker {
         }
     }
 
-    pub(crate) fn make_consume_or_forward_decision(&mut self) -> BufferedPacketsDecision {
+    pub(crate) fn make_consume_or_forward_decision(
+        &mut self,
+    ) -> (BufferedPacketsDecision, bool, u64) {
         const CACHE_DURATION: Duration = Duration::from_millis(5);
         let now = Instant::now();
 
         // If there is a cached decision that has not expired, return it now.
-        if let Some(decision) = &self.cached_decision {
+        if let Some((decision, is_switching_point_reached, slot)) = &self.cached_decision {
             if now.duration_since(self.last_decision_time) < CACHE_DURATION {
-                return decision.clone();
+                return (decision.clone(), *is_switching_point_reached, *slot);
             }
         }
 
@@ -66,20 +88,24 @@ impl DecisionMaker {
         self.cached_decision.as_ref().unwrap().clone()
     }
 
-    fn make_consume_or_forward_decision_no_cache(&self) -> BufferedPacketsDecision {
+    fn make_consume_or_forward_decision_no_cache(&self) -> (BufferedPacketsDecision, bool, u64) {
         let decision;
+        let switching_point;
+        let slot;
         {
             let poh_recorder = self.poh_recorder.read().unwrap();
-            decision = Self::consume_or_forward_packets(
+            slot = poh_recorder.current_poh_slot();
+            (decision, switching_point) = Self::consume_or_forward_packets(
                 &self.my_pubkey,
                 || Self::bank_start(&poh_recorder),
                 || Self::would_be_leader_shortly(&poh_recorder),
                 || Self::would_be_leader(&poh_recorder),
                 || Self::leader_pubkey(&poh_recorder),
+                || Self::check_switching_point(&poh_recorder),
             );
         }
 
-        decision
+        (decision, switching_point, slot)
     }
 
     fn consume_or_forward_packets(
@@ -88,10 +114,11 @@ impl DecisionMaker {
         would_be_leader_shortly_fn: impl FnOnce() -> bool,
         would_be_leader_fn: impl FnOnce() -> bool,
         leader_pubkey_fn: impl FnOnce() -> Option<Pubkey>,
-    ) -> BufferedPacketsDecision {
+        check_switching_point_fn: impl FnOnce() -> bool,
+    ) -> (BufferedPacketsDecision, bool) {
         // If has active bank, then immediately process buffered packets
         // otherwise, based on leader schedule to either forward or hold packets
-        if let Some(bank_start) = bank_start_fn() {
+        let decision = if let Some(bank_start) = bank_start_fn() {
             // If the bank is available, this node is the leader
             BufferedPacketsDecision::Consume(bank_start)
         } else if would_be_leader_shortly_fn() {
@@ -112,7 +139,14 @@ impl DecisionMaker {
         } else {
             // We don't know the leader. Hold the packets for now
             BufferedPacketsDecision::Hold
-        }
+        };
+
+        let switching_point = match decision {
+            BufferedPacketsDecision::Forward => check_switching_point_fn(),
+            _ => false,
+        };
+
+        (decision, switching_point)
     }
 
     fn bank_start(poh_recorder: &PohRecorder) -> Option<BankStart> {
@@ -134,12 +168,17 @@ impl DecisionMaker {
     fn leader_pubkey(poh_recorder: &PohRecorder) -> Option<Pubkey> {
         poh_recorder.leader_after_n_slots(FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET)
     }
+
+    fn check_switching_point(poh_recorder: &PohRecorder) -> bool {
+        poh_recorder.would_be_leader(SWITCHING_OFFSET * DEFAULT_TICKS_PER_SLOT)
+            && !poh_recorder.would_be_leader((SWITCHING_OFFSET - 1) * DEFAULT_TICKS_PER_SLOT)
+    }
 }
 
 impl BankingStageMonitor for DecisionMaker {
     fn status(&mut self) -> BankingStageStatus {
         if matches!(
-            self.make_consume_or_forward_decision(),
+            self.make_consume_or_forward_decision().0,
             BufferedPacketsDecision::Forward,
         ) {
             BankingStageStatus::Inactive
@@ -220,7 +259,7 @@ mod tests {
                     next_leader_slot + NUM_CONSECUTIVE_LEADER_SLOTS,
                 )),
             );
-            let decision = decision_maker.make_consume_or_forward_decision_no_cache();
+            let (decision, _) = decision_maker.make_consume_or_forward_decision_no_cache();
             assert!(
                 matches!(decision, BufferedPacketsDecision::Hold),
                 "next_leader_slot_offset: {next_leader_slot_offset}",
@@ -237,7 +276,7 @@ mod tests {
                     next_leader_slot + NUM_CONSECUTIVE_LEADER_SLOTS + 1,
                 )),
             );
-            let decision = decision_maker.make_consume_or_forward_decision_no_cache();
+            let (decision, _) = decision_maker.make_consume_or_forward_decision_no_cache();
             assert!(
                 matches!(decision, BufferedPacketsDecision::ForwardAndHold),
                 "next_leader_slot_offset: {next_leader_slot_offset}",
@@ -247,7 +286,7 @@ mod tests {
         // Known leader, not me - Forward
         {
             poh_recorder.write().unwrap().reset(bank, None);
-            let decision = decision_maker.make_consume_or_forward_decision_no_cache();
+            let (decision, _) = decision_maker.make_consume_or_forward_decision_no_cache();
             assert_matches!(decision, BufferedPacketsDecision::Forward);
         }
     }

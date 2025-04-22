@@ -13,6 +13,7 @@ use {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[repr(C)]
 pub struct RestartLastVotedForkSlots {
     pub from: Pubkey,
     pub wallclock: u64,
@@ -30,6 +31,7 @@ pub enum RestartLastVotedForkSlotsError {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
+#[repr(C)]
 pub struct RestartHeaviestFork {
     pub from: Pubkey,
     pub wallclock: u64,
@@ -41,6 +43,7 @@ pub struct RestartHeaviestFork {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 enum SlotsOffsets {
     RunLengthEncoding(RunLengthEncoding),
     RawOffsets(RawOffsets),
@@ -54,10 +57,12 @@ struct U16(#[serde(with = "serde_varint")] u16);
 // For example, 110000111 is [2, 4, 3].
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 struct RunLengthEncoding(Vec<U16>);
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 struct RawOffsets(BitVec<u8>);
 
 impl Sanitize for RestartLastVotedForkSlots {

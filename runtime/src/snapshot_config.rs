@@ -9,6 +9,7 @@ use {
 
 /// Snapshot configuration and runtime information
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct SnapshotConfig {
     /// Specifies the ways thats snapshots are allowed to be used
     pub usage: SnapshotUsage,

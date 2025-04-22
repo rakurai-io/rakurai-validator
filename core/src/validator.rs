@@ -1,6 +1,8 @@
 //! The `validator` module hosts all the validator microservices.
 
+use crate::banking_stage::reward_distributor::RewardDistributionConfig;
 pub use solana_perf::report_target_features;
+
 use {
     crate::{
         accounts_hash_verifier::AccountsHashVerifier,
@@ -307,6 +309,11 @@ pub struct ValidatorConfig {
     pub shred_retransmit_receiver_address: Arc<RwLock<Option<SocketAddr>>>,
     pub tip_manager_config: TipManagerConfig,
     pub preallocated_bundle_cost: u64,
+    pub reward_distribution_config: RewardDistributionConfig,
+    pub banking_packet_delay_ms: u64,
+    pub target_slot_adjustment_ms: u64,
+    pub tx_io_check: Option<String>,
+    pub oms_connector: bool,
 }
 
 impl Default for ValidatorConfig {
@@ -388,6 +395,11 @@ impl Default for ValidatorConfig {
             shred_retransmit_receiver_address: Arc::new(RwLock::new(None)),
             tip_manager_config: TipManagerConfig::default(),
             preallocated_bundle_cost: 0,
+            reward_distribution_config: RewardDistributionConfig::default(),
+            banking_packet_delay_ms: 0,
+            target_slot_adjustment_ms: 50,
+            tx_io_check: None,
+            oms_connector: false,
         }
     }
 }
@@ -975,6 +987,7 @@ impl Validator {
                 &leader_schedule_cache,
                 &genesis_config.poh_config,
                 exit.clone(),
+                config.target_slot_adjustment_ms * 1_000_000,
             )
         };
         let (record_sender, record_receiver) = unbounded();
@@ -1395,6 +1408,7 @@ impl Validator {
             config.poh_pinned_cpu_core,
             config.poh_hashes_per_batch,
             record_receiver,
+            config.target_slot_adjustment_ms * 1_000_000,
         );
         assert_eq!(
             blockstore.get_new_shred_signals_len(),
@@ -1689,6 +1703,10 @@ impl Validator {
             config.tip_manager_config.clone(),
             config.shred_receiver_address.clone(),
             config.preallocated_bundle_cost,
+            config.reward_distribution_config.clone(),
+            config.banking_packet_delay_ms,
+            config.tx_io_check.clone(),
+            config.oms_connector,
         );
 
         datapoint_info!(

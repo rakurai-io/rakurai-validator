@@ -59,6 +59,7 @@ pub(crate) type Result<T> = std::result::Result<T, PohRecorderError>;
 pub type WorkingBankEntry = (Arc<Bank>, (Entry, u64));
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct BankStart {
     pub working_bank: Arc<Bank>,
     pub bank_creation_time: Arc<Instant>,
@@ -77,6 +78,7 @@ impl BankStart {
 // transaction, if being tracked by WorkingBank
 type RecordResultSender = Sender<Result<Option<usize>>>;
 
+#[repr(C)]
 pub struct Record {
     pub mixins: Vec<Hash>,
     pub transaction_batches: Vec<Vec<VersionedTransaction>>,
@@ -169,6 +171,7 @@ impl PohRecorderMetrics {
     }
 }
 
+#[repr(C)]
 pub struct PohRecorder {
     pub(crate) poh: Arc<Mutex<Poh>>,
     tick_height: u64,
@@ -183,7 +186,7 @@ pub struct PohRecorder {
     leader_last_tick_height: u64, // zero if none
     grace_ticks: u64,
     blockstore: Arc<Blockstore>,
-    leader_schedule_cache: Arc<LeaderScheduleCache>,
+    pub leader_schedule_cache: Arc<LeaderScheduleCache>,
     ticks_per_slot: u64,
     target_ns_per_tick: u64,
     metrics: PohRecorderMetrics,
@@ -224,6 +227,7 @@ impl PohRecorder {
             leader_schedule_cache,
             poh_config,
             is_exited,
+            crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
         )
     }
 
@@ -240,6 +244,7 @@ impl PohRecorder {
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         poh_config: &PohConfig,
         is_exited: Arc<AtomicBool>,
+        target_slot_adjustment_ns: u64,
     ) -> (Self, Receiver<WorkingBankEntry>) {
         let tick_number = 0;
         let poh = Arc::new(Mutex::new(Poh::new_with_slot_info(
@@ -251,6 +256,7 @@ impl PohRecorder {
         let target_ns_per_tick = PohService::target_ns_per_tick(
             ticks_per_slot,
             poh_config.target_tick_duration.as_nanos() as u64,
+            target_slot_adjustment_ns,
         );
         let (working_bank_sender, working_bank_receiver) = unbounded();
         let (leader_first_tick_height, leader_last_tick_height, grace_ticks) =
@@ -606,7 +612,7 @@ impl PohRecorder {
     }
 
     /// Return the slot that PoH is currently ticking through.
-    fn current_poh_slot(&self) -> Slot {
+    pub fn current_poh_slot(&self) -> Slot {
         // The tick_height field is initialized to the last tick of the start
         // bank and generally indicates what tick height has already been
         // reached so use the next tick height to determine which slot poh is
@@ -652,6 +658,10 @@ impl PohRecorder {
 
     pub fn ticks_per_slot(&self) -> u64 {
         self.ticks_per_slot
+    }
+
+    pub fn target_ns_per_tick(&self) -> u64 {
+        self.target_ns_per_tick
     }
 
     pub fn new_leader_bank_notifier(&self) -> Arc<LeaderBankNotifier> {
@@ -930,6 +940,7 @@ fn do_create_test_recorder(
         crate::poh_service::DEFAULT_PINNED_CPU_CORE,
         crate::poh_service::DEFAULT_HASHES_PER_BATCH,
         record_receiver,
+        crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
     );
 
     (

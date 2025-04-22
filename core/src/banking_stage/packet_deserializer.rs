@@ -8,7 +8,10 @@ use {
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     crossbeam_channel::RecvTimeoutError,
     solana_perf::packet::PacketBatch,
-    std::{num::Saturating, time::{Duration, Instant}},
+    std::{
+        num::Saturating,
+        time::{Duration, Instant},
+    },
 };
 
 /// Results from deserializing packet batches.
@@ -20,9 +23,11 @@ pub struct ReceivePacketResults {
     pub packet_stats: PacketReceiverStats,
 }
 
+#[derive(Clone)]
+#[repr(C)]
 pub struct PacketDeserializer {
     /// Receiver for packet batches from sigverify stage
-    packet_batch_receiver: BankingPacketReceiver,
+    pub packet_batch_receiver: BankingPacketReceiver,
 }
 
 #[derive(Default, Debug, PartialEq)]
@@ -125,7 +130,8 @@ impl PacketDeserializer {
             })
             .collect();
         let Saturating(errors) = errors;
-        packet_stats.passed_sigverify_count += errors.saturating_add(deserialized_packets.len()) as u64;
+        packet_stats.passed_sigverify_count +=
+            errors.saturating_add(deserialized_packets.len()) as u64;
         packet_stats.failed_sigverify_count += packet_count
             .saturating_sub(deserialized_packets.len())
             .saturating_sub(errors) as u64;
@@ -167,6 +173,26 @@ impl PacketDeserializer {
         Ok((num_packets_received, messages))
     }
 
+    pub fn generate_packet_indexes(packet_batch: &PacketBatch) -> (Vec<usize>, Vec<(usize, bool)>) {
+        let mut accepted = Vec::with_capacity(packet_batch.len());
+        let mut rejected = Vec::with_capacity(packet_batch.len());
+
+        for (index, pkt) in packet_batch.iter().enumerate() {
+            if pkt.meta().discard() {
+                if pkt.meta().is_duplicate() {
+                    rejected.push((index, true));
+                } else {
+                    rejected.push((index, false));
+                }
+            } else {
+                accepted.push(index);
+            }
+        }
+
+        (accepted, rejected)
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn deserialize_packets_with_indexes(
         packet_batch: &PacketBatch,
     ) -> impl Iterator<Item = (ImmutableDeserializedPacket, usize)> + '_ {
@@ -184,13 +210,9 @@ impl PacketDeserializer {
 #[cfg(test)]
 mod tests {
     use {
-        super::*,
-        solana_perf::packet::to_packet_batches,
-        solana_hash::Hash,
-        solana_pubkey::Pubkey,
-        solana_keypair::Keypair,
-        solana_system_transaction as system_transaction,
-        solana_transaction::Transaction,
+        super::*, solana_hash::Hash, solana_keypair::Keypair,
+        solana_perf::packet::to_packet_batches, solana_pubkey::Pubkey,
+        solana_system_transaction as system_transaction, solana_transaction::Transaction,
     };
 
     fn random_transfer() -> Transaction {

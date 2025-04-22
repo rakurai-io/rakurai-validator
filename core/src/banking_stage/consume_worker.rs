@@ -117,7 +117,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         work: ConsumeWork<Tx>,
         reservation_cb: &impl Fn(&Bank) -> u64,
     ) -> Result<(), ConsumeWorkerError<Tx>> {
-        let output = self.consumer.process_and_record_aged_transactions(
+        let (output, cu_err_indexes) = self.consumer.process_and_record_aged_transactions(
             bank,
             &work.transactions,
             &work.max_ages,
@@ -132,6 +132,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             retryable_indexes: output
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
+            cu_err_indexes,
         })?;
         Ok(())
     }
@@ -172,6 +173,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         self.consumed_sender.send(FinishedConsumeWork {
             work,
             retryable_indexes,
+            cu_err_indexes: None,
         })?;
         Ok(())
     }
@@ -187,7 +189,7 @@ fn try_drain_iter<T>(work: T, receiver: &Receiver<T>) -> impl Iterator<Item = T>
 /// These are atomic, and intended to be reported by the scheduling thread
 /// since the consume worker thread is sleeping unless there is work to be
 /// done.
-pub(crate) struct ConsumeWorkerMetrics {
+pub struct ConsumeWorkerMetrics {
     id: String,
     interval: AtomicInterval,
     has_data: AtomicBool,
@@ -432,6 +434,7 @@ impl ConsumeWorkerMetrics {
     }
 }
 
+#[repr(C)]
 struct ConsumeWorkerCountMetrics {
     transactions_attempted_processing_count: AtomicU64,
     processed_transactions_count: AtomicU64,
@@ -512,6 +515,7 @@ impl ConsumeWorkerCountMetrics {
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTimingMetrics {
     cost_model_us: AtomicU64,
     load_execute_us: AtomicU64,
@@ -583,6 +587,7 @@ impl ConsumeWorkerTimingMetrics {
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTransactionErrorMetrics {
     total: AtomicUsize,
     account_in_use: AtomicUsize,

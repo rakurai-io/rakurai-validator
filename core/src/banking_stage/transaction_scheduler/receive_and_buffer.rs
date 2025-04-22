@@ -1,5 +1,10 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+
+use crate::banking_stage::{decision_maker::BufferedPacketsDecision, DecisionState};
+
+use solana_pubkey::Pubkey;
+use std::collections::HashSet;
 use {
     super::{
         scheduler_metrics::{SchedulerCountMetrics, SchedulerTimingMetrics},
@@ -11,8 +16,7 @@ use {
         },
     },
     crate::banking_stage::{
-        consumer::Consumer, decision_maker::BufferedPacketsDecision,
-        immutable_deserialized_packet::ImmutableDeserializedPacket,
+        consumer::Consumer, immutable_deserialized_packet::ImmutableDeserializedPacket,
         packet_deserializer::PacketDeserializer, packet_filter::MAX_ALLOWED_PRECOMPILE_SIGNATURES,
         scheduler_messages::MaxAge, TransactionStateContainer,
     },
@@ -44,17 +48,15 @@ use {
         time::Instant,
     },
 };
-use solana_pubkey::Pubkey;
-use std::collections::HashSet;
 
 #[derive(Debug)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct DisconnectedError;
+pub struct DisconnectedError;
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) trait ReceiveAndBuffer {
-    type Transaction: TransactionWithMeta + Send + Sync;
-    type Container: StateContainer<Self::Transaction> + Send + Sync;
+pub trait ReceiveAndBuffer {
+    type Transaction: TransactionWithMeta + Send + Sync + Clone;
+    type Container: StateContainer<Self::Transaction> + Send + Sync + Clone;
 
     /// Return Err if the receiver is disconnected AND no packets were
     /// received. Otherwise return Ok(num_received).
@@ -63,12 +65,17 @@ pub(crate) trait ReceiveAndBuffer {
         container: &mut Self::Container,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        decision_state: Option<&DecisionState>,
     ) -> Result<usize, DisconnectedError>;
+
+    fn packet_receiver(&self) -> BankingPacketReceiver;
+
+    fn skip_wait(&mut self) -> Option<&mut bool>;
 }
 
-#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct SanitizedTransactionReceiveAndBuffer {
+#[derive(Clone)]
+pub struct SanitizedTransactionReceiveAndBuffer {
     /// Packet/Transaction ingress.
     packet_receiver: PacketDeserializer,
     bank_forks: Arc<RwLock<BankForks>>,
@@ -85,8 +92,14 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
         container: &mut Self::Container,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<usize, DisconnectedError> {
+        let decision = if let Some(decision) = decision {
+            decision
+        } else {
+            return Ok(0); // in case decision is not found
+        };
         const MAX_RECEIVE_PACKETS: usize = 5_000;
         const MAX_PACKET_RECEIVE_TIME: Duration = Duration::from_millis(10);
         let (recv_timeout, should_buffer) = match decision {
@@ -144,6 +157,14 @@ impl ReceiveAndBuffer for SanitizedTransactionReceiveAndBuffer {
 
         Ok(num_received)
     }
+
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        self.packet_receiver.packet_batch_receiver.clone()
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
+    }
 }
 
 impl SanitizedTransactionReceiveAndBuffer {
@@ -158,7 +179,6 @@ impl SanitizedTransactionReceiveAndBuffer {
             blacklisted_accounts,
         }
     }
-
     fn buffer_packets(
         &mut self,
         container: &mut TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>>,
@@ -255,7 +275,10 @@ impl SanitizedTransactionReceiveAndBuffer {
                 let (priority, cost) =
                     calculate_priority_and_cost(&transaction, &fee_budget_limits, &working_bank);
 
-                if container.insert_new_transaction(transaction, max_age, priority, cost) {
+                if container
+                    .insert_new_transaction(transaction, max_age, priority, cost)
+                    .0
+                {
                     num_dropped_on_capacity += 1;
                 }
                 num_buffered += 1;
@@ -286,7 +309,8 @@ impl SanitizedTransactionReceiveAndBuffer {
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct TransactionViewReceiveAndBuffer {
+#[derive(Clone)]
+pub struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub bank_forks: Arc<RwLock<BankForks>>,
     pub blacklisted_accounts: HashSet<Pubkey>,
@@ -301,8 +325,14 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         container: &mut Self::Container,
         timing_metrics: &mut SchedulerTimingMetrics,
         count_metrics: &mut SchedulerCountMetrics,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<usize, DisconnectedError> {
+        let decision = if let Some(decision) = decision {
+            decision
+        } else {
+            return Ok(0); // in case decision is not found
+        };
         let (root_bank, working_bank) = {
             let bank_forks = self.bank_forks.read().unwrap();
             let root_bank = bank_forks.root_bank();
@@ -376,6 +406,14 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         }
 
         Ok(num_received)
+    }
+
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        self.receiver.clone()
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
     }
 }
 
@@ -458,13 +496,15 @@ impl TransactionViewReceiveAndBuffer {
                     }
                 }
                 // Push non-errored transaction into queue.
-                num_dropped_on_capacity += container.push_ids_into_queue(
-                    check_results
-                        .into_iter()
-                        .zip(transaction_priority_ids.drain(..))
-                        .filter(|(r, _)| r.is_ok())
-                        .map(|(_, id)| id),
-                );
+                num_dropped_on_capacity += container
+                    .push_ids_into_queue(
+                        check_results
+                            .into_iter()
+                            .zip(transaction_priority_ids.drain(..))
+                            .filter(|(r, _)| r.is_ok())
+                            .map(|(_, id)| id),
+                    )
+                    .0;
             };
 
         for packet_batch in packet_batch_message.iter() {
@@ -633,7 +673,7 @@ impl TransactionViewReceiveAndBuffer {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-fn calculate_priority_and_cost(
+pub fn calculate_priority_and_cost(
     transaction: &impl TransactionWithMeta,
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,

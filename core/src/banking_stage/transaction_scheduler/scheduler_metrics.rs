@@ -1,16 +1,20 @@
 use {
     super::scheduler::SchedulingSummary,
+    crate::banking_stage::LeaderMetaData,
     itertools::MinMaxResult,
-    solana_poh::poh_recorder::BankStart,
     solana_clock::Slot,
+    solana_poh::poh_recorder::BankStart,
     solana_time_utils::AtomicInterval,
-    std::{num::Saturating, time::{Duration, Instant}},
+    std::{
+        num::Saturating,
+        time::{Duration, Instant},
+    },
 };
 
 #[derive(Default)]
 pub struct SchedulerCountMetrics {
-    interval: IntervalSchedulerCountMetrics,
-    slot: SlotSchedulerCountMetrics,
+    pub interval: IntervalSchedulerCountMetrics,
+    pub slot: SlotSchedulerCountMetrics,
 }
 
 impl SchedulerCountMetrics {
@@ -33,15 +37,15 @@ impl SchedulerCountMetrics {
 }
 
 #[derive(Default)]
-struct IntervalSchedulerCountMetrics {
-    interval: AtomicInterval,
-    metrics: SchedulerCountMetricsInner,
+pub struct IntervalSchedulerCountMetrics {
+    pub interval: AtomicInterval,
+    pub metrics: SchedulerCountMetricsInner,
 }
 
 #[derive(Default)]
-struct SlotSchedulerCountMetrics {
-    slot: Option<Slot>,
-    metrics: SchedulerCountMetricsInner,
+pub struct SlotSchedulerCountMetrics {
+    pub slot: Option<Slot>,
+    pub metrics: SchedulerCountMetricsInner,
 }
 
 #[derive(Default)]
@@ -124,9 +128,8 @@ impl SchedulerCountMetricsInner {
             num_dropped_on_receive: Saturating(num_dropped_on_receive),
             num_dropped_on_sanitization: Saturating(num_dropped_on_sanitization),
             num_dropped_on_validate_locks: Saturating(num_dropped_on_validate_locks),
-            num_dropped_on_receive_transaction_checks: Saturating(
-                num_dropped_on_receive_transaction_checks,
-            ),
+            num_dropped_on_receive_transaction_checks:
+                Saturating(num_dropped_on_receive_transaction_checks),
             num_dropped_on_clear: Saturating(num_dropped_on_clear),
             num_dropped_on_age_and_status: Saturating(num_dropped_on_age_and_status),
             num_dropped_on_capacity: Saturating(num_dropped_on_capacity),
@@ -197,7 +200,7 @@ impl SchedulerCountMetricsInner {
             || self.num_dropped_on_capacity != Saturating(0)
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.num_received = Saturating(0);
         self.num_buffered = Saturating(0);
         self.num_scheduled = Saturating(0);
@@ -250,8 +253,8 @@ impl SchedulerCountMetricsInner {
 
 #[derive(Default)]
 pub struct SchedulerTimingMetrics {
-    interval: IntervalSchedulerTimingMetrics,
-    slot: SlotSchedulerTimingMetrics,
+    pub interval: IntervalSchedulerTimingMetrics,
+    pub slot: SlotSchedulerTimingMetrics,
 }
 
 impl SchedulerTimingMetrics {
@@ -270,15 +273,15 @@ impl SchedulerTimingMetrics {
 }
 
 #[derive(Default)]
-struct IntervalSchedulerTimingMetrics {
-    interval: AtomicInterval,
-    metrics: SchedulerTimingMetricsInner,
+pub struct IntervalSchedulerTimingMetrics {
+    pub interval: AtomicInterval,
+    pub metrics: SchedulerTimingMetricsInner,
 }
 
 #[derive(Default)]
-struct SlotSchedulerTimingMetrics {
-    slot: Option<Slot>,
-    metrics: SchedulerTimingMetricsInner,
+pub struct SlotSchedulerTimingMetrics {
+    pub slot: Option<Slot>,
+    pub metrics: SchedulerTimingMetricsInner,
 }
 
 #[derive(Default)]
@@ -360,7 +363,7 @@ impl SchedulerTimingMetricsInner {
         solana_metrics::submit(datapoint, log::Level::Info);
     }
 
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         self.decision_time_us = Saturating(0);
         self.receive_time_us = Saturating(0);
         self.buffer_time_us = Saturating(0);
@@ -396,11 +399,38 @@ impl SchedulerLeaderDetectionMetrics {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn update_and_maybe_report_with_leader_meta(
+        &mut self,
+        leader_meta_data: Option<&LeaderMetaData>,
+    ) {
+        match (&self.inner, leader_meta_data) {
+            (None, Some(leader_meta_data)) => {
+                self.initialize_inner_with_leader_meta(leader_meta_data)
+            }
+            (Some(_inner), None) => self.report_and_reset(),
+            (Some(inner), Some(leader_meta_data)) if inner.slot != leader_meta_data.slot => {
+                self.report_and_reset();
+                self.initialize_inner_with_leader_meta(leader_meta_data);
+            }
+            _ => {}
+        }
+    }
+
     fn initialize_inner(&mut self, bank_start: &BankStart) {
         let bank_detected_time = Instant::now();
         self.inner = Some(SchedulerLeaderDetectionMetricsInner {
             slot: bank_start.working_bank.slot(),
             bank_creation_time: *bank_start.bank_creation_time,
+            bank_detected_time,
+        });
+    }
+
+    fn initialize_inner_with_leader_meta(&mut self, leader_meta_data: &LeaderMetaData) {
+        let bank_detected_time = Instant::now();
+        self.inner = Some(SchedulerLeaderDetectionMetricsInner {
+            slot: leader_meta_data.slot,
+            bank_creation_time: leader_meta_data.bank_creation_time,
             bank_detected_time,
         });
     }

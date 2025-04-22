@@ -1694,6 +1694,65 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help("Number of CUs to allocate for bundles at beginning of slot.")
     )
     .arg(
+        Arg::with_name("rewards_merkle_root_authority")
+            .long("rewards-merkle-root-authority")
+            .value_name("REWARDS_MERKLE_ROOT_AUTHORITY")
+            .takes_value(true)
+            .help("The public key of authorized rewards merkle-root uploader/distributor.")
+    ).arg(
+        Arg::with_name("rakurai_activation_program_id")
+            .long("rakurai-activation-program-id")
+            .value_name("RAKURAI_ACTIVATION_PROGRAM_ID")
+            .takes_value(true)
+            .help("The public key of rakurai activation program")
+    ).arg(
+        Arg::with_name("reward_distribution_program_id")
+            .long("reward-distribution-program-id")
+            .value_name("REWARD_DISTRIBUTION_PROGRAM_ID")
+            .takes_value(true)
+            .help("The public key of rakurai reward distribution program")
+    )
+    .arg(
+        Arg::with_name("banking_packet_delay_ms")
+            .long("banking-packet-delay-ms")
+            .value_name("BANKING_PACKET_DELAY_MS")
+            .takes_value(true).default_value("0")
+            .help("This time will delay transactions in banking stage")
+    )
+    .arg(
+        Arg::with_name("target_slot_adjustment_ms")
+            .long("target-slot-adjustment-ms")
+            .value_name("TARGET_SLOT_ADJUSTMENT_MS")
+            .takes_value(true)
+            .default_value("50")
+            .help("This time is slot adjustment in ms to reduce from target 400ms slot time")
+            .validator(|v| {
+                v.parse::<u64>()
+                    .map_err(|_| String::from("Must be an integer")) // check if number
+                    .and_then(|n| {
+                        if n <= 50 {
+                            Ok(())
+                        } else {
+                            Err(String::from("Value must be between 0 and 50"))
+                        }
+                    })
+            }),
+    )
+    .arg(
+        Arg::with_name("tx_io_check")
+            .long("tx-io-check")
+            .help("Enable transaction input/output validation (optional string)")
+            .takes_value(true)
+            .min_values(0)  // allows zero or one value
+            .max_values(1),
+    )
+    .arg(
+        Arg::with_name("oms_connector")
+            .long("oms-connector")
+            .help("Enable the OMS (Order Management System) connector")
+            .takes_value(false)
+    )
+    .arg(
         Arg::with_name("shred_receiver_address")
             .long("shred-receiver-address")
             .value_name("SHRED_RECEIVER_ADDRESS")

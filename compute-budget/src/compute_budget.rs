@@ -9,6 +9,7 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct ComputeBudget {
     /// Number of compute units that a transaction or individual instruction is
     /// allowed to consume. Compute units are consumed by program execution,

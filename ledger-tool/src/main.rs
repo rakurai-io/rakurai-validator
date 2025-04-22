@@ -37,7 +37,7 @@ use {
     solana_cli_output::{CliAccount, OutputFormat},
     solana_clock::{Epoch, Slot},
     solana_core::{
-        banking_simulation::{BankingSimulator, BankingTraceEvents},
+        banking_simulation::{BankingSimulator, BankingTraceEvents, DeserializeVersion},
         system_monitor_service::{SystemMonitorService, SystemMonitorStatsReportConfig},
         validator::{BlockProductionMethod, BlockVerificationMethod, TransactionStructure},
     },
@@ -540,11 +540,11 @@ fn assert_capitalization(bank: &Bank) {
     assert!(bank.calculate_and_verify_capitalization(debug_verify));
 }
 
-fn load_banking_trace_events_or_exit(ledger_path: &Path) -> BankingTraceEvents {
+fn load_banking_trace_events_or_exit(ledger_path: &Path, version: DeserializeVersion) -> BankingTraceEvents {
     let file_paths = read_banking_trace_event_file_paths_or_exit(banking_trace_path(ledger_path));
 
     info!("Using: banking trace event files: {file_paths:?}");
-    match BankingTraceEvents::load(&file_paths) {
+    match BankingTraceEvents::load(&file_paths, version) {
         Ok(banking_trace_events) => banking_trace_events,
         Err(error) => {
             eprintln!("Failed to load banking trace events: {error:?}");
@@ -1531,6 +1531,13 @@ fn main() {
                         .long("no-block-cost-limits")
                         .takes_value(false)
                         .help("Disable block cost limits effectively by setting them to the max"),
+                )
+                .arg(
+                    Arg::with_name("version")
+                    .long("version")
+                    .short("v")
+                    .takes_value(true)
+                    .help("TraceData Version: v2.2, v2.3"),
                 ),
         )
         .subcommand(
@@ -1817,7 +1824,7 @@ fn main() {
 
                     let mut process_options = parse_process_options(&ledger_path, arg_matches);
                     if arg_matches.is_present("enable_hash_overrides") {
-                        let banking_trace_events = load_banking_trace_events_or_exit(&ledger_path);
+                        let banking_trace_events = load_banking_trace_events_or_exit(&ledger_path, DeserializeVersion::default());
                         process_options.hash_overrides =
                             Some(banking_trace_events.hash_overrides().clone());
                     }
@@ -2533,8 +2540,9 @@ fn main() {
                 }
                 ("simulate-block-production", Some(arg_matches)) => {
                     let mut process_options = parse_process_options(&ledger_path, arg_matches);
+                    let tracedata_version = value_t!(arg_matches, "version", DeserializeVersion).unwrap_or_default();
 
-                    let banking_trace_events = load_banking_trace_events_or_exit(&ledger_path);
+                    let banking_trace_events = load_banking_trace_events_or_exit(&ledger_path, tracedata_version);
                     process_options.hash_overrides =
                         Some(banking_trace_events.hash_overrides().clone());
 

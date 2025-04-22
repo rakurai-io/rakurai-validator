@@ -11,13 +11,13 @@ use {
 pub(crate) const MAX_THREADS: usize = u64::BITS as usize;
 
 /// Identifier for a thread
-pub(crate) type ThreadId = usize; // 0..MAX_THREADS-1
+pub type ThreadId = usize; // 0..MAX_THREADS-1
 
 type LockCount = u32;
 
 /// A bit-set of threads an account is scheduled or can be scheduled for.
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub(crate) struct ThreadSet(u64);
+pub struct ThreadSet(u64);
 
 struct AccountWriteLocks {
     thread_id: ThreadId,
@@ -53,7 +53,7 @@ pub(crate) enum TryLockError {
 /// that already hold locks on the account. This is useful for allowing
 /// queued transactions to be scheduled on a thread while the transaction
 /// is still being executed on the thread.
-pub(crate) struct ThreadAwareAccountLocks {
+pub struct ThreadAwareAccountLocks {
     /// Number of threads.
     num_threads: usize, // 0..MAX_THREADS
     /// Locks for each account. An account should only have an entry if there
@@ -63,6 +63,7 @@ pub(crate) struct ThreadAwareAccountLocks {
 
 impl ThreadAwareAccountLocks {
     /// Creates a new `ThreadAwareAccountLocks` with the given number of threads.
+    #[allow(dead_code)]
     pub(crate) fn new(num_threads: usize) -> Self {
         assert!(num_threads > 0, "num threads must be > 0");
         assert!(

@@ -1,6 +1,7 @@
 use std::net::{IpAddr, SocketAddr};
 
 #[derive(Clone, Copy)]
+#[repr(C)]
 pub enum SocketAddrSpace {
     Unspecified,
     Global,

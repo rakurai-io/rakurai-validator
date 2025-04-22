@@ -34,6 +34,7 @@ pub type SlotDelta<T> = (Slot, bool, Status<T>);
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct StatusCache<T: Serialize + Clone> {
     cache: KeyStatusMap<T>,
     roots: HashSet<Slot>,

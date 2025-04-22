@@ -12,6 +12,7 @@ pub type EpochAuthorizedVoters = HashMap<Pubkey, Pubkey>;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Serialize, Debug, Deserialize, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct NodeVoteAccounts {
     pub vote_accounts: Vec<Pubkey>,
     pub total_stake: u64,
@@ -20,6 +21,7 @@ pub struct NodeVoteAccounts {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
+#[repr(C)]
 pub struct EpochStakes {
     #[serde(with = "serde_stakes_to_delegation_format")]
     stakes: Arc<StakesEnum>,

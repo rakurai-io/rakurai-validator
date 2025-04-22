@@ -1,5 +1,10 @@
+use std::{collections::HashMap, num::Saturating};
+
+use crate::banking_stage::{transaction_scheduler::scheduler::SchedulerInfo, CostTrackerChannels};
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_cost_model::cost_tracker::CostTracker;
+
 use {
     super::{
         scheduler::{PreLockFilterAction, Scheduler, SchedulingSummary},
@@ -27,7 +32,6 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm_transaction::svm_message::SVMMessage,
-    std::num::Saturating,
 };
 
 #[inline(always)]
@@ -108,6 +112,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
         container: &mut S,
         pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         pre_lock_filter: impl Fn(&TransactionState<Tx>) -> PreLockFilterAction,
+        _batches: Option<&mut Batches<Tx>>,
+        _prio_graph_info: Option<&mut SchedulerInfo>,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let starting_queue_size = container.queue_size();
         let starting_buffer_size = container.buffer_size();
@@ -343,9 +349,60 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for PrioGraphScheduler<Tx> {
         })
     }
 
+    fn receive_completed(
+        &mut self,
+        container: &mut impl StateContainer<Tx>,
+        _cost_tracker_channels: Option<&mut CostTrackerChannels>,
+    ) -> Result<(usize, usize, Vec<u64>), SchedulerError> {
+        let mut total_num_transactions = Saturating::<usize>(0);
+        let mut total_num_retryable = Saturating::<usize>(0);
+        loop {
+            let (num_transactions, num_retryable) = self
+                .scheduling_common_mut()
+                .try_receive_completed(container, None)?;
+            if num_transactions == 0 {
+                break;
+            }
+            total_num_transactions += num_transactions;
+            total_num_retryable += num_retryable;
+        }
+        let Saturating(total_num_transactions) = total_num_transactions;
+        let Saturating(total_num_retryable) = total_num_retryable;
+        Ok((total_num_transactions, total_num_retryable, vec![]))
+    }
+
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         &mut self.common
     }
+
+    // returns if txns are in flight
+    fn in_flight_txns(&mut self) -> bool {
+        !self
+            .scheduling_common_mut()
+            .in_flight_tracker
+            .num_in_flight_per_thread()
+            .iter()
+            .all(|txns_count| *txns_count == 0)
+    }
+
+    fn in_flight_cus(&mut self) -> u64 {
+        self.scheduling_common_mut()
+            .in_flight_tracker
+            .cus_in_flight_per_thread()
+            .iter()
+            .sum()
+    }
+
+    fn cleanup_at_slot_boundary(&mut self) {}
+
+    fn retry_tx_ids<S: StateContainer<Tx>>(&mut self, _container: &mut S) {}
+
+    fn refresh_if_needed(
+        &mut self,
+        _accts_limit_reached: &HashMap<Pubkey, u64, ahash::RandomState>,
+    ) {
+    }
+    fn sync_cost_tracker(&mut self, _cost_tracker: &CostTracker) {}
 }
 
 impl<Tx: TransactionWithMeta> PrioGraphScheduler<Tx> {
@@ -703,7 +760,7 @@ mod tests {
                 retryable_indexes: vec![],
             })
             .unwrap();
-        scheduler.receive_completed(&mut container).unwrap();
+        scheduler.receive_completed(&mut container, None).unwrap();
         let scheduling_summary = scheduler
             .schedule(&mut container, test_pre_graph_filter, test_pre_lock_filter)
             .unwrap();

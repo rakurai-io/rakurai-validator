@@ -10,6 +10,13 @@ pub struct ReadWriteAccountSet {
 }
 
 impl ReadWriteAccountSet {
+    pub fn new_with_capacity(capacity: usize) -> Self {
+        Self {
+            read_set: AHashSet::with_capacity(capacity),
+            write_set: AHashSet::with_capacity(capacity),
+        }
+    }
+
     /// Returns true if all account locks were available and false otherwise.
     pub fn check_locks(&self, message: &impl SVMMessage) -> bool {
         message

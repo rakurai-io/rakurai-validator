@@ -113,6 +113,7 @@ impl fmt::Display for AllocErr {
     }
 }
 
+#[repr(C)]
 pub struct BpfAllocator {
     len: u64,
     pos: u64,
@@ -141,6 +142,7 @@ impl BpfAllocator {
     }
 }
 
+#[repr(C)]
 pub struct EnvironmentConfig<'a> {
     pub blockhash: Hash,
     pub blockhash_lamports_per_signature: u64,
@@ -166,6 +168,7 @@ impl<'a> EnvironmentConfig<'a> {
     }
 }
 
+#[repr(C)]
 pub struct SyscallContext {
     pub allocator: BpfAllocator,
     pub accounts_metadata: Vec<SerializedAccountMetadata>,
@@ -173,6 +176,7 @@ pub struct SyscallContext {
 }
 
 #[derive(Debug, Clone)]
+#[repr(C)]
 pub struct SerializedAccountMetadata {
     pub original_data_len: usize,
     pub vm_data_addr: u64,
@@ -182,6 +186,7 @@ pub struct SerializedAccountMetadata {
 }
 
 /// Main pipeline from runtime to program execution.
+#[repr(C)]
 pub struct InvokeContext<'a> {
     /// Information about the currently executing transaction.
     pub transaction_context: &'a mut TransactionContext,

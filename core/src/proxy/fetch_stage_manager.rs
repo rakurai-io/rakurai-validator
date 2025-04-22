@@ -20,7 +20,7 @@ const DISCONNECT_DELAY: Duration = Duration::from_secs(60);
 const METRICS_CADENCE: Duration = Duration::from_secs(1);
 
 /// Manages switching between the validator's tpu ports and that of the proxy's.
-/// Switch-overs are triggered by late and missed heartbeats.    
+/// Switch-overs are triggered by late and missed heartbeats.
 pub struct FetchStageManager {
     t_hdl: JoinHandle<()>,
 }
@@ -84,7 +84,10 @@ impl FetchStageManager {
                 select! {
                     recv(packet_intercept_rx) -> pkt => {
                         match pkt {
-                            Ok(pkt) => {
+                            Ok(mut pkt) => {
+                                for mut packet in pkt.iter_mut() {
+                                    packet.meta_mut().set_delay(true);
+                                }
                                 if fetch_connected {
                                     if packet_tx.send(pkt).is_err() {
                                         error!("{:?}", ProxyError::PacketForwardError);

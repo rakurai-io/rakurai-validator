@@ -4,6 +4,7 @@ use {
             immutable_deserialized_packet::{DeserializedPacketError, ImmutableDeserializedPacket},
             packet_filter::PacketFilterFailure,
         },
+        banking_trace::BankingPacketSender,
         packet_bundle::PacketBundle,
     },
     solana_bundle::SanitizedBundle,
@@ -17,6 +18,7 @@ use {
     std::{
         collections::{hash_map::RandomState, HashSet},
         iter::repeat_n,
+        sync::Arc,
     },
     thiserror::Error,
 };
@@ -64,6 +66,19 @@ pub enum DeserializedBundleError {
 pub struct ImmutableDeserializedBundle {
     bundle_id: String,
     packets: Vec<ImmutableDeserializedPacket>,
+    bundle_priority: u64,
+}
+
+impl Ord for ImmutableDeserializedBundle {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bundle_priority.cmp(&other.bundle_priority)
+    }
+}
+
+impl PartialOrd for ImmutableDeserializedBundle {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl ImmutableDeserializedBundle {
@@ -73,6 +88,7 @@ impl ImmutableDeserializedBundle {
         packet_filter: &impl Fn(
             ImmutableDeserializedPacket,
         ) -> Result<ImmutableDeserializedPacket, PacketFilterFailure>,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<Self, DeserializedBundleError> {
         // Checks: non-zero, less than some length, marked for discard, signature verification failed, failed to sanitize to
         // ImmutableDeserializedPacket
@@ -95,6 +111,9 @@ impl ImmutableDeserializedBundle {
         {
             return Err(DeserializedBundleError::SignatureVerificationFailure);
         }
+        non_vote_sender
+            .send_bundle(Arc::new(bundle.clone()))
+            .map_err(|_| DeserializedBundleError::SignatureVerificationFailure)?;
 
         let mut immutable_packets = Vec::with_capacity(bundle.batch.len());
         for packet in bundle.batch.iter() {
@@ -102,10 +121,27 @@ impl ImmutableDeserializedBundle {
             let immutable_packet = packet_filter(immutable_packet)?;
             immutable_packets.push(immutable_packet);
         }
+        let (reward, cu) =
+            immutable_packets
+                .iter()
+                .fold((0u64, 0u64), |(acc_reward, acc_cu), packet| {
+                    (
+                        acc_reward
+                            + packet
+                                .compute_unit_price
+                                .saturating_mul(packet.compute_unit_limit as u64)
+                            + packet.tip,
+                        acc_cu + packet.compute_unit_limit as u64,
+                    )
+                });
+        let bundle_priority = reward
+            .saturating_mul(1_000_000)
+            .saturating_div(cu.saturating_add(1));
 
         Ok(Self {
             bundle_id: bundle.bundle_id.clone(),
             packets: immutable_packets,
+            bundle_priority,
         })
     }
 

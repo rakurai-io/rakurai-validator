@@ -16,6 +16,7 @@ const STAND_BY_SENTINEL_ID: u64 = u64::MAX;
 ///     1. A leader bank initiates (=PoH-initiated)
 ///     2. A leader slot completes (=PoH-completed)
 #[derive(Debug)]
+#[repr(C)]
 pub struct LeaderBankNotifier {
     /// Current state (slot, bank, and status) of the system
     state: Mutex<SlotAndBankWithStatus>,
@@ -38,6 +39,7 @@ impl Default for LeaderBankNotifier {
 
 /// Leader status state machine for the validator.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 enum Status {
     /// The leader bank is not currently available. Either not initialized, or PoH-completed bank.
     #[default]
@@ -47,6 +49,7 @@ enum Status {
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 struct SlotAndBankWithStatus {
     status: Status,
     slot: Option<Slot>,

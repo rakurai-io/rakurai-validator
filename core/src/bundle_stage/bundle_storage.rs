@@ -3,6 +3,7 @@ use {
         bundle_stage::bundle_stage_leader_metrics::BundleStageLeaderMetrics,
         immutable_deserialized_bundle::ImmutableDeserializedBundle,
     },
+    min_max_heap::MinMaxHeap,
     solana_bundle::{
         bundle_execution::LoadAndExecuteBundleError, BundleExecutionError, SanitizedBundle,
     },
@@ -28,7 +29,7 @@ pub struct InsertPacketBundlesSummary {
 #[derive(Debug)]
 pub struct BundleStorage {
     last_update_slot: Slot,
-    unprocessed_bundle_storage: VecDeque<ImmutableDeserializedBundle>,
+    unprocessed_bundle_storage: MinMaxHeap<ImmutableDeserializedBundle>,
     // Storage for bundles that exceeded the cost model for the slot they were last attempted
     // execution on
     cost_model_buffered_bundle_storage: VecDeque<ImmutableDeserializedBundle>,
@@ -38,7 +39,7 @@ impl Default for BundleStorage {
     fn default() -> Self {
         Self {
             last_update_slot: Slot::default(),
-            unprocessed_bundle_storage: VecDeque::with_capacity(Self::BUNDLE_STORAGE_CAPACITY),
+            unprocessed_bundle_storage: MinMaxHeap::with_capacity(Self::BUNDLE_STORAGE_CAPACITY),
             cost_model_buffered_bundle_storage: VecDeque::with_capacity(
                 Self::BUNDLE_STORAGE_CAPACITY,
             ),
@@ -81,7 +82,7 @@ impl BundleStorage {
     }
 
     pub(crate) fn max_receive_size(&self) -> usize {
-        self.unprocessed_bundle_storage.capacity() - self.unprocessed_bundle_storage.len()
+        Self::BUNDLE_STORAGE_CAPACITY.saturating_sub(self.unprocessed_bundle_storage.len())
     }
 
     /// Returns the number of unprocessed bundles + cost model buffered cleared
@@ -91,6 +92,34 @@ impl BundleStorage {
         self.unprocessed_bundle_storage.clear();
         self.cost_model_buffered_bundle_storage.clear();
         (num_unprocessed_bundles, num_cost_model_buffered_bundles)
+    }
+
+    fn insert_heap_bundles(
+        heap: &mut MinMaxHeap<ImmutableDeserializedBundle>,
+        deserialized_bundles: Vec<ImmutableDeserializedBundle>,
+    ) -> InsertPacketBundlesSummary {
+        let heap_free_space = Self::BUNDLE_STORAGE_CAPACITY.saturating_sub(heap.len());
+        let bundles_to_insert_count = heap_free_space.min(deserialized_bundles.len());
+
+        let num_bundles_dropped = deserialized_bundles.len() - bundles_to_insert_count;
+        let num_packets_inserted = deserialized_bundles
+            .iter()
+            .take(bundles_to_insert_count)
+            .map(|b| b.len())
+            .sum::<usize>();
+
+        for b in deserialized_bundles
+            .into_iter()
+            .take(bundles_to_insert_count)
+        {
+            heap.push(b);
+        }
+
+        InsertPacketBundlesSummary {
+            num_bundles_inserted: bundles_to_insert_count,
+            num_packets_inserted,
+            num_bundles_dropped,
+        }
     }
 
     fn insert_bundles(
@@ -131,11 +160,7 @@ impl BundleStorage {
         &mut self,
         deserialized_bundles: Vec<ImmutableDeserializedBundle>,
     ) -> InsertPacketBundlesSummary {
-        Self::insert_bundles(
-            &mut self.unprocessed_bundle_storage,
-            deserialized_bundles,
-            false,
-        )
+        Self::insert_heap_bundles(&mut self.unprocessed_bundle_storage, deserialized_bundles)
     }
 
     fn push_back_cost_model_buffered_bundles(
@@ -153,11 +178,7 @@ impl BundleStorage {
         &mut self,
         deserialized_bundles: Vec<ImmutableDeserializedBundle>,
     ) -> InsertPacketBundlesSummary {
-        Self::insert_bundles(
-            &mut self.unprocessed_bundle_storage,
-            deserialized_bundles,
-            true,
-        )
+        Self::insert_heap_bundles(&mut self.unprocessed_bundle_storage, deserialized_bundles)
     }
 
     /// Drains bundles from the queue, sanitizes them to prepare for execution, executes them by
@@ -251,8 +272,8 @@ impl BundleStorage {
                 },
             );
 
-        // rebuffered bundles are pushed onto deque in reverse order so the first bundle is at the front
-        for bundle in rebuffered_bundles.into_iter().rev() {
+        // rebuffered bundles are pushed onto heap
+        for bundle in rebuffered_bundles {
             self.push_front_unprocessed_bundles(vec![bundle]);
         }
 
@@ -304,29 +325,31 @@ impl BundleStorage {
             self.last_update_slot = bank.slot();
         }
 
-        sanitized_bundles.extend(self.unprocessed_bundle_storage.drain(..).filter_map(
-            |packet_bundle| {
-                let r = packet_bundle.build_sanitized_bundle(
-                    &bank,
-                    blacklisted_accounts,
-                    &mut error_metrics,
-                );
-                bundle_stage_leader_metrics
-                    .bundle_stage_metrics_tracker()
-                    .increment_sanitize_transaction_result(&r);
-                match r {
-                    Ok(sanitized_bundle) => Some((packet_bundle, sanitized_bundle)),
-                    Err(e) => {
-                        debug!(
-                            "bundle id: {} error sanitizing: {}",
-                            packet_bundle.bundle_id(),
-                            e
-                        );
-                        None
+        sanitized_bundles.extend(std::iter::from_fn(|| {
+            self.unprocessed_bundle_storage
+                .pop_max()
+                .and_then(|packet_bundle| {
+                    let r = packet_bundle.build_sanitized_bundle(
+                        &bank,
+                        blacklisted_accounts,
+                        &mut error_metrics,
+                    );
+                    bundle_stage_leader_metrics
+                        .bundle_stage_metrics_tracker()
+                        .increment_sanitize_transaction_result(&r);
+                    match r {
+                        Ok(sanitized_bundle) => Some((packet_bundle, sanitized_bundle)),
+                        Err(e) => {
+                            debug!(
+                                "bundle id: {} error sanitizing: {}",
+                                packet_bundle.bundle_id(),
+                                e
+                            );
+                            None
+                        }
                     }
-                }
-            },
-        ));
+                })
+        }));
 
         let elapsed = start.elapsed().as_micros();
         bundle_stage_leader_metrics

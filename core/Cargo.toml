@@ -14,6 +14,7 @@ edition = { workspace = true }
 targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
+build_validator = []
 dev-context-only-utils = [
     "solana-perf/dev-context-only-utils",
     "solana-runtime/dev-context-only-utils",
@@ -41,6 +42,8 @@ frozen-abi = [
 ]
 
 [dependencies]
+quanta = "0.12.5"
+agave-reserved-account-keys = { workspace = true }
 agave-banking-stage-ingress-types = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-transaction-view = { workspace = true }
@@ -63,6 +66,8 @@ etcd-client = { workspace = true, features = ["tls"] }
 futures = { workspace = true }
 histogram = { workspace = true }
 itertools = { workspace = true }
+reward_distribution = { workspace = true }
+rakurai_activation = { workspace = true }
 jito-protos = { workspace = true }
 jito-tip-distribution = { workspace = true }
 jito-tip-payment = { workspace = true }
@@ -182,6 +187,7 @@ tokio = { workspace = true, features = ["full"] }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 trees = { workspace = true }
+zmq = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 jemallocator = { workspace = true }
@@ -190,6 +196,7 @@ jemallocator = { workspace = true }
 sysctl = { workspace = true }
 
 [build-dependencies]
+rustc_version = "0.4"
 tonic-build = { workspace = true }
 
 [dev-dependencies]
@@ -227,6 +234,7 @@ solana-vote = { workspace = true, features = ["dev-context-only-utils"] }
 spl-memo = { workspace = true, features = ["no-entrypoint"] }
 static_assertions = { workspace = true }
 test-case = { workspace = true }
+
 
 [badges]
 codecov = { repository = "solana-labs/solana", branch = "master", service = "github" }

@@ -23,6 +23,7 @@ use {
 
 /// A parsed and sanitized transaction view that has had all address lookups
 /// resolved.
+#[derive(Clone)]
 pub struct ResolvedTransactionView<D: TransactionData> {
     /// The parsed and sanitized transction view.
     view: TransactionView<true, D>,

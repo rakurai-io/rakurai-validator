@@ -6,6 +6,7 @@ use {
             immutable_deserialized_packet::ImmutableDeserializedPacket,
             packet_filter::PacketFilterFailure,
         },
+        banking_trace::BankingPacketSender,
         immutable_deserialized_bundle::{DeserializedBundleError, ImmutableDeserializedBundle},
         packet_bundle::PacketBundle,
     },
@@ -50,6 +51,7 @@ impl BundlePacketDeserializer {
     /// Handles receiving bundles and deserializing them
     pub fn receive_bundles(
         &self,
+        non_vote_sender: BankingPacketSender,
         recv_timeout: Duration,
         capacity: usize,
         packet_filter: &impl Fn(
@@ -64,6 +66,7 @@ impl BundlePacketDeserializer {
             &mut bundles,
             self.max_packets_per_bundle,
             packet_filter,
+            non_vote_sender,
         ))
     }
 
@@ -76,12 +79,18 @@ impl BundlePacketDeserializer {
         packet_filter: &impl Fn(
             ImmutableDeserializedPacket,
         ) -> Result<ImmutableDeserializedPacket, PacketFilterFailure>,
+        non_vote_sender: BankingPacketSender,
     ) -> ReceiveBundleResults {
         let mut deserialized_bundles = Vec::with_capacity(bundle_count.0);
         let mut num_dropped_bundles = Saturating(0);
 
         for bundle in bundles.iter_mut() {
-            match Self::deserialize_bundle(bundle, max_packets_per_bundle, packet_filter) {
+            match Self::deserialize_bundle(
+                bundle,
+                max_packets_per_bundle,
+                packet_filter,
+                non_vote_sender.clone(),
+            ) {
                 Ok(deserialized_bundle) => {
                     deserialized_bundles.push(deserialized_bundle);
                 }
@@ -139,8 +148,14 @@ impl BundlePacketDeserializer {
         packet_filter: &impl Fn(
             ImmutableDeserializedPacket,
         ) -> Result<ImmutableDeserializedPacket, PacketFilterFailure>,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<ImmutableDeserializedBundle, DeserializedBundleError> {
-        ImmutableDeserializedBundle::new(bundle, max_packets_per_bundle, packet_filter)
+        ImmutableDeserializedBundle::new(
+            bundle,
+            max_packets_per_bundle,
+            packet_filter,
+            non_vote_sender.clone(),
+        )
     }
 }
 

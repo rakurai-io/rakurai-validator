@@ -217,7 +217,7 @@ mod address_lookup_table;
 pub mod bank_hash_details;
 mod builtin_programs;
 pub mod builtins;
-mod check_transactions;
+pub mod check_transactions;
 pub mod epoch_accounts_hash_utils;
 mod fee_distribution;
 mod metrics;
@@ -269,6 +269,7 @@ impl AddAssign for SquashTiming {
 }
 
 #[derive(Debug, Default, PartialEq)]
+#[repr(C)]
 pub struct CollectorFeeDetails {
     transaction_fee: u64,
     priority_fee: u64,
@@ -282,6 +283,15 @@ impl CollectorFeeDetails {
         self.priority_fee = self
             .priority_fee
             .saturating_add(fee_details.prioritization_fee());
+    }
+
+    pub(crate) fn total_block_rewards(&self, fee_rate_governor: FeeRateGovernor) -> u64 {
+        let (deposit, _burn) = if self.transaction_fee != 0 {
+            fee_rate_governor.burn(self.transaction_fee)
+        } else {
+            (0, 0)
+        };
+        deposit.saturating_add(self.priority_fee)
     }
 
     pub(crate) fn total(&self) -> u64 {
@@ -299,6 +309,7 @@ impl From<FeeDetails> for CollectorFeeDetails {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct BankRc {
     /// where all the Accounts are stored
     pub accounts: Arc<Accounts>,
@@ -379,6 +390,7 @@ pub type TransactionBalances = Vec<Vec<u64>>;
 pub type PreCommitResult<'a> = Result<Option<RwLockReadGuard<'a, Hash>>>;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub enum TransactionLogCollectorFilter {
     All,
     AllWithVotes,
@@ -393,12 +405,14 @@ impl Default for TransactionLogCollectorFilter {
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct TransactionLogCollectorConfig {
     pub mentioned_addresses: HashSet<Pubkey>,
     pub filter: TransactionLogCollectorFilter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct TransactionLogInfo {
     pub signature: Signature,
     pub result: Result<()>,
@@ -407,6 +421,7 @@ pub struct TransactionLogInfo {
 }
 
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct TransactionLogCollector {
     // All the logs collected for from this Bank.  Exact contents depend on the
     // active `TransactionLogCollectorFilter`
@@ -712,10 +727,12 @@ pub trait DropCallback: fmt::Debug {
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct OptionalDropCallback(Option<Box<dyn DropCallback + Send + Sync>>);
 
 #[derive(Default, Debug, Clone, PartialEq)]
 #[cfg(feature = "dev-context-only-utils")]
+#[repr(C)]
 pub struct HashOverrides {
     hashes: HashMap<Slot, HashOverride>,
 }
@@ -753,12 +770,14 @@ impl HashOverrides {
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg(feature = "dev-context-only-utils")]
+#[repr(C)]
 struct HashOverride {
     blockhash: Hash,
     bank_hash: Hash,
 }
 
 /// Manager for the state of all accounts and programs after processing its entries.
+#[repr(C)]
 pub struct Bank {
     /// References to accounts, parent and signature status
     pub rc: BankRc,
@@ -767,7 +786,7 @@ pub struct Bank {
     pub status_cache: Arc<RwLock<BankStatusCache>>,
 
     /// FIFO queue of `recent_blockhash` items
-    blockhash_queue: RwLock<BlockhashQueue>,
+    pub blockhash_queue: RwLock<BlockhashQueue>,
 
     /// The set of parents including this bank
     pub ancestors: Ancestors,
@@ -5466,7 +5485,8 @@ impl Bank {
             ("accounts_delta_hash_us", accounts_delta_hash_us, Option<i64>),
         );
         info!(
-            "bank frozen: {slot} hash: {hash}{} signature_count: {} last_blockhash: {} capitalization: {}{}, stats: {bank_hash_stats:?}",
+            "bank frozen: {slot}, block_rewards: {}, hash: {hash} accounts_delta: {} signature_count: {} last_blockhash: {} capitalization: {}{}, stats: {bank_hash_stats:?}",
+            self.collector_fee_details.read().unwrap().total_block_rewards(self.fee_rate_governor.clone()),
             accounts_delta_hash_log.unwrap_or_default(),
             self.signature_count(),
             self.last_blockhash(),

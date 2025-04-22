@@ -51,15 +51,52 @@ static FEATURE_SET: std::sync::LazyLock<FeatureSet> =
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
 pub struct ImmutableDeserializedPacket {
-    transaction: SanitizedVersionedTransaction,
-    forwarded: bool,
-    message_hash: Hash,
-    is_simple_vote: bool,
-    compute_unit_price: u64,
-    compute_unit_limit: u32,
+    pub transaction: SanitizedVersionedTransaction,
+    pub forwarded: bool,
+    pub message_hash: Hash,
+    pub is_simple_vote: bool,
+    pub compute_unit_price: u64,
+    pub compute_unit_limit: u32,
+    pub tip: u64,
 }
 
+const JITO_TIP_ACCOUNTS: [&str; 8] = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
 impl ImmutableDeserializedPacket {
+    fn get_tip_amount(sanitized_tx: &SanitizedVersionedTransaction) -> u64 {
+        let account_keys = sanitized_tx.get_message().message.static_account_keys();
+        let mut tip_amount: u64 = 0;
+        for (program_id, instruction) in sanitized_tx.get_message().program_instructions_iter() {
+            if let Some(&_tip_account_index) = instruction.accounts.iter().find(|&&index| {
+                (index as usize) < account_keys.len()
+                    && JITO_TIP_ACCOUNTS
+                        .contains(&account_keys[index as usize].to_string().as_str())
+            }) {
+                if *program_id == solana_sdk_ids::system_program::id()
+                    && instruction.data.len() >= 8
+                {
+                    let mut amount_bytes = [0u8; 8];
+                    amount_bytes[..4].copy_from_slice(&instruction.data[4..8]);
+                    match amount_bytes.try_into().map(u64::from_le_bytes) {
+                        Ok(amount) => tip_amount += amount,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        tip_amount
+    }
+
     pub fn new(packet: PacketRef) -> Result<Self, DeserializedPacketError> {
         let versioned_transaction: VersionedTransaction = packet.deserialize_slice(..)?;
         let sanitized_transaction = SanitizedVersionedTransaction::try_from(versioned_transaction)?;
@@ -87,6 +124,8 @@ impl ImmutableDeserializedPacket {
             compute_unit_price = 0;
         };
 
+        let tip = Self::get_tip_amount(&sanitized_transaction);
+
         Ok(Self {
             transaction: sanitized_transaction,
             forwarded,
@@ -94,6 +133,7 @@ impl ImmutableDeserializedPacket {
             is_simple_vote,
             compute_unit_price,
             compute_unit_limit,
+            tip,
         })
     }
 
@@ -154,7 +194,7 @@ impl ImmutableDeserializedPacket {
         Some((tx, deactivation_slot))
     }
 
-    fn resolve_addresses_with_deactivation(
+    pub fn resolve_addresses_with_deactivation(
         transaction: &SanitizedVersionedTransaction,
         bank: &Bank,
     ) -> Result<(LoadedAddresses, Slot), AddressLoaderError> {
@@ -192,7 +232,7 @@ impl Ord for ImmutableDeserializedPacket {
 }
 
 /// Read the transaction message from packet data
-fn packet_message(packet: PacketRef) -> Result<&[u8], DeserializedPacketError> {
+pub fn packet_message(packet: PacketRef) -> Result<&[u8], DeserializedPacketError> {
     let (sig_len, sig_size) = packet
         .data(..)
         .and_then(|bytes| decode_shortu16_len(bytes).ok())

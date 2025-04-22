@@ -40,14 +40,23 @@ use {
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
+#[derive(Clone)]
+pub struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
     priority_queue: MinMaxHeap<TransactionPriorityId>,
     id_to_transaction_state: Slab<TransactionState<Tx>>,
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
+pub trait StateContainer<Tx: TransactionWithMeta> {
+    fn insert_new_transaction(
+        &mut self,
+        transaction: Tx,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+    ) -> (bool, Option<Vec<String>>);
+
     /// Create a new `TransactionStateContainer` with the given capacity.
     fn with_capacity(capacity: usize) -> Self;
 
@@ -58,8 +67,14 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Returns true if the queue is empty.
     fn is_empty(&self) -> bool;
 
+    fn len(&self) -> usize;
+
+    fn capacity(&self) -> usize;
+
     /// Get the top transaction id in the priority queue.
     fn pop(&mut self) -> Option<TransactionPriorityId>;
+
+    fn peek_max(&mut self) -> Option<TransactionPriorityId>;
 
     /// Get mutable transaction state by id.
     fn get_mut_transaction_state(&mut self, id: TransactionId)
@@ -89,7 +104,7 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     fn push_ids_into_queue(
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize;
+    ) -> (usize, Option<Vec<String>>);
 
     /// Remove transaction by id.
     fn remove_by_id(&mut self, id: TransactionId);
@@ -102,9 +117,19 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
 
 // Extra capacity is added because some additional space is needed when
 // pushing a new transaction into the container to avoid reallocation.
-pub(crate) const EXTRA_CAPACITY: usize = 64;
+pub const EXTRA_CAPACITY: usize = 64;
 
 impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<Tx> {
+    fn insert_new_transaction(
+        &mut self,
+        transaction: Tx,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+    ) -> (bool, Option<Vec<String>>) {
+        self.insert_new_transaction(transaction, max_age, priority, cost)
+    }
+
     fn with_capacity(capacity: usize) -> Self {
         Self {
             capacity,
@@ -125,8 +150,24 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         self.priority_queue.is_empty()
     }
 
+    fn len(&self) -> usize {
+        self.id_to_transaction_state.len()
+    }
+
+    fn capacity(&self) -> usize {
+        self.id_to_transaction_state.capacity()
+    }
+
     fn pop(&mut self) -> Option<TransactionPriorityId> {
         self.priority_queue.pop_max()
+    }
+
+    fn peek_max(&mut self) -> Option<TransactionPriorityId> {
+        if let Some(priority_id) = self.priority_queue.peek_max() {
+            Some(*priority_id)
+        } else {
+            None
+        }
     }
 
     fn get_mut_transaction_state(
@@ -145,7 +186,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
     fn push_ids_into_queue(
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize {
+    ) -> (usize, Option<Vec<String>>) {
         for id in priority_ids {
             self.priority_queue.push(id);
         }
@@ -159,12 +200,33 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             .len()
             .saturating_sub(self.capacity);
 
-        for _ in 0..num_dropped {
-            let priority_id = self.priority_queue.pop_min().expect("queue is not empty");
-            self.id_to_transaction_state.remove(priority_id.id);
-        }
+        let dropped_tx_signatures = if num_dropped > 0 {
+            let mut dropped_tx_signatures = vec![];
+            for _ in 0..num_dropped {
+                let priority_id = self.priority_queue.pop_min().expect("queue is not empty");
 
-        num_dropped
+                let tx_signature = self
+                    .id_to_transaction_state
+                    .get(priority_id.id)
+                    .map(|state| {
+                        state
+                            .transaction()
+                            .signatures()
+                            .first()
+                            .expect("first signature not found")
+                            .to_string()
+                    })
+                    .expect("transaction must exist");
+                dropped_tx_signatures.push(tx_signature);
+
+                self.id_to_transaction_state.remove(priority_id.id);
+            }
+            Some(dropped_tx_signatures)
+        } else {
+            None
+        };
+
+        (num_dropped, dropped_tx_signatures)
     }
 
     fn remove_by_id(&mut self, id: TransactionId) {
@@ -192,13 +254,13 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
     /// Insert a new transaction into the container's queues and maps.
     /// Returns `true` if a packet was dropped due to capacity limits.
     #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-    pub(crate) fn insert_new_transaction(
+    fn insert_new_transaction(
         &mut self,
         transaction: Tx,
         max_age: MaxAge,
         priority: u64,
         cost: u64,
-    ) -> bool {
+    ) -> (bool, Option<Vec<String>>) {
         let priority_id = {
             let entry = self.get_vacant_map_entry();
             let transaction_id = entry.key();
@@ -206,7 +268,9 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
             TransactionPriorityId::new(priority, transaction_id)
         };
 
-        self.push_ids_into_queue(std::iter::once(priority_id)) > 0
+        let (num_dropperd, num_dropped_signatures) =
+            self.push_ids_into_queue(std::iter::once(priority_id));
+        (num_dropperd > 0, num_dropped_signatures)
     }
 
     fn get_vacant_map_entry(&mut self) -> VacantEntry<TransactionState<Tx>> {
@@ -216,12 +280,13 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
 }
 
 pub type SharedBytes = Arc<Vec<u8>>;
-pub(crate) type RuntimeTransactionView = RuntimeTransaction<ResolvedTransactionView<SharedBytes>>;
-pub(crate) type TransactionViewState = TransactionState<RuntimeTransactionView>;
+pub type RuntimeTransactionView = RuntimeTransaction<ResolvedTransactionView<SharedBytes>>;
+pub type TransactionViewState = TransactionState<RuntimeTransactionView>;
 
 /// A wrapper around `TransactionStateContainer` that allows re-uses
 /// pre-allocated `Bytes` to copy packet data into and use for serialization.
 /// This is used to avoid allocations in parsing transactions.
+#[derive(Clone)]
 pub struct TransactionViewStateContainer {
     inner: TransactionStateContainer<RuntimeTransactionView>,
     bytes_buffer: Box<[SharedBytes]>,
@@ -230,7 +295,7 @@ pub struct TransactionViewStateContainer {
 impl TransactionViewStateContainer {
     /// Insert into the map, but NOT into the priority queue.
     /// Returns the id of the transaction if it was inserted.
-    pub(crate) fn try_insert_map_only_with_data(
+    pub fn try_insert_map_only_with_data(
         &mut self,
         data: &[u8],
         f: impl FnOnce(SharedBytes) -> Result<TransactionState<RuntimeTransactionView>, ()>,
@@ -270,6 +335,17 @@ impl TransactionViewStateContainer {
 }
 
 impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
+    fn insert_new_transaction(
+        &mut self,
+        transaction: RuntimeTransactionView,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+    ) -> (bool, Option<Vec<String>>) {
+        self.inner
+            .insert_new_transaction(transaction, max_age, priority, cost)
+    }
+
     fn with_capacity(capacity: usize) -> Self {
         let inner = TransactionStateContainer::with_capacity(capacity);
         let bytes_buffer = (0..inner.id_to_transaction_state.capacity())
@@ -297,9 +373,25 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
         self.inner.is_empty()
     }
 
+    fn capacity(&self) -> usize {
+        self.inner.id_to_transaction_state.capacity()
+    }
+
+    fn len(&self) -> usize {
+        self.inner.id_to_transaction_state.len()
+    }
+
     #[inline]
     fn pop(&mut self) -> Option<TransactionPriorityId> {
         self.inner.pop()
+    }
+
+    fn peek_max(&mut self) -> Option<TransactionPriorityId> {
+        if let Some(priority_id) = self.inner.priority_queue.peek_max() {
+            Some(*priority_id)
+        } else {
+            None
+        }
     }
 
     #[inline]
@@ -319,7 +411,7 @@ impl StateContainer<RuntimeTransactionView> for TransactionViewStateContainer {
     fn push_ids_into_queue(
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize {
+    ) -> (usize, Option<Vec<String>>) {
         self.inner.push_ids_into_queue(priority_ids)
     }
 

@@ -15,11 +15,16 @@ targets = ["x86_64-unknown-linux-gnu"]
 [lib]
 name = "solana_metrics"
 
+[features]
+default = ["influxdb"]
+without_influxdb = []
+influxdb = ["reqwest"]
+
 [dependencies]
 crossbeam-channel = { workspace = true }
 gethostname = { workspace = true }
 log = { workspace = true }
-reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"] }
+reqwest = { workspace = true, features = ["blocking", "brotli", "deflate", "gzip", "rustls-tls", "json"], optional = true }
 solana-cluster-type = { workspace = true }
 solana-sha256-hasher = { workspace = true }
 solana-time-utils = { workspace = true }

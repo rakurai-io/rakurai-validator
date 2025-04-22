@@ -148,6 +148,7 @@ impl<T: AsRef<[u8]>> BloomHashIndex for T {
 /// Bloom filter that can be used concurrently.
 /// Concurrent reads/writes are safe, but are not atomic at the struct level,
 /// this means that reads may see partial writes.
+#[repr(C)]
 pub struct ConcurrentBloom<T> {
     num_bits: u64,
     keys: Vec<u64>,

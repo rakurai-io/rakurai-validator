@@ -1,8 +1,14 @@
+use std::{collections::HashMap, num::Saturating};
+
+use crate::banking_stage::CostTrackerChannels;
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_cost_model::cost_tracker::CostTracker;
+use solana_pubkey::Pubkey;
+
 use {
     super::{
-        scheduler::{PreLockFilterAction, Scheduler, SchedulingSummary},
+        scheduler::{PreLockFilterAction, Scheduler, SchedulerInfo, SchedulingSummary},
         scheduler_common::{
             select_thread, Batches, SchedulingCommon, TransactionSchedulingError,
             TransactionSchedulingInfo,
@@ -21,7 +27,6 @@ use {
     crossbeam_channel::{Receiver, Sender},
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-    std::num::Saturating,
 };
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
@@ -73,6 +78,8 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
         container: &mut S,
         _pre_graph_filter: impl Fn(&[&Tx], &mut [bool]),
         pre_lock_filter: impl Fn(&TransactionState<Tx>) -> PreLockFilterAction,
+        _batches: Option<&mut Batches<Tx>>,
+        _prio_graph_info: Option<&mut SchedulerInfo>,
     ) -> Result<SchedulingSummary, SchedulerError> {
         let starting_queue_size = container.queue_size();
         let starting_buffer_size = container.buffer_size();
@@ -217,6 +224,58 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             filter_time_us: 0,
         })
     }
+
+    fn receive_completed(
+        &mut self,
+        container: &mut impl StateContainer<Tx>,
+        _cost_tracker_channels: Option<&mut CostTrackerChannels>,
+    ) -> Result<(usize, usize, Vec<u64>), SchedulerError> {
+        let mut total_num_transactions = Saturating::<usize>(0);
+        let mut total_num_retryable = Saturating::<usize>(0);
+        loop {
+            let (num_transactions, num_retryable) = self
+                .scheduling_common_mut()
+                .try_receive_completed(container, None)?;
+            if num_transactions == 0 {
+                break;
+            }
+            total_num_transactions += num_transactions;
+            total_num_retryable += num_retryable;
+        }
+        let Saturating(total_num_transactions) = total_num_transactions;
+        let Saturating(total_num_retryable) = total_num_retryable;
+        Ok((total_num_transactions, total_num_retryable, vec![]))
+    }
+
+    // returns if txns are in flight
+    fn in_flight_txns(&mut self) -> bool {
+        !self
+            .scheduling_common_mut()
+            .in_flight_tracker
+            .num_in_flight_per_thread()
+            .iter()
+            .all(|txns_count| *txns_count == 0)
+    }
+
+    fn in_flight_cus(&mut self) -> u64 {
+        self.scheduling_common_mut()
+            .in_flight_tracker
+            .cus_in_flight_per_thread()
+            .iter()
+            .sum()
+    }
+
+    fn cleanup_at_slot_boundary(&mut self) {}
+
+    fn retry_tx_ids<S: StateContainer<Tx>>(&mut self, _container: &mut S) {}
+
+    fn refresh_if_needed(
+        &mut self,
+        _accts_limit_reached: &HashMap<Pubkey, u64, ahash::RandomState>,
+    ) {
+    }
+
+    fn sync_cost_tracker(&mut self, _cost_tracker: &CostTracker) {}
 
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         &mut self.common

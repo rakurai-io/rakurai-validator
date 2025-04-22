@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+use solana_runtime::bank::Bank;
 use {
     super::{
         in_flight_tracker::InFlightTracker,
@@ -19,10 +22,10 @@ use {
 };
 
 pub struct Batches<Tx> {
-    ids: Vec<Vec<TransactionId>>,
-    transactions: Vec<Vec<Tx>>,
-    max_ages: Vec<Vec<MaxAge>>,
-    total_cus: Vec<u64>,
+    pub ids: Vec<Vec<TransactionId>>,
+    pub transactions: Vec<Vec<Tx>>,
+    pub max_ages: Vec<Vec<MaxAge>>,
+    pub total_cus: Vec<u64>,
 }
 
 impl<Tx> Batches<Tx> {
@@ -132,11 +135,11 @@ pub fn select_thread<Tx>(
 
 /// Common scheduler communication structure.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct SchedulingCommon<Tx> {
-    pub(crate) consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
-    pub(crate) finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    pub(crate) in_flight_tracker: InFlightTracker,
-    pub(crate) account_locks: ThreadAwareAccountLocks,
+pub struct SchedulingCommon<Tx> {
+    pub consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+    pub finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
+    pub in_flight_tracker: InFlightTracker,
+    pub account_locks: ThreadAwareAccountLocks,
 }
 
 impl<Tx> SchedulingCommon<Tx> {
@@ -212,6 +215,7 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
     pub fn try_receive_completed(
         &mut self,
         container: &mut impl StateContainer<Tx>,
+        _bank: Option<&Arc<Bank>>,
     ) -> Result<(usize, usize), SchedulerError> {
         match self.finished_consume_work_receiver.try_recv() {
             Ok(FinishedConsumeWork {
@@ -223,6 +227,7 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                         max_ages: _,
                     },
                 retryable_indexes,
+                cu_err_indexes: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();

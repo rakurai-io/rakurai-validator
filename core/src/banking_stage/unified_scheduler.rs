@@ -58,7 +58,7 @@ pub(crate) fn ensure_banking_stage_setup(
 
     let banking_packet_handler = Box::new(
         move |helper: &BankingStageHelper, batches: BankingPacketBatch| {
-            let decision = decision_maker.make_consume_or_forward_decision();
+            let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
             if matches!(decision, BufferedPacketsDecision::Forward) {
                 // discard newly-arriving packets. note that already handled packets (thus buffered
                 // by scheduler internally) will be discarded as well via BankingStageMonitor api

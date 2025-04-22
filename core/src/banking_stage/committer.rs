@@ -1,5 +1,7 @@
 use {
     super::leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+    crate::banking_stage::house_keeper::TxOutputStatus,
+    crossbeam_channel::Sender,
     itertools::Itertools,
     solana_cost_model::cost_model::CostModel,
     solana_ledger::{
@@ -34,9 +36,10 @@ pub enum CommitTransactionDetails {
 
 #[derive(Clone)]
 pub struct Committer {
-    transaction_status_sender: Option<TransactionStatusSender>,
-    replay_vote_sender: ReplayVoteSender,
-    prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    pub transaction_status_sender: Option<TransactionStatusSender>,
+    pub replay_vote_sender: ReplayVoteSender,
+    pub prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+    pub output_tx_signature_sender: Option<Sender<TxOutputStatus>>,
 }
 
 impl Committer {
@@ -44,11 +47,13 @@ impl Committer {
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         prioritization_fee_cache: Arc<PrioritizationFeeCache>,
+        output_tx_signature_sender: Option<Sender<TxOutputStatus>>,
     ) -> Self {
         Self {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            output_tx_signature_sender,
         }
     }
 
