@@ -185,6 +185,12 @@ if [[ $CI_OS_NAME != windows ]]; then
   fi
 fi
 
+# Copy Rakurai scheduler library if it exists
+if [[ -f target/$buildProfile/librakurai_scheduler_1_0.so ]]; then
+  cp -fv target/$buildProfile/librakurai_scheduler_1_0.so "$installDir"/bin/deps
+fi
+
+
 if [[ -z "$validatorOnly" ]]; then
   # shellcheck disable=SC2086 # Don't want to double quote $rust_version
   "$cargo" $maybeRustVersion build --manifest-path syscalls/gen-syscall-list/Cargo.toml

@@ -448,7 +448,11 @@ fn add_to_path(new_path: &str) -> bool {
 
 #[cfg(unix)]
 fn add_to_path(new_path: &str) -> bool {
-    let shell_export_string = format!("\nexport PATH=\"{new_path}:$PATH\"");
+    let path_export = format!("\nexport PATH=\"{new_path}:$PATH\"");
+    let ld_export = format!(
+        "\nexport LD_LIBRARY_PATH=\"$LD_LIBRARY_PATH:{new_path}:{new_path}/bin/deps\""
+    );
+
     let mut modified_rcfiles = false;
 
     // Look for sh, bash, and zsh rc files
@@ -491,27 +495,36 @@ fn add_to_path(new_path: &str) -> bool {
                 println!("Unable to read {rcfile:?}: {err}");
             }
             Ok(contents) => {
-                if !contents.contains(&shell_export_string) {
+                let mut lines_to_add = Vec::new();
+
+                if !contents.contains(&path_export) {
+                    lines_to_add.push(path_export.clone());
+                }
+                if !contents.contains(&ld_export) {
+                    lines_to_add.push(ld_export.clone());
+                }
+
+                if !lines_to_add.is_empty() {
                     println!(
                         "Adding {} to {}",
-                        style(&shell_export_string).italic(),
+                        style(lines_to_add.join(" ")).italic(),
                         style(rcfile.to_str().unwrap()).bold()
                     );
 
-                    fn append_file(dest: &Path, line: &str) -> io::Result<()> {
+                    fn append_file(dest: &Path, lines: &[String]) -> io::Result<()> {
                         use std::io::Write;
                         let mut dest_file = fs::OpenOptions::new()
                             .append(true)
                             .create(true)
                             .open(dest)?;
 
-                        writeln!(&mut dest_file, "{line}")?;
-
+                        for line in lines {
+                            writeln!(&mut dest_file, "{line}")?;
+                        }
                         dest_file.sync_data()?;
-
                         Ok(())
                     }
-                    append_file(&rcfile, &shell_export_string).unwrap_or_else(|err| {
+                    append_file(&rcfile, &lines_to_add).unwrap_or_else(|err| {
                         println!("Unable to append to {rcfile:?}: {err}");
                     });
                     modified_rcfiles = true;
@@ -522,10 +535,11 @@ fn add_to_path(new_path: &str) -> bool {
 
     if modified_rcfiles {
         println!(
-            "\n{}\n  {}\n",
-            style("Close and reopen your terminal to apply the PATH changes or run the following in your existing shell:").bold().blue(),
-            shell_export_string
-       );
+            "\n{}\n  {}\n  {}\n",
+            style("Close and reopen your terminal to apply the changes or run the following in your existing shell:").bold().blue(),
+            path_export,
+            ld_export
+        );
     }
 
     modified_rcfiles
