@@ -1,0 +1,48 @@
+name: Rakurai Scheduler Binary Attestation
+
+on:
+    push:
+        tags:
+            - "*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+
+        steps:
+        - uses: actions/checkout@v4
+          with:
+            submodules: true 
+      
+        - name: Clone Scheduler Private Repository
+          uses: actions/checkout@v4
+          with:
+            repository: rakurai-io/scheduler_1_0
+            ref: v3.0.1-rakurai.0
+            token: ${{ secrets.RAKURAI_SCHEDULER }}
+            path: core/src/banking_stage/rakurai_scheduler
+            submodules: true
+
+        - name: Install Dependencies
+          run: |
+            rustup update
+            sudo apt-get update
+            sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
+
+        - name: Build Scheduler Library
+          run: |
+            git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
+            cargo build --release -p rakurai-scheduler
+
+        # - name: Generate artifact attestation
+        #   uses: actions/attest-build-provenance@v3
+        #   with:
+        #     subject-path: 'target/release/librakurai_scheduler_1_0.so'
