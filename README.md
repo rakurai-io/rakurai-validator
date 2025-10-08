@@ -27,6 +27,7 @@ The Rakurai Validator node is designed to maximize block rewards by leveraging a
       - [Step 5: Add Additional CLI Args](#step-5-add-additional-cli-args)
         - [Mainnet Arguments](#mainnet-arguments)
         - [Testnet Arguments](#testnet-arguments)
+- [Verify Scheduler Binary Attestation](#verify-scheduler-binary-attestation)
 
 ---
 
@@ -269,5 +270,9 @@ will default to `50` if not specified. We recommend setting it to `0` which tran
 *Important*: 
  - If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai will automatically distribute rewards to your stakers using the reward distribution program. 
  - If you set it to any other address, you will need to run the claim workflow manually.
-  
+
+# Verify Scheduler Binary Attestation
+
+The Rakurai scheduler binary comes with [GitHub artifact attestation](https://docs.github.com/en/actions/concepts/security/artifact-attestations), providing cryptographic proof of its build provenance and integrity. You can validate the scheduler binary by following the detailed instructions in the [Attestation Guide](./VERIFY-BINARY-ATTESTATION.md).
+
 ---
