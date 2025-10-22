@@ -51,18 +51,10 @@ jobs:
           with:
             subject-path: 'target/release/librakurai_scheduler_1_0.so'
 
-        - name: Get branch name for tagged commit
-          id: branch_name
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          run: |
-            BRANCH_NAME=$(gh api repos/${{ github.repository }}/commits/${{ github.sha }}/branches-where-head --jq '.[0].name' || echo "unknown")
-            echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
-            echo "Branch name is $BRANCH_NAME"
-
         - name: Create tar of scheduler library
           run: |
-            TAR_NAME="${{ steps.branch_name.outputs.branch_name }}_${{ matrix.os }}.tar.gz"
+            TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
+            mkdir -p release
             tar -cvzf $TAR_NAME target/release/librakurai_scheduler_1_0.so
 
         - name: Copy binary to Backend
@@ -76,9 +68,24 @@ jobs:
             echo "$BACKEND_SSH_KEY" > backend_key.pem
             chmod 600 backend_key.pem
 
-            TAR_NAME="${{ steps.branch_name.outputs.branch_name }}_${{ matrix.os }}.tar.gz"
+            TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
             scp -o StrictHostKeyChecking=no -i backend_key.pem \
               $TAR_NAME \
               ${BACKEND_USER}@${BACKEND_IP}:${BACKEND_PATH}/
+
+            shred -u backend_key.pem
+
+        - name: Run deployment script on backend
+          env:
+            BACKEND_SSH_KEY: ${{ secrets.BACKEND_SSH_KEY }}
+            BACKEND_IP: ${{ secrets.BACKEND_IP }}
+            BACKEND_USER: ${{ secrets.BACKEND_USER }}
+            BACKEND_PATH: ${{ secrets.BACKEND_PATH }}
+          run: |
+            echo "$BACKEND_SSH_KEY" > backend_key.pem
+            chmod 600 backend_key.pem
+
+            ssh -o StrictHostKeyChecking=no -i backend_key.pem ${BACKEND_USER}@${BACKEND_IP} \
+              "cd ${BACKEND_PATH}/ && ./deploy_binaries.sh '${{ github.ref_name }}'"
 
             shred -u backend_key.pem
