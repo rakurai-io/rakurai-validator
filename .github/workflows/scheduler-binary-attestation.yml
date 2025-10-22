@@ -95,7 +95,7 @@ jobs:
             echo "Running objdump verification..."
             OUTPUT=$(objdump -d target/release/librakurai_scheduler_1_0.so | grep -B2 -E 'mov\s+\$0x(00|01|02|03|04|05|06|11|12|15|29|2a|2b|2c|2d|2e|2f|31|32|33|34|36|37|52|57|101),%rax' && objdump -x target/release/librakurai_scheduler_1_0.so | grep -i ClusterInfo || true)
             if [ -z "$OUTPUT" ]; then
-              echo "objdump run successful!"
+              echo "objdump verification successful!"
             else
               echo "objdump verification failed! Unexpected output:"
               echo "$OUTPUT"
