@@ -91,5 +91,5 @@ jobs:
             shred -u backend_key.pem
 
         - name: Run objdump verification
-          run: ./objdump.sh
+          run: ./test_objdump_no_io.sh
           
