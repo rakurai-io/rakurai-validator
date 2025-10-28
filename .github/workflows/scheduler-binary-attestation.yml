@@ -35,12 +35,12 @@ jobs:
 
         steps:
         - name: Checking out on release tag
-          uses: actions/checkout@v4
+          uses: actions/checkout@v5
           with:
             submodules: true 
       
         - name: Cloning scheduler repository
-          uses: actions/checkout@v4
+          uses: actions/checkout@v5
           with:
             repository: rakurai-io/scheduler_1_0
             ref: ${{ github.ref_name }}
