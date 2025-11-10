@@ -100,7 +100,7 @@ impl Default for TipDistributionAccountConfig {
 pub struct TipManager {
     tip_payment_program_info: TipPaymentProgramInfo,
     tip_distribution_program_info: TipDistributionProgramInfo,
-    tip_distribution_account_config: TipDistributionAccountConfig,
+    pub tip_distribution_account_config: TipDistributionAccountConfig,
     tip_accounts: HashSet<Pubkey>,
 }
 

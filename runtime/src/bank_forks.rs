@@ -90,6 +90,7 @@ struct SetRootTimings {
     prune_remove_ms: i64,
 }
 
+#[repr(C)]
 pub struct BankForks {
     banks: HashMap<Slot, BankWithScheduler>,
     descendants: HashMap<Slot, HashSet<Slot>>,

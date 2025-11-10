@@ -157,6 +157,7 @@ pub struct TransactionProcessingEnvironment {
     feature = "dev-context-only-utils",
     field_qualifiers(slot(pub), epoch(pub), sysvar_cache(pub))
 )]
+#[repr(C)]
 pub struct TransactionBatchProcessor<FG: ForkGraph> {
     /// Bank slot (i.e. block)
     slot: Slot,

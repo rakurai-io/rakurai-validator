@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use solana_perf::packet::PacketBatch;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PacketBundle {
     batch: PacketBatch,
     #[allow(unused)]

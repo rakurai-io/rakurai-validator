@@ -17,11 +17,11 @@ use {
 };
 
 pub struct Batches<Tx> {
-    ids: Vec<Vec<TransactionId>>,
-    transactions: Vec<Vec<Tx>>,
-    max_ages: Vec<Vec<MaxAge>>,
-    total_cus: Vec<u64>,
-    target_num_transactions_per_batch: usize,
+    pub ids: Vec<Vec<TransactionId>>,
+    pub transactions: Vec<Vec<Tx>>,
+    pub max_ages: Vec<Vec<MaxAge>>,
+    pub total_cus: Vec<u64>,
+    pub target_num_transactions_per_batch: usize,
 }
 
 impl<Tx> Batches<Tx> {
@@ -145,12 +145,12 @@ pub fn select_thread<Tx>(
 
 /// Common scheduler communication structure.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct SchedulingCommon<Tx> {
-    pub(crate) consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
-    pub(crate) finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
-    pub(crate) in_flight_tracker: InFlightTracker,
-    pub(crate) account_locks: ThreadAwareAccountLocks,
-    pub(crate) batches: Batches<Tx>,
+pub struct SchedulingCommon<Tx> {
+    pub consume_work_senders: Vec<Sender<ConsumeWork<Tx>>>,
+    pub finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
+    pub in_flight_tracker: InFlightTracker,
+    pub account_locks: ThreadAwareAccountLocks,
+    pub batches: Batches<Tx>,
 }
 
 impl<Tx> SchedulingCommon<Tx> {
@@ -237,6 +237,7 @@ impl<Tx: TransactionWithMeta> SchedulingCommon<Tx> {
                     },
                 retryable_indexes,
                 extra_info: _,
+                cu_err_indexes: _,
             }) => {
                 let num_transactions = ids.len();
                 let num_retryable = retryable_indexes.len();
@@ -458,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_send_batches() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
         add_transactions_to_container(&mut container, 3);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
@@ -506,7 +507,7 @@ mod tests {
 
     #[test]
     fn test_receive_completed() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
         add_transactions_to_container(&mut container, 1);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
@@ -564,7 +565,7 @@ mod tests {
     #[test]
     #[should_panic = "retryable indexes were not in order: [1, 0]"]
     fn test_receive_completed_out_of_order() {
-        let mut container = TransactionStateContainer::with_capacity(1024);
+        let mut container = TransactionStateContainer::with_capacity(1024, false);
 
         let (work_senders, work_receivers): (Vec<Sender<_>>, Vec<Receiver<_>>) =
             (0..NUM_WORKERS).map(|_| unbounded()).unzip();

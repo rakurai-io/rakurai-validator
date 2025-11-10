@@ -2,7 +2,10 @@
 // Keeps track of last received heartbeat 'behind the scenes' and will mark itself as unhealthy if no heartbeat is received
 
 use {
-    crate::bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
+    crate::{
+        bam_dependencies::{v0_to_versioned_proto, BamOutboundMessage},
+        banking_trace::BankingPacketSender,
+    },
     jito_protos::proto::{
         bam_api::{
             bam_node_api_client::BamNodeApiClient, scheduler_message_v0::Msg,
@@ -60,6 +63,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<Self, TryInitError> {
         // Create connection and inbound and outbound streams
         let backend_endpoint = tonic::transport::Endpoint::from_shared(url.clone())?
@@ -99,6 +103,7 @@ impl BamConnection {
             metrics.clone(),
             is_healthy.clone(),
             outbound_receiver,
+            non_vote_sender,
         ));
 
         Ok(Self {
@@ -122,6 +127,7 @@ impl BamConnection {
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
         outbound_receiver: crossbeam_channel::Receiver<BamOutboundMessage>,
+        non_vote_sender: BankingPacketSender,
     ) {
         let mut last_heartbeat = None;
         let mut heartbeat_interval = interval(VALIDATOR_HEARTBEAT_INTERVAL);
@@ -217,8 +223,11 @@ impl BamConnection {
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
                             for batch in batches.batches {
                                 metrics.bundle_received.fetch_add(1, Relaxed);
-                                let _ = batch_sender.try_send(batch).inspect_err(|_| {
+                                let _ = batch_sender.try_send(batch.clone()).inspect_err(|_| {
                                     metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
+                                });
+                                let _ = non_vote_sender.send_bam_batch(Arc::new(batch)).inspect_err(|_| {
+                                    error!("Failed to send BAM batch to trace sender");
                                 });
                             }
                         }

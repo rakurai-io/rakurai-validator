@@ -789,6 +789,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         todo!()
     }
+
+    fn in_flight_txns(&mut self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]

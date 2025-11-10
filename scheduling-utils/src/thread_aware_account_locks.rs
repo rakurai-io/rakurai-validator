@@ -63,6 +63,7 @@ pub struct ThreadAwareAccountLocks {
 
 impl ThreadAwareAccountLocks {
     /// Creates a new `ThreadAwareAccountLocks` with the given number of threads.
+    #[allow(dead_code)]
     pub fn new(num_threads: usize) -> Self {
         assert!(num_threads > 0, "num threads must be > 0");
         assert!(

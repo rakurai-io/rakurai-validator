@@ -26,8 +26,9 @@ use {
 mod sdk_transactions;
 mod transaction_view;
 
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
+// #[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub struct RuntimeTransaction<T> {
     transaction: T,
     // transaction meta is a collection of fields, it is updated

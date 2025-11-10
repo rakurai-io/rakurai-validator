@@ -1,21 +1,22 @@
 #![allow(clippy::arithmetic_side_effects)]
 use {
-    agave_banking_stage_ingress_types::BankingPacketBatch,
     assert_matches::assert_matches,
     clap::{crate_description, crate_name, Arg, ArgEnum, Command},
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     log::*,
     rand::{thread_rng, Rng},
     rayon::prelude::*,
     solana_compute_budget_interface::ComputeBudgetInstruction,
     solana_core::{
+        banking_simulation::DummyClusterInfo,
         banking_stage::{
+            reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
-            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage,
+            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, DecisionState,
         },
         banking_trace::{BankingTracer, Channels, BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        validator::{BlockProductionMethod, SchedulerPacing, TransactionStructure},
+        validator::{BlockProductionMethod, SchedulerPacing, ClientMode, TransactionStructure},
     },
     solana_hash::Hash,
     solana_keypair::Keypair,
@@ -42,7 +43,10 @@ use {
     std::{
         collections::HashSet,
         num::NonZeroUsize,
-        sync::{atomic::Ordering, Arc, RwLock},
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc, Mutex, RwLock,
+        },
         thread::sleep,
         time::{Duration, Instant},
     },
@@ -461,6 +465,39 @@ fn main() {
         gossip_vote_sender,
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
+    let id = RwLock::new(leader_schedule_cache.slot_leader_at(0, None).unwrap());
+    let cluster_info_for_banking = Arc::new(DummyClusterInfo { id });
+
+    let tx_io_check = false;
+    let oms_connector = false;
+    const TX_IO_CHANNEL_SZIE: usize = 1024;
+    let (input_tx_signature_sender, _input_tx_signature_receiver) = if tx_io_check {
+        let (input_tx_signature_sender, input_tx_signature_receiver) = bounded(TX_IO_CHANNEL_SZIE);
+        (
+            Some((input_tx_signature_sender, exit.clone())),
+            Some(input_tx_signature_receiver),
+        )
+    } else {
+        (None, None)
+    };
+    let (output_tx_signature_sender, _output_tx_signature_receiver) =
+        if tx_io_check || oms_connector {
+            let (output_tx_signature_sender, output_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some(output_tx_signature_sender),
+                Some(output_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
+
+    let shared_decision = (
+        Arc::new(RwLock::new(DecisionState::Hold)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let client_mode = Arc::new(Mutex::new(ClientMode::RakuraiBAM));
+
     let banking_stage = BankingStage::new_num_threads(
         block_production_method,
         poh_recorder.clone(),
@@ -481,6 +518,16 @@ fn main() {
         BundleAccountLocker::default(),
         None,
         None,
+        |_| 0,
+        &cluster_info_for_banking,
+        blockstore.clone(),
+        RewardDistributionConfig::default(),
+        0,
+        input_tx_signature_sender,
+        output_tx_signature_sender,
+        shared_decision,
+        exit.clone(),
+        client_mode,
     );
 
     // This is so that the signal_receiver does not go out of scope after the closure.
@@ -509,7 +556,7 @@ fn main() {
                 timestamp(),
             );
             non_vote_sender
-                .send(BankingPacketBatch::new(vec![packet_batch.clone()]))
+                .send(Arc::new(vec![packet_batch.clone()]), &None)
                 .unwrap();
         }
 

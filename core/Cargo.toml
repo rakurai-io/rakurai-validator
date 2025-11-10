@@ -14,6 +14,8 @@ targets = ["x86_64-unknown-linux-gnu"]
 
 [features]
 agave-unstable-api = []
+build_validator = []
+local_build = []
 dev-context-only-utils = [
     "solana-perf/dev-context-only-utils",
     "solana-runtime/dev-context-only-utils",
@@ -41,6 +43,9 @@ frozen-abi = [
 ]
 
 [dependencies]
+quanta = "0.12.5"
+anchor-lang = { workspace = true }
+agave-reserved-account-keys = { workspace = true }
 agave-banking-stage-ingress-types = { workspace = true }
 agave-feature-set = { workspace = true }
 agave-scheduler-bindings = { workspace = true }
@@ -68,7 +73,10 @@ derive_more = { workspace = true }
 futures = { workspace = true }
 histogram = { workspace = true }
 itertools = { workspace = true }
+reward_distribution = { workspace = true }
+rakurai_activation = { workspace = true }
 jito-protos = { workspace = true }
+jito-tip-distribution = { workspace = true }
 lazy_static = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
@@ -88,6 +96,8 @@ rolling-file = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
 solana-account = { workspace = true }
@@ -193,6 +203,7 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true }
 trees = { workspace = true }
+zmq = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
 jemallocator = { workspace = true }
@@ -203,6 +214,7 @@ shaq = { workspace = true }
 sysctl = { workspace = true }
 
 [build-dependencies]
+rustc_version = "0.4"
 tonic-build = { workspace = true }
 
 [dev-dependencies]

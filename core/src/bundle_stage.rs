@@ -39,7 +39,6 @@ use {
     std::{
         collections::VecDeque,
         num::{NonZeroUsize, Saturating},
-        ops::Deref,
         sync::{
             atomic::{AtomicBool, Ordering},
             Arc, RwLock,
@@ -53,7 +52,7 @@ pub mod bundle_account_locker;
 mod bundle_consumer;
 mod bundle_packet_deserializer;
 mod bundle_storage;
-const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(40);
+const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(5);
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
 
 // Stats emitted periodically
@@ -393,8 +392,10 @@ impl BundleStage {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache.clone(),
+            None,
         );
-        let decision_maker = DecisionMaker::from(poh_recorder.read().unwrap().deref());
+
+        let decision_maker = DecisionMaker::from(&poh_recorder.clone());
 
         let consumer = BundleConsumer::new(
             committer,
@@ -578,12 +579,14 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
     ) {
-        match decision_maker.make_consume_or_forward_decision() {
+        let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
+
+        match decision {
             // BufferedPacketsDecision::Consume means this leader is scheduled to be running at the moment.
             // Execute, record, and commit as many bundles possible given time, compute, and other constraints.
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 Self::consume_bundles(
-                    &bank,
+                    &bank_start.working_bank,
                     bundle_storage,
                     bundle_account_locker,
                     consumer,
@@ -620,7 +623,8 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
     ) {
-        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
+        // Changing this to 1 to avoid locking a larger batch of bundles
+        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(1).unwrap();
 
         let mut bundles = VecDeque::with_capacity(BUNDLE_WINDOW_SIZE.get());
 
@@ -688,7 +692,7 @@ impl BundleStage {
                 }
             }
 
-            consume_worker_metrics.maybe_report_and_reset();
+            consume_worker_metrics.maybe_report_and_reset(false);
         }
 
         while let Some(bundle) = bundles.pop_front() {
@@ -704,7 +708,7 @@ impl BundleStage {
                 consume_worker_metrics.set_has_data(true);
                 bundle_stage_metrics.increment_bundles_processed(1);
             }
-            consume_worker_metrics.maybe_report_and_reset();
+            consume_worker_metrics.maybe_report_and_reset(false);
         }
 
         debug_assert!(

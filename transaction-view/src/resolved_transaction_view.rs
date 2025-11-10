@@ -23,9 +23,11 @@ use {
 
 /// A parsed and sanitized transaction view that has had all address lookups
 /// resolved.
+#[derive(Clone)]
+#[repr(C)]
 pub struct ResolvedTransactionView<D: TransactionData> {
     /// The parsed and sanitized transction view.
-    view: TransactionView<true, D>,
+    pub view: TransactionView<true, D>,
     /// The resolved address lookups.
     resolved_addresses: Option<LoadedAddresses>,
     /// A cache for whether an address is writable.

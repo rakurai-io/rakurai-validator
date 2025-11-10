@@ -46,6 +46,10 @@ use {
 pub const GRACE_TICKS_FACTOR: u64 = 2;
 pub const MAX_GRACE_SLOTS: u64 = 2;
 
+// TickSource::PohRecorder = 0 (from agave_geyser_plugin_interface::geyser_plugin_interface::TickSource)
+// This constant is used when calling tick_notifier to indicate ticks come from poh_recorder
+const TICK_SOURCE_POH_RECORDER: u32 = 0;
+
 #[derive(Error, Debug, Clone)]
 pub enum PohRecorderError {
     #[error("max height reached")]
@@ -73,6 +77,7 @@ pub struct RecordSummary {
     pub remaining_hashes_in_slot: u64,
 }
 
+#[repr(C)]
 pub struct Record {
     pub mixins: Vec<Hash>,
     pub transaction_batches: Vec<Vec<VersionedTransaction>>,
@@ -162,6 +167,7 @@ impl PohRecorderMetrics {
     }
 }
 
+#[repr(C)]
 pub struct PohRecorder {
     pub(crate) poh: Arc<Mutex<Poh>>,
     clear_bank_signal: Option<Sender<bool>>,
@@ -172,14 +178,16 @@ pub struct PohRecorder {
     /// This stores the current working bank + scheduler and other metadata,
     /// if they exist.
     /// This field MUST be kept consistent with the `shared_leader_state` field.
-    working_bank: Option<WorkingBank>,
+    pub working_bank: Option<WorkingBank>,
     shared_leader_state: SharedLeaderState,
     working_bank_sender: Sender<WorkingBankEntry>,
     leader_last_tick_height: u64, // zero if none
     grace_ticks: u64,
     blockstore: Arc<Blockstore>,
-    leader_schedule_cache: Arc<LeaderScheduleCache>,
+    pub leader_schedule_cache: Arc<LeaderScheduleCache>,
     ticks_per_slot: u64,
+    target_ns_per_tick: u64,
+
     metrics: PohRecorderMetrics,
     delay_leader_block_for_pending_fork: bool,
     last_reported_slot_for_pending_fork: Arc<Mutex<Slot>>,
@@ -190,6 +198,14 @@ pub struct PohRecorder {
 
     // Alpenglow related migration things
     pub is_alpenglow_enabled: bool,
+
+    /// Optional callback to notify about ticks
+    /// Parameters: (slot, tick_index, poh_entry, leader_pubkey, source)
+    /// source is a u32: 0 = PohRecorder, 1 = BlockstoreProcessor
+    /// Stored as Arc to allow cloning without holding a lock
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    /// Cached leader for the current slot to avoid repeated lookups
+    cached_slot_leader: Option<(Slot, Pubkey)>,
 }
 
 impl PohRecorder {
@@ -220,6 +236,8 @@ impl PohRecorder {
             leader_schedule_cache,
             poh_config,
             is_exited,
+            crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
+            None, // tick_notifier
         )
     }
 
@@ -236,6 +254,8 @@ impl PohRecorder {
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         poh_config: &PohConfig,
         is_exited: Arc<AtomicBool>,
+        target_slot_adjustment_ns: u64,
+        tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
     ) -> (Self, Receiver<WorkingBankEntry>) {
         let tick_number = 0;
         let poh = Arc::new(Mutex::new(Poh::new_with_slot_info(
@@ -244,6 +264,11 @@ impl PohRecorder {
             tick_number,
         )));
 
+        let target_ns_per_tick = PohService::target_ns_per_tick(
+            ticks_per_slot,
+            poh_config.target_tick_duration.as_nanos() as u64,
+            target_slot_adjustment_ns,
+        );
         let (working_bank_sender, working_bank_receiver) = unbounded();
         let (leader_first_tick_height, leader_last_tick_height, grace_ticks) =
             Self::compute_leader_slot_tick_heights(next_leader_slot, ticks_per_slot);
@@ -267,12 +292,15 @@ impl PohRecorder {
                 blockstore,
                 leader_schedule_cache: leader_schedule_cache.clone(),
                 ticks_per_slot,
+                target_ns_per_tick,
                 metrics: PohRecorderMetrics::default(),
                 delay_leader_block_for_pending_fork,
                 last_reported_slot_for_pending_fork: Arc::default(),
                 is_exited,
                 entries: Vec::with_capacity(64),
                 is_alpenglow_enabled: false,
+                tick_notifier,
+                cached_slot_leader: None,
             },
             working_bank_receiver,
         )
@@ -393,6 +421,27 @@ impl PohRecorder {
             self.shared_leader_state.increment_tick_height();
             trace!("tick_height {}", self.tick_height());
 
+            // Notify tick directly from poh_recorder for periodic updates
+            // This works even when there's no working bank (not leader)
+            if let Some(ref tick_notifier) = self.tick_notifier {
+                let current_tick_height = self.tick_height();
+                let slot = self.slot_for_tick_height(current_tick_height);
+                let tick_index = (current_tick_height % self.ticks_per_slot) as u64;
+                
+                // Try to get leader for this slot
+                let leader = if let Some(ref working_bank) = self.working_bank {
+                    // If we have a working bank, use it for leader lookup
+                    self.leader_schedule_cache
+                        .slot_leader_at(slot, Some(&working_bank.bank))
+                } else {
+                    // If no working bank, try to get leader from start_bank
+                    self.leader_schedule_cache
+                        .slot_leader_at(slot, Some(&self.start_bank))
+                };
+                
+                tick_notifier(slot, tick_index, &poh_entry, leader.as_ref(), TICK_SOURCE_POH_RECORDER);
+            }
+
             if self
                 .shared_leader_state
                 .load()
@@ -464,6 +513,9 @@ impl PohRecorder {
     /// releasing the lock.
     fn clear_bank(&mut self, set_shared_state: bool) {
         if let Some(WorkingBank { bank, start, .. }) = self.working_bank.take() {
+            // Clear leader cache when bank is cleared
+            self.cached_slot_leader = None;
+
             let next_leader_slot = self.leader_schedule_cache.next_leader_slot(
                 bank.collector_id(),
                 bank.slot(),
@@ -527,6 +579,7 @@ impl PohRecorder {
         );
 
         self.tick_cache = vec![];
+        self.cached_slot_leader = None; // Clear leader cache on reset
         if reset_start_bank {
             self.start_bank = reset_bank;
             self.start_bank_active_descendants = vec![];
@@ -571,7 +624,7 @@ impl PohRecorder {
                 working_bank.max_tick_height,
                 entry_count,
             );
-
+            
             for tick in &self.tick_cache[..entry_count] {
                 working_bank.bank.register_tick(&tick.0.hash);
                 send_result = self
@@ -672,6 +725,18 @@ impl PohRecorder {
 
     pub fn ticks_per_slot(&self) -> u64 {
         self.ticks_per_slot
+    }
+
+    pub fn target_ns_per_tick(&self) -> u64 {
+        self.target_ns_per_tick
+    }
+
+    /// Get a clone of the tick_notifier callback if available
+    /// Returns an Arc clone, allowing use without holding the PohRecorder lock
+    pub fn tick_notifier(
+        &self,
+    ) -> Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>> {
+        self.tick_notifier.clone()
     }
 
     pub fn start_slot(&self) -> Slot {
@@ -945,6 +1010,7 @@ fn do_create_test_recorder(
         crate::poh_service::DEFAULT_HASHES_PER_BATCH,
         record_receiver,
         poh_service_message_receiver,
+        crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
     );
 
     poh_controller
@@ -1017,7 +1083,7 @@ impl SharedLeaderState {
 }
 
 pub struct LeaderState {
-    working_bank: Option<Arc<Bank>>,
+    pub working_bank: Option<Arc<Bank>>,
     tick_height: AtomicU64,
     leader_first_tick_height: Option<u64>,
     next_leader_slot_range: Option<(Slot, Slot)>,
@@ -1625,6 +1691,8 @@ mod tests {
             &Arc::new(LeaderScheduleCache::default()),
             &PohConfig::default(),
             Arc::new(AtomicBool::default()),
+            crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
+            None, // tick_notifier
         );
         poh_recorder.set_bank_for_test(bank);
         poh_recorder.clear_bank(true);

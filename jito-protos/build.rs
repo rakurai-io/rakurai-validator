@@ -44,5 +44,21 @@ fn main() -> Result<(), std::io::Error> {
             "InstructionErrorType",
             "#[cfg_attr(test, derive(enum_iterator::Sequence))]",
         )
+        .type_attribute(
+            "bam_types.AtomicTxnBatch",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "bam_types.Packet",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "bam_types.Meta",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .type_attribute(
+            "bam_types.PacketFlags",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .compile(&protos, &[proto_base_path, proto_base_path_jds])
 }

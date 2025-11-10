@@ -437,11 +437,13 @@ impl SchedulerStatus {
 /// clone_without_scheduler() for Arc<Bank>. Otherwise, use clone_with_scheduler() (this should be
 /// unusual outside scheduler code-path)
 #[derive(Debug)]
+#[repr(C)]
 pub struct BankWithScheduler {
     inner: Arc<BankWithSchedulerInner>,
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct BankWithSchedulerInner {
     bank: Arc<Bank>,
     scheduler: InstalledSchedulerRwLock,

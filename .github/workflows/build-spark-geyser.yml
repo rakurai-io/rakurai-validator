@@ -1,0 +1,128 @@
+# ------------------------------------------------------------------------------
+# Build Spark Geyser (Rakurai ZMQ Based Geyser)
+#
+# This workflow builds a Rakurai Spark Geyser plugin:
+# - Check out the selected branch of this repository
+# - Cloning the private `rakurai-spark` repository
+# - Check out to `geyser-latest` tag from `rakurai-spark`
+# - Applying required Rakurai patches for validator + geyser compatibility
+# - Building the `spark-geyser` plugin
+# - Renaming the compiled `.so` with version suffix (e.g. libspark_geyser_plugin-3_1_11.so)
+# - Updating the config.json `libpath` automatically
+# - Publishing the built plugin + config into the `spark-geyser/` directory
+#
+# ------------------------------------------------------------------------------
+# Inputs
+#
+# - branch:
+#     Target branch of THIS repository to build and push artifacts to
+#
+# - spark_tag:
+#     Tag from `rakurai-spark` repository
+#     Default:  "geyser-latest" → latest supported version (default moving tag)
+#     Legacy (will be renamed like this): "geyser-latest-v1" → previous stable release (DO NOT REMOVE from Spark Repo)
+#
+# ------------------------------------------------------------------------------
+
+name: Build Spark Geyser Plugin
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Rakurai validator branch to run workflow from"
+        required: true
+      spark_tag:
+        description: "Tag for rakurai-spark (default: geyser-latest)"
+        default: "geyser-latest"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1️⃣ Checkout main repo branch
+      - name: Checkout main repo
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ github.event.inputs.branch }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: recursive
+
+      # 2️⃣ Install dependencies
+      - name: Installing Solana build dependencies
+        run: |
+          rustup update
+          sudo apt-get update
+          sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
+
+      # 3️⃣ Clone private rakurai-spark repo
+      - name: Clone rakurai-spark
+        env:
+          RAKURAI_SPARK_PAT: ${{ secrets.RAKURAI_SPARK_PAT }}
+        run: |
+          git clone https://x-access-token:${RAKURAI_SPARK_PAT}@github.com/rakurai-io/rakurai-spark.git
+
+      # 4️⃣ Checkout specific tag in rakurai-spark
+      - name: Checkout spark tag
+        run: |
+          cd rakurai-spark
+          git checkout ${{ github.event.inputs.spark_tag }}
+
+      # 5️⃣ Apply patch in rakurai-spark
+      - name: Apply rakurai agave patch
+        run: |
+          cd rakurai-spark
+          git apply ./workspace_crates.patch
+
+      # 6️⃣ Apply patch in main repo
+      - name: Apply rakurai geyser patch
+        run: |
+          git apply ./rakurai-spark/spark_geyser.patch
+
+      # 7️⃣ Ensure submodules are updated
+      - name: Update submodules
+        run: |
+          git submodule update --init --recursive
+
+      # 8️⃣ Build spark-geyser plugin
+      - name: Build spark-geyser
+        run: |
+          cargo build --release -p spark-geyser
+
+      # 9️⃣ Prepare artifact directory
+      - name: Prepare spark-geyser folder
+        run: |
+          rm -rf spark-geyser
+          mkdir -p spark-geyser
+
+          # use latest version
+          VERSION="$(grep ^version Cargo.toml | head -n1 | sed 's/version *= *"\([^"]*\)"/\1/')"
+          VERSION_SAFE="${VERSION//./_}"
+          RENAMED_LIB="libspark_geyser_plugin-${VERSION_SAFE}.so"
+          cp target/release/libspark_geyser_plugin.so spark-geyser/${RENAMED_LIB}
+          
+          cp rakurai-spark/config.json spark-geyser/ || true
+          sed -i "s|\"libpath\": \"./target/release/libspark_geyser_plugin.so\"|\"libpath\": \"./${RENAMED_LIB}\"|" spark-geyser/config.json || true          
+
+          
+          cp rakurai-spark/README.md spark-geyser/ || true
+
+      # 🔟 Commit and push spark-geyser back to main repo
+      - name: Commit and push spark-geyser
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Add the spark-geyser folder
+          git add spark-geyser
+          
+          # Commit with branch name in message
+          git commit -m "updated geyser to branch ${{ github.event.inputs.branch }}" || echo "Nothing to commit"
+
+          # Push to the branch
+          git push origin HEAD:${{ github.event.inputs.branch }}

@@ -121,7 +121,7 @@ done
 
 cargo_build() {
   # shellcheck disable=SC2086 # Don't want to double quote $maybeRustVersion
-  "$cargo" $maybeRustVersion build $buildProfileArg "$@"
+  "$cargo" $maybeRustVersion build $buildProfileArg --features build_validator "$@"
 }
 
 # This is called to detect both of unintended activation AND deactivation of
@@ -203,6 +203,15 @@ fi
   shopt -s nullglob
   for dep in target/"$buildProfile"/deps/libsolana*program.*; do
     cp -fv "$dep" "$installDir"/bin/deps
+  done
+)
+
+(
+  set -x
+  # Copy librak*.so scheduler libraries to bin directory for LD_LIBRARY_PATH access
+  shopt -s nullglob
+  for lib in target/"$buildProfile"/librak*.so; do
+    cp -fv "$lib" "$installDir"/bin
   done
 )
 

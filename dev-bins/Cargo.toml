@@ -4,7 +4,6 @@ members = [
     "../banking-bench",
     "../bench-tps",
     "../dos",
-    "../ledger-tool",
 ]
 
 resolver = "2"
@@ -210,3 +209,17 @@ opt-level = 3
 # There is a similar override in `programs/sbf/Cargo.toml`.  Please keep both
 # comments and the overrides in sync.
 solana-curve25519 = { path = "../curves/curve25519" }
+solana-account = { path = "../solana-sdk/account" }
+solana-cluster-type = { path = "../solana-sdk/cluster-type" }
+solana-epoch-schedule = { path = "../solana-sdk/epoch-schedule" }
+solana-example-mocks = { path = "../solana-sdk/example-mocks" }
+solana-fee-calculator = { path = "../solana-sdk/fee-calculator" }
+solana-fee-structure = { path = "../solana-sdk/fee-structure" }
+solana-hard-forks = { path = "../solana-sdk/hard-forks" }
+solana-inflation = { path = "../solana-sdk/inflation" }
+solana-message = { path = "../solana-sdk/message" }
+solana-packet = { path = "../solana-sdk/packet" }
+solana-reward-info = { path = "../solana-sdk/reward-info" }
+solana-time-utils = { path = "../solana-sdk/time-utils" }
+solana-transaction = { path = "../solana-sdk/transaction" }
+parking_lot_core = { path = "../parking_lot/core" }

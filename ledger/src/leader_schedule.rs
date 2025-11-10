@@ -15,6 +15,7 @@ pub use {
 
 // Used for testing
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct FixedSchedule {
     pub leader_schedule: Arc<LeaderSchedule>,
 }

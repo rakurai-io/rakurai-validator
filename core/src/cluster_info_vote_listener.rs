@@ -7,7 +7,6 @@ use {
         result::{Error, Result},
         sigverify,
     },
-    agave_banking_stage_ingress_types::BankingPacketBatch,
     crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Select, Sender},
     log::*,
     solana_clock::{Slot, DEFAULT_MS_PER_SLOT},
@@ -260,7 +259,7 @@ impl ClusterInfoVoteListener {
             if !votes.is_empty() {
                 let (vote_txs, packets) = Self::verify_votes(votes, &sharable_banks);
                 verified_vote_transactions_sender.send(vote_txs)?;
-                verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                verified_packets_sender.send(Arc::new(packets), &None)?;
             }
             sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
         }

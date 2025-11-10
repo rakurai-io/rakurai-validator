@@ -22,9 +22,12 @@ use {
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
+        banking_stage::{RakuraiConfig, RakuraiMode},
         consensus::tower_storage::TowerStorage,
         tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
-        validator::{Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig},
+        validator::{
+            ClientMode, Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig,
+        },
     },
     solana_epoch_schedule::EpochSchedule,
     solana_fee_calculator::FeeRateGovernor,
@@ -74,7 +77,7 @@ use {
         num::{NonZero, NonZeroU64},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock},
         time::Duration,
     },
     tokio::time::sleep,
@@ -146,6 +149,8 @@ pub struct TestValidatorGenesis {
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -183,6 +188,14 @@ impl Default for TestValidatorGenesis {
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                rs_mode: RakuraiMode::Mode1,
+                rs_cfg_d1: 40,
+                rs_cfg_d2: 0,
+                rs_cfg_d3: 0,
+                rs_cfg_d4: 0.0,
+            })),
         }
     }
 }

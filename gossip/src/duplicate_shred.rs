@@ -25,6 +25,7 @@ pub(crate) const MAX_DUPLICATE_SHREDS: DuplicateShredIndex = 512;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[repr(C)]
 pub struct DuplicateShred {
     pub(crate) from: Pubkey,
     pub(crate) wallclock: u64,

@@ -22,6 +22,7 @@ use {
 type CachedSchedules = (HashMap<Epoch, Arc<LeaderSchedule>>, VecDeque<u64>);
 const MAX_SCHEDULES: usize = 10;
 
+#[repr(C)]
 struct CacheCapacity(usize);
 impl Default for CacheCapacity {
     fn default() -> Self {
@@ -30,13 +31,14 @@ impl Default for CacheCapacity {
 }
 
 #[derive(Default)]
+#[repr(C)]
 pub struct LeaderScheduleCache {
     // Map from an epoch to a leader schedule for that epoch
     pub cached_schedules: RwLock<CachedSchedules>,
-    epoch_schedule: EpochSchedule,
-    max_epoch: AtomicU64,
+    pub epoch_schedule: EpochSchedule,
+    pub max_epoch: AtomicU64,
     max_schedules: CacheCapacity,
-    fixed_schedule: Option<Arc<FixedSchedule>>,
+    pub fixed_schedule: Option<Arc<FixedSchedule>>,
 }
 
 impl LeaderScheduleCache {

@@ -11,7 +11,7 @@ use {
 };
 
 /// Contains metadata about the instructions in a transaction packet.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct InstructionsFrame {
     /// The number of instructions in the transaction.
     pub(crate) num_instructions: u16,
@@ -20,7 +20,7 @@ pub(crate) struct InstructionsFrame {
     pub(crate) frames: Vec<InstructionFrame>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct InstructionFrame {
     num_accounts: u16,
     data_len: u16,

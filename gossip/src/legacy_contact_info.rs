@@ -12,6 +12,7 @@ use {
 /// Structure representing a node on the network
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[repr(C)]
 pub(crate) struct LegacyContactInfo {
     id: Pubkey,
     /// gossip address

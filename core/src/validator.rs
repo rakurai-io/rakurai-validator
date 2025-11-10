@@ -1,7 +1,11 @@
 //! The `validator` module hosts all the validator microservices.
 
+use crate::banking_stage::{
+    reward_distributor::RewardDistributionConfig, RakuraiConfig, RakuraiMode,
+};
 use crate::tip_manager::TipManagerConfig;
 pub use solana_perf::report_target_features;
+
 use {
     crate::{
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
@@ -188,6 +192,35 @@ const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
 const WAIT_FOR_WEN_RESTART_SUPERMAJORITY_THRESHOLD_PERCENT: u64 =
     WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT;
 
+#[derive(
+    Default,
+    Clone,
+    EnumString,
+    EnumVariantNames,
+    IntoStaticStr,
+    Display,
+    EnumIter,
+    PartialEq,
+    Eq,
+    Copy,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ClientMode {
+    #[default]
+    RakuraiJito,
+    BAMStrictCompliance,
+    RakuraiBAM,
+}
+
+impl ClientMode {
+    pub const fn cli_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+
+    pub fn cli_message() -> &'static str {
+        "Select the client mode for validator"
+    }
+}
 #[derive(
     Clone, EnumCount, EnumIter, EnumString, EnumVariantNames, Default, IntoStaticStr, Display,
 )]
@@ -404,6 +437,12 @@ pub struct ValidatorConfig {
     pub bam_url: Arc<ArcSwap<Option<String>>>,
     /// Skips automatic multicast route detection and multicast receiver updates.
     pub disable_multicast_shred_check: bool,
+    pub reward_distribution_config: RewardDistributionConfig,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
+    pub target_slot_adjustment_ms: u64,
+    pub tx_io_check: Option<String>,
+    pub oms_connector: bool,
+    pub client_mode: Arc<Mutex<ClientMode>>,
 }
 
 impl ValidatorConfig {
@@ -498,6 +537,18 @@ impl ValidatorConfig {
             tip_manager_config: TipManagerConfig::default(),
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
             disable_multicast_shred_check: false,
+            reward_distribution_config: RewardDistributionConfig::default(),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                rs_mode: RakuraiMode::Mode1,
+                rs_cfg_d1: 40,
+                rs_cfg_d2: 0,
+                rs_cfg_d3: 0,
+                rs_cfg_d4: 0.0,
+            })),
+            target_slot_adjustment_ms: 10,
+            tx_io_check: None,
+            oms_connector: false,
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
         }
     }
 
@@ -862,6 +913,7 @@ impl Validator {
             entry_notifier,
             block_metadata_notifier,
             slot_status_notifier,
+            tick_notifier,
         ) = if let Some(service) = &geyser_plugin_service {
             (
                 service.get_accounts_update_notifier(),
@@ -869,9 +921,10 @@ impl Validator {
                 service.get_entry_notifier(),
                 service.get_block_metadata_notifier(),
                 service.get_slot_status_notifier(),
+                service.get_tick_notifier(),
             )
         } else {
-            (None, None, None, None, None)
+            (None, None, None, None, None, None)
         };
 
         info!(
@@ -1048,6 +1101,9 @@ impl Validator {
         let leader_schedule_cache = Arc::new(leader_schedule_cache);
         let (poh_recorder, entry_receiver) = {
             let bank = &bank_forks.read().unwrap().working_bank();
+            let tick_notifier_callback = tick_notifier.as_ref().map(|tn| {
+                solana_geyser_plugin_manager::TickNotifierImpl::create_callback(tn.clone())
+            });
             PohRecorder::new_with_clear_signal(
                 bank.tick_height(),
                 bank.last_blockhash(),
@@ -1060,6 +1116,8 @@ impl Validator {
                 &leader_schedule_cache,
                 &genesis_config.poh_config,
                 exit.clone(),
+                config.target_slot_adjustment_ms * 1_000_000,
+                tick_notifier_callback,
             )
         };
         let (record_sender, record_receiver) = record_channels(transaction_status_sender.is_some());
@@ -1478,6 +1536,7 @@ impl Validator {
             config.poh_hashes_per_batch,
             record_receiver,
             poh_service_message_receiver,
+            config.target_slot_adjustment_ms * 1_000_000,
         );
         assert_eq!(
             blockstore.get_new_shred_signals_len(),
@@ -1807,6 +1866,11 @@ impl Validator {
             config.shred_receiver_addresses.clone(),
             config.multicast_receiver_address.clone(),
             config.bam_url.clone(),
+            config.reward_distribution_config.clone(),
+            config.rakurai_config.clone(),
+            config.tx_io_check.clone(),
+            config.oms_connector,
+            config.client_mode.clone(),
         );
 
         datapoint_info!(

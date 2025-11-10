@@ -20,7 +20,8 @@ use {
     },
 };
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct ProgramTiming {
     pub accumulated_us: Saturating<u64>,
     pub accumulated_units: Saturating<u64>,
@@ -387,7 +388,8 @@ impl ExecuteAccessoryTimings {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct ExecuteDetailsTimings {
     pub serialize_us: Saturating<u64>,
     pub create_vm_us: Saturating<u64>,

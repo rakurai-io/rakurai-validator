@@ -8,6 +8,7 @@ use {
 // Older version structure used earlier 1.3.x releases
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct LegacyVersion1 {
     major: u16,
     minor: u16,
@@ -19,6 +20,7 @@ impl Sanitize for LegacyVersion1 {}
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[repr(C)]
 pub struct LegacyVersion2 {
     pub major: u16,
     pub minor: u16,
