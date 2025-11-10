@@ -9,10 +9,45 @@ use {
         collections::HashMap,
         num::Saturating,
         ops::{Index, IndexMut},
+        time::{SystemTime, UNIX_EPOCH},
     },
 };
 
-#[derive(Default, Debug, PartialEq, Eq)]
+/// Absolute wallclock timestamps for GUI charts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ExecuteGuiTimestamps {
+    pub timestamp_preload_end_nanos: i64,
+    pub timestamp_start_nanos: i64,
+    pub timestamp_load_end_nanos: i64,
+    pub timestamp_end_nanos: i64,
+}
+
+impl ExecuteGuiTimestamps {
+    pub fn accumulate(&mut self, other: &Self) {
+        if other.timestamp_preload_end_nanos != 0 {
+            self.timestamp_preload_end_nanos = other.timestamp_preload_end_nanos;
+        }
+        if other.timestamp_start_nanos != 0 {
+            self.timestamp_start_nanos = other.timestamp_start_nanos;
+        }
+        if other.timestamp_load_end_nanos != 0 {
+            self.timestamp_load_end_nanos = other.timestamp_load_end_nanos;
+        }
+        if other.timestamp_end_nanos != 0 {
+            self.timestamp_end_nanos = other.timestamp_end_nanos;
+        }
+    }
+}
+
+pub fn wallclock_timestamp_nanos() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("wallclock before epoch")
+        .as_nanos() as i64
+}
+
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct ProgramTiming {
     pub accumulated_us: Saturating<u64>,
     pub accumulated_units: Saturating<u64>,
@@ -322,6 +357,10 @@ pub struct ExecuteTimings {
     pub metrics: Metrics,
     pub details: ExecuteDetailsTimings,
     pub execute_accessories: ExecuteAccessoryTimings,
+    /// Batch-level preload timestamp; copied into each [`gui_timestamps_per_tx`] entry.
+    pub gui_timestamps: ExecuteGuiTimestamps,
+    /// Per-transaction execute timestamps, one entry per tx in the SVM loop.
+    pub gui_timestamps_per_tx: Vec<ExecuteGuiTimestamps>,
 }
 
 impl ExecuteTimings {
@@ -332,6 +371,11 @@ impl ExecuteTimings {
         self.details.accumulate(&other.details);
         self.execute_accessories
             .accumulate(&other.execute_accessories);
+        if other.gui_timestamps != ExecuteGuiTimestamps::default() {
+            self.gui_timestamps.accumulate(&other.gui_timestamps);
+        }
+        self.gui_timestamps_per_tx
+            .extend(other.gui_timestamps_per_tx.iter().copied());
     }
 
     pub fn saturating_add_in_place(&mut self, timing_type: ExecuteTimingType, value_to_add: u64) {
@@ -378,7 +422,8 @@ impl ExecuteAccessoryTimings {
     }
 }
 
-#[derive(Default, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct ExecuteDetailsTimings {
     pub serialize_us: Saturating<u64>,
     pub create_vm_us: Saturating<u64>,

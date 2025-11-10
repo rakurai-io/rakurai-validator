@@ -11,7 +11,7 @@ use {
 };
 
 /// Contains metadata about the instructions in a transaction packet.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum InstructionsFrame {
     LegacyAndV0 {
         /// The number of instructions in the transaction.
@@ -27,7 +27,7 @@ pub(crate) enum InstructionsFrame {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LegacyAndV0InstructionFrame {
     num_accounts: u16,
     data_len: u16,

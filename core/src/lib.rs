@@ -31,6 +31,7 @@ pub mod epoch_specs;
 pub mod fetch_stage;
 pub mod forwarding_stage;
 pub mod gen_keys;
+pub mod gui;
 pub mod multicast_shred_check_service;
 pub mod next_leader;
 pub mod optimistic_confirmation_verifier;
@@ -79,7 +80,11 @@ extern crate assert_matches;
 use {
     solana_packet::{Meta, PACKET_DATA_SIZE, PacketFlags},
     solana_perf::packet::BytesPacket,
-    std::net::{IpAddr, Ipv4Addr},
+    solana_pubkey::Pubkey,
+    std::{
+        net::{IpAddr, Ipv4Addr},
+        str::FromStr,
+    },
 };
 
 const UNKNOWN_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
@@ -94,6 +99,9 @@ pub fn proto_packet_to_packet(p: jito_protos::proto::packet::Packet) -> BytesPac
         packet.meta_mut().size = meta.size as usize;
         packet.meta_mut().addr = meta.addr.parse().unwrap_or(UNKNOWN_IP);
         packet.meta_mut().port = meta.port as u16;
+        if let Ok(remote_pubkey) = Pubkey::from_str(&meta.addr) {
+            packet.meta_mut().remote_pubkey = remote_pubkey;
+        }
         if let Some(flags) = meta.flags {
             if flags.simple_vote_tx {
                 packet.meta_mut().flags.insert(PacketFlags::SIMPLE_VOTE_TX);

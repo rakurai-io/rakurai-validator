@@ -155,6 +155,7 @@ impl BLSPubkeyToRankMap {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Serialize, Debug, Deserialize, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct NodeVoteAccounts {
     pub vote_accounts: Vec<Pubkey>,
     pub total_stake: u64,
@@ -178,6 +179,7 @@ pub(crate) enum DeserializableVersionedEpochStakes {
 #[derive(Clone, Debug, Serialize)]
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
+#[repr(C)]
 pub enum VersionedEpochStakes {
     Current {
         stakes: EpochStakes,

@@ -10,6 +10,7 @@ use {
         stake_account::StakeAccount, stake_history::StakeHistory,
     },
     rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator},
+    serde::{Deserialize, Serialize},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_accounts_db::{
         stake_rewards::StakeReward,
@@ -26,7 +27,8 @@ use {
 /// Distributing rewards to stake accounts begins AFTER this many blocks.
 const REWARD_CALCULATION_NUM_BLOCKS: u64 = 1;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub(crate) struct PartitionedStakeReward {
     /// Stake account address
     pub stake_pubkey: Pubkey,
@@ -40,7 +42,7 @@ pub(crate) struct PartitionedStakeReward {
 }
 
 /// A vector of stake rewards.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PartitionedStakeRewards {
     /// Inner vector.
     rewards: Vec<Option<PartitionedStakeReward>>,
@@ -108,7 +110,8 @@ impl FromIterator<Option<PartitionedStakeReward>> for PartitionedStakeRewards {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub(crate) struct StartBlockHeightAndRewards {
     /// the block height of the slot at which rewards distribution began
     pub(crate) distribution_starting_block_height: u64,
@@ -132,6 +135,7 @@ pub(crate) struct StartBlockHeightAndPartitionedRewards {
 
 /// Represent whether bank is in the reward phase or not.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[repr(C)]
 pub(crate) enum EpochRewardStatus {
     /// this bank is in the reward phase.
     /// Contents are the start point for epoch reward calculation,

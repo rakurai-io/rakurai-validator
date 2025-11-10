@@ -1,9 +1,12 @@
 //! The `bundle_stage` processes bundles, which are list of transactions to be executed
 //! sequentially and atomically.
 
+#[cfg(feature = "build_validator")]
+use crate::bundle_stage::bundle_storage::SecondaryBackrunStripResult;
 use {
     crate::{
         banking_stage::{
+            PostPackConfirmationSignatures,
             committer::{CommitTransactionDetails, Committer},
             consume_worker::ConsumeWorkerMetrics,
             consumer::ProcessTransactionBatchOutput,
@@ -15,16 +18,26 @@ use {
             bundle_consumer::BundleConsumer,
             bundle_storage::{BundleStorage, BundleStorageEntry, BundleStorageError},
         },
+        gui::{
+            metrics::GuiTxnTpuSource,
+            slot_txn::{
+                capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
+                GuiTxnEvent,
+            },
+            GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_BUNDLE,
+        },
         packet_bundle::VerifiedPacketBundle,
-        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        proxy::block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig},
         tip_manager::TipManager,
     },
     ahash::HashSet,
     arc_swap::ArcSwap,
-    crossbeam_channel::{Receiver, RecvTimeoutError},
+    crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     smallvec::SmallVec,
+    solana_address::Address,
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
     solana_keypair::Keypair,
     solana_ledger::blockstore_processor::TransactionStatusSender,
     solana_measure::measure_us,
@@ -34,11 +47,14 @@ use {
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
+    solana_signature::Signature,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_transaction::TransactionError,
     std::{
-        collections::VecDeque,
+        collections::{HashMap, VecDeque},
+        net::Ipv4Addr,
         num::{NonZeroUsize, Saturating},
-        ops::Deref,
         sync::{
             Arc, RwLock,
             atomic::{AtomicBool, Ordering},
@@ -48,14 +64,38 @@ use {
     },
 };
 
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    #[allow(improper_ctypes_definitions)]
+    fn check_bundle_feasability(
+        transaction_locks: Vec<(Pubkey, bool)>,
+        bundle: &BundleStorageEntry,
+        last_counter: u64,
+        is_loop_complete: bool,
+    ) -> (bool, bool, u64, bool);
+}
+
+#[inline]
+#[cfg(feature = "build_validator")]
+fn allow_bundle(
+    transaction_locks: Vec<(Pubkey, bool)>,
+    bundle: &BundleStorageEntry,
+    last_counter: u64,
+    is_loop_complete: bool,
+) -> (bool, bool, u64, bool) {
+    unsafe { check_bundle_feasability(transaction_locks, bundle, last_counter, is_loop_complete) }
+}
+
 pub mod bundle_account_locker;
 mod bundle_consumer;
 mod bundle_packet_deserializer;
-mod bundle_storage;
-const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(40);
+pub mod bundle_storage;
+const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(5);
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
 
 // Stats emitted periodically
+#[derive(Clone)]
 pub struct BundleStageLoopMetrics {
     last_report: Instant,
     id: u32,
@@ -75,7 +115,7 @@ pub struct BundleStageLoopMetrics {
     cost_model_buffered_bundles_count: Saturating<u64>,
 
     // number of bundles dropped during insertion
-    num_bundles_dropped: Saturating<u64>,
+    pub num_bundles_dropped: Saturating<u64>,
 
     // timings
     receive_and_buffer_bundles_elapsed_us: Saturating<u64>,
@@ -86,11 +126,19 @@ pub struct BundleStageLoopMetrics {
     num_bundles_dropped_packet_marked_discard: Saturating<u64>,
     num_bundles_dropped_packet_filter_error: Saturating<u64>,
     num_bundles_dropped_bundle_too_large: Saturating<u64>,
-    num_bundles_dropped_duplicate_transaction: Saturating<u64>,
+    pub num_bundles_dropped_duplicate_transaction: Saturating<u64>,
+    num_bundles_dropped_duplicate_nonce: Saturating<u64>,
+    num_bundles_dropped_zero_tip_amount: Saturating<u64>,
+    num_bundles_dropped_block_hash_not_found: Saturating<u64>,
+    num_bundles_dropped_already_processed: Saturating<u64>,
+    num_bundles_dropped_transaction_check_failed: Saturating<u64>,
 
-    tip_programs_error: Saturating<u64>,
+    pub tip_programs_error: Saturating<u64>,
     bundle_lock_errors: Saturating<u64>,
     bundles_processed: Saturating<u64>,
+
+    bundles_conflict_with_scheduler: Saturating<u64>,
+    bundles_not_priority: Saturating<u64>,
 }
 
 impl Default for BundleStageLoopMetrics {
@@ -113,9 +161,16 @@ impl Default for BundleStageLoopMetrics {
             num_bundles_dropped_packet_filter_error: Saturating(0),
             num_bundles_dropped_bundle_too_large: Saturating(0),
             num_bundles_dropped_duplicate_transaction: Saturating(0),
+            num_bundles_dropped_duplicate_nonce: Saturating(0),
+            num_bundles_dropped_zero_tip_amount: Saturating(0),
+            num_bundles_dropped_block_hash_not_found: Saturating(0),
+            num_bundles_dropped_already_processed: Saturating(0),
+            num_bundles_dropped_transaction_check_failed: Saturating(0),
             tip_programs_error: Saturating(0),
             bundle_lock_errors: Saturating(0),
             bundles_processed: Saturating(0),
+            bundles_conflict_with_scheduler: Saturating(0),
+            bundles_not_priority: Saturating(0),
         }
     }
 }
@@ -157,6 +212,14 @@ impl BundleStageLoopMetrics {
         self.bundles_processed += count;
     }
 
+    pub fn increment_bundles_conflict_with_scheduler(&mut self, count: u64) {
+        self.bundles_conflict_with_scheduler += count;
+    }
+
+    pub fn increment_bundles_not_priority(&mut self, count: u64) {
+        self.bundles_not_priority += count;
+    }
+
     pub fn increment_bundle_dropped_error(&mut self, error: BundleStorageError) {
         self.num_bundles_dropped += 1;
         match error {
@@ -178,6 +241,22 @@ impl BundleStageLoopMetrics {
             BundleStorageError::DuplicateTransaction => {
                 self.num_bundles_dropped_duplicate_transaction += 1;
             }
+            BundleStorageError::DuplicateNonce => {
+                self.num_bundles_dropped_duplicate_nonce += 1;
+            }
+            BundleStorageError::ZeroTipAmount(block_engine_url) => {
+                self.num_bundles_dropped_zero_tip_amount += 1;
+                warn!("dropped bundle with zero tip amount from block engine: {block_engine_url}");
+            }
+            BundleStorageError::BlockHashNotFound => {
+                self.num_bundles_dropped_block_hash_not_found += 1;
+            }
+            BundleStorageError::AlreadyProcessed => {
+                self.num_bundles_dropped_already_processed += 1;
+            }
+            BundleStorageError::TransactionCheckFailed => {
+                self.num_bundles_dropped_transaction_check_failed += 1;
+            }
         }
     }
 
@@ -189,8 +268,13 @@ impl BundleStageLoopMetrics {
         self.process_buffered_bundles_elapsed_us += count;
     }
 
-    fn maybe_report(&mut self, report_interval_ms: u64) {
+    fn maybe_report(&mut self, report_interval_ms: u64, gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>) {
         if self.last_report.elapsed().as_millis() >= report_interval_ms as u128 && self.has_data() {
+            if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleStage(self.clone())) {
+                    warn!("failed to send BundleStage gui metrics: {err}");
+                }
+            }
             datapoint_info!(
                 "bundle_stage-loop_stats",
                 ("id", self.id, i64),
@@ -264,9 +348,44 @@ impl BundleStageLoopMetrics {
                     self.num_bundles_dropped_duplicate_transaction.0 as i64,
                     i64
                 ),
+                (
+                    "num_bundles_dropped_duplicate_nonce",
+                    self.num_bundles_dropped_duplicate_nonce.0 as i64,
+                    i64
+                ),
+                (
+                    "num_bundles_dropped_zero_tip_amount",
+                    self.num_bundles_dropped_zero_tip_amount.0 as i64,
+                    i64
+                ),
                 ("tip_programs_error", self.tip_programs_error.0 as i64, i64),
                 ("bundle_lock_errors", self.bundle_lock_errors.0 as i64, i64),
                 ("bundles_processed", self.bundles_processed.0 as i64, i64),
+                (
+                    "num_bundles_dropped_block_hash_not_found",
+                    self.num_bundles_dropped_block_hash_not_found.0 as i64,
+                    i64
+                ),
+                (
+                    "num_bundles_dropped_already_processed",
+                    self.num_bundles_dropped_already_processed.0 as i64,
+                    i64
+                ),
+                (
+                    "num_bundles_dropped_transaction_check_failed",
+                    self.num_bundles_dropped_transaction_check_failed.0 as i64,
+                    i64
+                ),
+                (
+                    "bundles_conflict_with_scheduler",
+                    self.bundles_conflict_with_scheduler.0 as i64,
+                    i64
+                ),
+                (
+                    "bundles_not_priority",
+                    self.bundles_not_priority.0 as i64,
+                    i64
+                ),
             );
 
             self.last_report = Instant::now();
@@ -290,9 +409,16 @@ impl BundleStageLoopMetrics {
         self.num_bundles_dropped_packet_filter_error = Saturating(0);
         self.num_bundles_dropped_bundle_too_large = Saturating(0);
         self.num_bundles_dropped_duplicate_transaction = Saturating(0);
+        self.num_bundles_dropped_duplicate_nonce = Saturating(0);
+        self.num_bundles_dropped_zero_tip_amount = Saturating(0);
         self.tip_programs_error = Saturating(0);
         self.bundle_lock_errors = Saturating(0);
         self.bundles_processed = Saturating(0);
+        self.bundles_conflict_with_scheduler = Saturating(0);
+        self.bundles_not_priority = Saturating(0);
+        self.num_bundles_dropped_block_hash_not_found = Saturating(0);
+        self.num_bundles_dropped_already_processed = Saturating(0);
+        self.num_bundles_dropped_transaction_check_failed = Saturating(0);
     }
 
     pub fn has_data(&self) -> bool {
@@ -309,9 +435,16 @@ impl BundleStageLoopMetrics {
             || self.num_bundles_dropped_packet_filter_error.0 > 0
             || self.num_bundles_dropped_bundle_too_large.0 > 0
             || self.num_bundles_dropped_duplicate_transaction.0 > 0
+            || self.num_bundles_dropped_duplicate_nonce.0 > 0
+            || self.num_bundles_dropped_zero_tip_amount.0 > 0
             || self.tip_programs_error.0 > 0
             || self.bundle_lock_errors.0 > 0
             || self.bundles_processed.0 > 0
+            || self.bundles_conflict_with_scheduler.0 > 0
+            || self.bundles_not_priority.0 > 0
+            || self.num_bundles_dropped_block_hash_not_found.0 > 0
+            || self.num_bundles_dropped_already_processed.0 > 0
+            || self.num_bundles_dropped_transaction_check_failed.0 > 0
     }
 }
 
@@ -345,7 +478,13 @@ impl BundleStage {
         bundle_account_locker: BundleAccountLocker,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-        blacklisted_accounts: HashSet<Pubkey>,
+        filter_keys: HashSet<Pubkey>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self::start_bundle_thread(
             cluster_info,
@@ -361,7 +500,13 @@ impl BundleStage {
             bundle_account_locker,
             block_builder_fee_info,
             prioritization_fee_cache,
-            blacklisted_accounts,
+            filter_keys,
+            nonce_packets,
+            nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         )
     }
 
@@ -384,17 +529,29 @@ impl BundleStage {
         bundle_account_locker: BundleAccountLocker,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
-        blacklisted_accounts: HashSet<Pubkey>,
+        filter_keys: HashSet<Pubkey>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         let committer = Committer::new(
             transaction_status_sender,
             replay_vote_sender,
-            prioritization_fee_cache,
+            prioritization_fee_cache.clone(),
+            None,
         );
-        let decision_maker = DecisionMaker::from(poh_recorder.read().unwrap().deref());
 
-        let consumer =
-            BundleConsumer::new(committer, transaction_recorder, log_message_bytes_limit);
+        let decision_maker = DecisionMaker::from(&poh_recorder.clone());
+
+        let consumer = BundleConsumer::new(
+            committer,
+            transaction_recorder,
+            log_message_bytes_limit,
+            gui_txn_event_sender.is_some(),
+        );
 
         let block_builder_fee_info = block_builder_fee_info.clone();
         let cluster_info = cluster_info.clone();
@@ -407,11 +564,17 @@ impl BundleStage {
                     decision_maker,
                     consumer,
                     exit,
-                    blacklisted_accounts,
+                    filter_keys,
                     bundle_account_locker,
                     tip_manager,
                     block_builder_fee_info,
                     cluster_info,
+                    nonce_packets,
+                    nonce_packet_sender,
+                    scheduler_postpack_conf_signatures,
+                    block_engine_config,
+                    gui_core_metrics_sender,
+                    gui_txn_event_sender,
                 );
             })
             .unwrap();
@@ -426,14 +589,20 @@ impl BundleStage {
         mut decision_maker: DecisionMaker,
         mut consumer: BundleConsumer,
         exit: Arc<AtomicBool>,
-        blacklisted_accounts: HashSet<Pubkey>,
+        filter_keys: HashSet<Pubkey>,
         bundle_account_locker: BundleAccountLocker,
         tip_manager: TipManager,
         block_builder_fee_info: Arc<ArcSwap<BlockBuilderFeeInfo>>,
         cluster_info: Arc<ClusterInfo>,
+        nonce_packets: Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: Sender<Signature>,
+        scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) {
         let mut last_metrics_update = Instant::now();
-        let mut bundle_storage = BundleStorage::with_capacity(2_000);
+        let mut bundle_storage = BundleStorage::with_capacity(100_000);
 
         let mut bundle_stage_metrics = BundleStageLoopMetrics::default();
         let consume_worker_metrics = ConsumeWorkerMetrics::new(10_000);
@@ -455,7 +624,10 @@ impl BundleStage {
                         &block_builder_fee_info,
                         &tip_manager,
                         &cluster_info,
-                        &consume_worker_metrics
+                        &consume_worker_metrics,
+                        &scheduler_postpack_conf_signatures,
+                        &gui_core_metrics_sender,
+                        &gui_txn_event_sender,
                     ));
                 bundle_stage_metrics.increment_process_buffered_bundles_elapsed_us(
                     process_buffered_packets_time_us,
@@ -468,8 +640,12 @@ impl BundleStage {
                 &bank_forks,
                 &mut bundle_receiver,
                 &mut bundle_storage,
-                &blacklisted_accounts,
+                &filter_keys,
                 &mut bundle_stage_metrics,
+                &nonce_packets,
+                &nonce_packet_sender,
+                &scheduler_postpack_conf_signatures,
+                &block_engine_config,
             ) {
                 break;
             }
@@ -487,7 +663,7 @@ impl BundleStage {
                 bundle_storage.cost_model_buffered_bundles_len() as u64,
             );
 
-            bundle_stage_metrics.maybe_report(20);
+            bundle_stage_metrics.maybe_report(20, gui_core_metrics_sender.as_ref());
         }
     }
 
@@ -495,8 +671,12 @@ impl BundleStage {
         bank_forks: &Arc<RwLock<BankForks>>,
         bundle_receiver: &mut Receiver<VerifiedPacketBundle>,
         bundle_storage: &mut BundleStorage,
-        blacklisted_accounts: &HashSet<Pubkey>,
+        filter_keys: &HashSet<Pubkey>,
         bundle_stage_metrics: &mut BundleStageLoopMetrics,
+        nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: &Sender<Signature>,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        block_engine_config: &ArcSwap<BlockEngineConfig>,
     ) -> Result<(), RecvTimeoutError> {
         let (root_bank, working_bank) = {
             let bank_forks = bank_forks.read().unwrap();
@@ -512,28 +692,72 @@ impl BundleStage {
         };
 
         let bundle = bundle_receiver.recv_timeout(recv_timeout)?;
-        for bundle in std::iter::once(bundle).chain(bundle_receiver.try_iter()) {
-            let num_packets = bundle.batch().len();
+        Self::insert_bundle(
+            bundle_storage,
+            bundle,
+            &root_bank,
+            &working_bank,
+            filter_keys,
+            bundle_stage_metrics,
+            nonce_packets,
+            nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
+        );
 
-            bundle_stage_metrics.increment_num_bundles_received(1);
-            bundle_stage_metrics.increment_num_packets_received(num_packets as u64);
-
-            match bundle_storage.insert_bundle(
+        while let Ok(bundle) = bundle_receiver.try_recv() {
+            Self::insert_bundle(
+                bundle_storage,
                 bundle,
                 &root_bank,
                 &working_bank,
-                blacklisted_accounts,
-            ) {
-                Ok(_) => {
-                    bundle_stage_metrics.increment_newly_buffered_bundles_count(1);
-                }
-                Err(e) => {
-                    bundle_stage_metrics.increment_bundle_dropped_error(e);
-                }
-            }
+                filter_keys,
+                bundle_stage_metrics,
+                nonce_packets,
+                nonce_packet_sender,
+                scheduler_postpack_conf_signatures,
+                block_engine_config,
+            );
         }
 
         Ok(())
+    }
+
+    fn insert_bundle(
+        bundle_storage: &mut BundleStorage,
+        bundle: VerifiedPacketBundle,
+        root_bank: &Arc<Bank>,
+        working_bank: &Arc<Bank>,
+        filter_keys: &HashSet<Pubkey>,
+        bundle_stage_metrics: &mut BundleStageLoopMetrics,
+        nonce_packets: &Arc<RwLock<HashMap<(Address, Hash), (Signature, u64)>>>,
+        nonce_packet_sender: &Sender<Signature>,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        block_engine_config: &ArcSwap<BlockEngineConfig>,
+    ) {
+        let num_packets = bundle.batch().len();
+
+        bundle_stage_metrics.increment_num_bundles_received(1);
+        bundle_stage_metrics.increment_num_packets_received(num_packets as u64);
+
+        match bundle_storage.insert_bundle(
+            bundle,
+            root_bank,
+            working_bank,
+            filter_keys,
+            nonce_packets,
+            nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
+        ) {
+            Ok(_) => {
+                bundle_storage.is_new_bundle_received = true;
+                bundle_stage_metrics.increment_newly_buffered_bundles_count(1);
+            }
+            Err(e) => {
+                bundle_stage_metrics.increment_bundle_dropped_error(e);
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -548,13 +772,18 @@ impl BundleStage {
         tip_manager: &TipManager,
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
     ) {
-        match decision_maker.make_consume_or_forward_decision() {
+        let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
+
+        match decision {
             // BufferedPacketsDecision::Consume means this leader is scheduled to be running at the moment.
             // Execute, record, and commit as many bundles possible given time, compute, and other constraints.
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 Self::consume_bundles(
-                    &bank,
+                    &bank_start.working_bank,
                     bundle_storage,
                     bundle_account_locker,
                     consumer,
@@ -564,6 +793,9 @@ impl BundleStage {
                     tip_manager,
                     cluster_info,
                     consume_worker_metrics,
+                    scheduler_postpack_conf_signatures,
+                    gui_core_metrics_sender,
+                    gui_txn_event_sender,
                 );
             }
             // BufferedPacketsDecision::Forward means the leader is slot is far away.
@@ -579,6 +811,7 @@ impl BundleStage {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(not(feature = "build_validator"))]
     fn consume_bundles(
         bank: &Arc<Bank>,
         bundle_storage: &mut BundleStorage,
@@ -590,7 +823,11 @@ impl BundleStage {
         tip_manager: &TipManager,
         cluster_info: &Arc<ClusterInfo>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        _scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
     ) {
+        // Changing this to 1 to avoid locking a larger batch of bundles
         const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 
         let mut bundles = VecDeque::with_capacity(BUNDLE_WINDOW_SIZE.get());
@@ -604,6 +841,7 @@ impl BundleStage {
                 cluster_info,
                 block_builder_fee_info,
                 consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
             )
             .is_err()
             {
@@ -647,12 +885,19 @@ impl BundleStage {
                 }
 
                 bundles.push_back(bundle);
+                break;
             }
 
             let Some(bundle) = bundles.pop_front() else {
                 break;
             };
-            let result = Self::process_bundle(bank, &bundle, consumer, consume_worker_metrics);
+            let result = Self::process_bundle(
+                bank,
+                &bundle,
+                consumer,
+                consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
+            );
             let _ = bundle_account_locker.unlock_bundle(&bundle.transactions, bank);
             match result {
                 Ok(output) => {
@@ -672,7 +917,205 @@ impl BundleStage {
                     continue;
                 }
             }
-            consume_worker_metrics.maybe_report_and_reset();
+            consume_worker_metrics.maybe_report_and_reset(false, gui_core_metrics_sender.as_ref());
+        }
+
+        debug_assert!(
+            bundle_account_locker
+                .account_locks()
+                .read_locks()
+                .is_empty(),
+            "bundle account read locks should be empty"
+        );
+        debug_assert!(
+            bundle_account_locker
+                .account_locks()
+                .write_locks()
+                .is_empty(),
+            "bundle account write locks should be empty"
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[cfg(feature = "build_validator")]
+    fn consume_bundles(
+        bank: &Arc<Bank>,
+        bundle_storage: &mut BundleStorage,
+        bundle_account_locker: &BundleAccountLocker,
+        consumer: &mut BundleConsumer,
+        bundle_stage_metrics: &mut BundleStageLoopMetrics,
+        last_tip_update_slot: &mut Slot,
+        block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
+        tip_manager: &TipManager,
+        cluster_info: &Arc<ClusterInfo>,
+        consume_worker_metrics: &ConsumeWorkerMetrics,
+        scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
+    ) {
+        // Changing this to 1 to avoid locking a larger batch of bundles
+        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(32).unwrap();
+
+        let mut bundles = VecDeque::with_capacity(BUNDLE_WINDOW_SIZE.get());
+
+        if bank.slot() != *last_tip_update_slot {
+            if Self::handle_tip_programs(
+                bank,
+                bundle_account_locker,
+                consumer,
+                tip_manager,
+                cluster_info,
+                block_builder_fee_info,
+                consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
+            )
+            .is_err()
+            {
+                bundle_stage_metrics.increment_tip_programs_error(1);
+                error!("tip programs error, not processing bundles");
+                return;
+            }
+
+            *last_tip_update_slot = bank.slot();
+        }
+
+        // This loop shall:
+        // - Pop a bundle from the bundle storage
+        // - Try to pre-lock the bundle with the bundle account locker, destorying the bundle if it fails
+        // - Add the bundle to the back of the bundles deque
+        // - If the bundles deque is full, process the bundle at the front of the deque.
+        // - After processing it, check to see if it's a retryable error.
+        // - If it's a retryable error, add the bundle back to the back of the bundles deque
+        // - If it's not a retryable error, destroy the bundle
+        //
+        // The BUNDLE_WINDOW_SIZE should be chosen such that it's not holding too many bundles pre-locks at once
+        // to prevent BankingStage from being starved of transactions to process.
+        //
+        // Requirements:
+        // - Any bundle that gets popped must be destoryed
+        // - Any bundle that gets locked with the bundle account locker shall be destroyed
+        loop {
+            let mut bundles_to_redump = Vec::new();
+            // Always ensure the window is filled with bundles, breaking out when the bundle deque is full or no more bundles are available to pop
+            while bundles.len() < BUNDLE_WINDOW_SIZE.get() {
+                if bundle_storage.is_new_bundle_received {
+                    bundle_storage.is_loop_complete = false;
+                }
+
+                if bundle_storage.peek_bundle_priority(bank.slot()).is_none() {
+                    break;
+                };
+
+                let Some(mut bundle) = bundle_storage.pop_bundle(bank.slot()) else {
+                    break;
+                };
+
+                match bundle_storage.maybe_strip_secondary_backrun_lead_transaction(
+                    &mut bundle,
+                    scheduler_postpack_conf_signatures,
+                    bank,
+                ) {
+                    SecondaryBackrunStripResult::NoMatch => {}
+                    SecondaryBackrunStripResult::Stripped => {
+                        BundleStorage::apply_postpackconf_tip_boost(&mut bundle);
+                    }
+                    SecondaryBackrunStripResult::Drop => {
+                        bundle_storage.destroy_bundle(bundle);
+                        continue;
+                    }
+                }
+
+                if let Err(e) = BundleStorage::check_bundle_entry_transactions(&bundle, bank) {
+                    bundle_stage_metrics.increment_bundle_dropped_error(e);
+                    bundle_storage.destroy_bundle(bundle);
+                    continue;
+                }
+
+                let (should_redump, is_error) = {
+                    match BundleAccountLocker::get_transaction_locks(&bundle.transactions, bank) {
+                        Ok(transaction_locks) => {
+                            let transaction_locks: Vec<(Pubkey, bool)> = transaction_locks
+                                .flat_map(|tx_locks| {
+                                    tx_locks.map(|(account, writable)| (*account, writable))
+                                })
+                                .collect();
+                            let (can_schedule, is_priority, counter, is_updated) = allow_bundle(
+                                transaction_locks,
+                                &bundle,
+                                bundle_storage.counter,
+                                bundle_storage.is_loop_complete,
+                            );
+                            bundle_storage.counter = counter;
+                            if !is_priority {
+                                bundle_stage_metrics.increment_bundles_not_priority(1);
+                                (true, false)
+                            } else if !can_schedule {
+                                if is_updated {
+                                    bundle_stage_metrics
+                                        .increment_bundles_conflict_with_scheduler(1);
+                                }
+                                (true, false)
+                            } else {
+                                (false, false)
+                            }
+                        }
+                        Err(_) => (false, true),
+                    }
+                };
+                if should_redump {
+                    bundles_to_redump.push(bundle);
+                    continue;
+                }
+
+                if is_error {
+                    bundle_stage_metrics.increment_bundle_lock_errors(1);
+                    bundle_storage.destroy_bundle(bundle);
+                    continue;
+                }
+
+                bundles.push_back(bundle);
+                break;
+            }
+
+            if bundles.is_empty() {
+                bundle_storage.is_new_bundle_received = false;
+                bundle_storage.is_loop_complete = true;
+            }
+
+            for bundle in bundles_to_redump {
+                bundle_storage.push_bundle(bundle);
+            }
+
+            let Some(bundle) = bundles.pop_front() else {
+                break;
+            };
+            let result = Self::process_bundle(
+                bank,
+                &bundle,
+                consumer,
+                consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
+            );
+            let _ = bundle_account_locker.unlock_bundle(&bundle.transactions, bank);
+            match result {
+                Ok(output) => {
+                    consume_worker_metrics.update_for_consume(&output);
+                    consume_worker_metrics.set_has_data(true);
+                    bundle_stage_metrics.increment_bundles_processed(1);
+                    bundle_storage.destroy_bundle(bundle);
+                }
+                Err(BundleExecutionError::ErrorRetryable) => {
+                    bundle_storage.retry_bundle(bundle);
+                }
+                Err(BundleExecutionError::ErrorNonRetryable) => {
+                    bundle_storage.destroy_bundle(bundle);
+                }
+                Err(BundleExecutionError::TipError) => {
+                    // This error is not possible from this code path as any tip processing directly calls Consumer::process_and_record_aged_transactions
+                    continue;
+                }
+            }
+            consume_worker_metrics.maybe_report_and_reset(false, gui_core_metrics_sender.as_ref());
         }
 
         debug_assert!(
@@ -699,6 +1142,7 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let keypair = cluster_info.keypair();
 
@@ -709,6 +1153,7 @@ impl BundleStage {
             tip_manager,
             consume_worker_metrics,
             &keypair,
+            gui_txn_event_sender,
         )?;
 
         Self::handle_crank_tip_programs(
@@ -719,6 +1164,7 @@ impl BundleStage {
             block_builder_fee_info,
             consume_worker_metrics,
             &keypair,
+            gui_txn_event_sender,
         )?;
 
         Ok(())
@@ -731,6 +1177,7 @@ impl BundleStage {
         tip_manager: &TipManager,
         consume_worker_metrics: &ConsumeWorkerMetrics,
         keypair: &Keypair,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let initialize_tip_program_transactions = tip_manager
             .get_initialize_tip_programs_bundle(bank, keypair)
@@ -750,13 +1197,26 @@ impl BundleStage {
         let max_ages: SmallVec<[MaxAge; 2]> =
             SmallVec::from_elem(max_age, initialize_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&initialize_tip_program_transactions, bank);
-        let output = consumer.process_and_record_aged_transactions(
+        let arrival_timestamp_nanos = gui_txn_event_sender
+        .is_some()
+        .then(wallclock_timestamp_nanos)
+        .unwrap_or(0);
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &initialize_tip_program_transactions,
             &max_ages,
             MAX_BUNDLE_RETRY_DURATION,
         );
         let _ = bundle_account_locker.unlock_bundle(&initialize_tip_program_transactions, bank);
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &initialize_tip_program_transactions,
+            &mut output,
+            arrival_timestamp_nanos,
+            u32::from(Ipv4Addr::LOCALHOST),
+            gui_txn_event_sender,
+        );
 
         consume_worker_metrics.update_for_consume(&output);
         consume_worker_metrics.set_has_data(true);
@@ -782,6 +1242,7 @@ impl BundleStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
         keypair: &Keypair,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let block_builder_fee_info = block_builder_fee_info.load();
         let crank_tip_program_transactions = tip_manager
@@ -803,13 +1264,26 @@ impl BundleStage {
         let max_ages: SmallVec<[MaxAge; 2]> =
             SmallVec::from_elem(max_age, crank_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&crank_tip_program_transactions, bank);
-        let output = consumer.process_and_record_aged_transactions(
+        let arrival_timestamp_nanos = gui_txn_event_sender
+        .is_some()
+        .then(wallclock_timestamp_nanos)
+        .unwrap_or(0);
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &crank_tip_program_transactions,
             &max_ages,
             MAX_BUNDLE_RETRY_DURATION,
         );
         let _ = bundle_account_locker.unlock_bundle(&crank_tip_program_transactions, bank);
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &crank_tip_program_transactions,
+            &mut output,
+            arrival_timestamp_nanos,
+            u32::from(Ipv4Addr::LOCALHOST),
+            gui_txn_event_sender,
+        );
 
         consume_worker_metrics.update_for_consume(&output);
         consume_worker_metrics.set_has_data(true);
@@ -864,21 +1338,81 @@ impl BundleStage {
         Err(BundleExecutionError::ErrorNonRetryable)
     }
 
+    fn emit_gui_txn_batch(
+        bank: &Bank,
+        txs: &[impl TransactionWithMeta],
+        output: &mut ProcessTransactionBatchOutput,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
+    ) {
+        let Some(sender) = gui_txn_event_sender else {
+            return;
+        };
+        if txs.is_empty() {
+            return;
+        }
+
+        let microblock_end_timestamp_nanos = wallclock_timestamp_nanos();
+        let execute_output = &output.execute_and_commit_transactions_output;
+        let mb_starts = &output.microblock_start_timestamps_nanos;
+        let schedule_info: Vec<GuiTxnScheduleInfo> = (0..txs.len())
+            .map(|i| GuiTxnScheduleInfo {
+                bank_idx: GUI_TXN_BANK_IDX_BUNDLE,
+                microblock_start_timestamp_nanos: mb_starts.get(i).copied().unwrap_or(0),
+                timestamp_arrival_nanos: arrival_timestamp_nanos,
+                source_ipv4,
+                source_tpu: GuiTxnTpuSource::Bundle,
+                ..GuiTxnScheduleInfo::default()
+            })
+            .collect();
+        let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(txs);
+        if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+            slot: bank.slot(),
+            gui_timestamps_per_tx: execute_output
+                .execute_and_commit_timings
+                .execute_timings
+                .gui_timestamps_per_tx
+                .clone(),
+            microblock_end_timestamp_nanos,
+            gui_schedule_info: schedule_info,
+            compute_units_requested: std::mem::take(&mut output.compute_units_requested),
+            commit_details: gui_commit_details_for_batch(
+                &execute_output.commit_transactions_result,
+                txs.len(),
+            ),
+            signatures,
+            is_simple_vote,
+        })) {
+            warn!("failed to send TxnBatch gui event: {err}");
+        }
+    }
+
     fn process_bundle(
         bank: &Arc<Bank>,
         bundle: &BundleStorageEntry,
         consumer: &mut BundleConsumer,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<ProcessTransactionBatchOutput> {
         if bank.is_complete() {
             return Err(BundleExecutionError::ErrorRetryable);
         }
 
-        let output = consumer.process_and_record_aged_transactions(
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &bundle.transactions,
             &bundle.max_ages,
             MAX_BUNDLE_RETRY_DURATION,
+        );
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &bundle.transactions,
+            &mut output,
+            bundle.timestamp_arrival_nanos,
+            bundle.source_ipv4,
+            gui_txn_event_sender,
         );
 
         consume_worker_metrics.update_for_consume(&output);

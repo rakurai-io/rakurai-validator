@@ -42,6 +42,7 @@ pub trait ConnectionManager: Send + Sync + 'static {
     fn update_key(&self, _key: &Keypair) -> Result<(), Box<dyn std::error::Error>>;
 }
 
+#[repr(C)]
 pub struct ConnectionCache<
     R, // ConnectionPool
     S, // ConnectionManager

@@ -68,14 +68,15 @@ pub struct UpdatedCosts {
 }
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub struct CostTracker {
     account_cost_limit: u64,
     block_cost_limit: u64,
     vote_cost_limit: u64,
     // Maximum new account allocation data per block in bytes.
     allocated_data_size_limit: u64,
-    cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
+    pub cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
     block_cost: SharedBlockCost,
     vote_cost: u64,
     transaction_count: Saturating<u64>,
@@ -237,6 +238,10 @@ impl CostTracker {
 
     pub fn block_cost_limit(&self) -> u64 {
         self.block_cost_limit
+    }
+
+    pub fn account_cost_limit(&self) -> u64 {
+        self.account_cost_limit
     }
 
     pub fn transaction_count(&self) -> u64 {

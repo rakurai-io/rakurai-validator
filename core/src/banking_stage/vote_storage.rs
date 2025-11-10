@@ -108,15 +108,18 @@ impl VoteStorage {
     pub(crate) fn insert_batch(
         &mut self,
         vote_source: VoteSource,
-        votes: impl Iterator<Item = SanitizedTransactionView<SharedBytes>>,
+        batch_arrival_timestamp_nanos: i64,
+        votes: impl Iterator<Item = (SanitizedTransactionView<SharedBytes>, u32)>,
     ) -> VoteBatchInsertionMetrics {
         let should_deprecate_legacy_vote_ixs = self.deprecate_legacy_vote_ixs;
         self.insert_batch_with_replenish(
-            votes.filter_map(|vote| {
+            votes.filter_map(|(vote, source_ipv4)| {
                 LatestValidatorVote::new_from_view(
                     vote,
                     vote_source,
                     should_deprecate_legacy_vote_ixs,
+                    batch_arrival_timestamp_nanos,
+                    source_ipv4,
                 )
                 .ok()
             }),
@@ -124,18 +127,20 @@ impl VoteStorage {
         )
     }
 
-    // Re-insert re-tryable packets.
+    // Re-insert re-tryable packets, preserving ingress GUI metadata.
     pub(crate) fn reinsert_packets(
         &mut self,
-        packets: impl Iterator<Item = SanitizedTransactionView<SharedBytes>>,
+        votes: impl Iterator<Item = (SanitizedTransactionView<SharedBytes>, VoteSource, i64, u32)>,
     ) {
         let should_deprecate_legacy_vote_ixs = self.deprecate_legacy_vote_ixs;
         self.insert_batch_with_replenish(
-            packets.filter_map(|packet| {
+            votes.filter_map(|(packet, vote_source, arrival_timestamp_nanos, source_ipv4)| {
                 LatestValidatorVote::new_from_view(
                     packet,
-                    VoteSource::Tpu, // incorrect, but this bug has been here w/o issue for a long time.
+                    vote_source,
                     should_deprecate_legacy_vote_ixs,
+                    arrival_timestamp_nanos,
+                    source_ipv4,
                 )
                 .ok()
             }),
@@ -143,7 +148,10 @@ impl VoteStorage {
         );
     }
 
-    pub fn drain_unprocessed(&mut self, bank: &Bank) -> Vec<SanitizedTransactionView<SharedBytes>> {
+    pub fn drain_unprocessed(
+        &mut self,
+        bank: &Bank,
+    ) -> Vec<(SanitizedTransactionView<SharedBytes>, VoteSource, i64, u32)> {
         let slot_hashes = bank
             .get_account(&sysvar::slot_hashes::id())
             .and_then(|account| from_account::<SlotHashes, _>(&account));
@@ -163,22 +171,31 @@ impl VoteStorage {
                         if !Self::is_valid_for_our_fork(latest_vote, &slot_hashes) {
                             return None;
                         }
-                        latest_vote.take_vote().inspect(|_vote| {
+                        let source = latest_vote.source();
+                        let arrival_timestamp_nanos = latest_vote.arrival_timestamp_nanos();
+                        let source_ipv4 = latest_vote.source_ipv4();
+                        latest_vote.take_vote().map(|vote| {
                             self.num_unprocessed_votes -= 1;
+                            (vote, source, arrival_timestamp_nanos, source_ipv4)
                         })
                     })
             })
             .collect_vec()
     }
 
-    pub fn clear(&mut self) {
-        self.latest_vote_per_vote_pubkey
-            .values_mut()
-            .for_each(|vote| {
-                if vote.take_vote().is_some() {
-                    self.num_unprocessed_votes -= 1;
+    pub fn clear(&mut self) -> (usize, usize) {
+        let mut num_dropped_gossip = 0;
+        let mut num_dropped_tpu = 0;
+        for vote in self.latest_vote_per_vote_pubkey.values_mut() {
+            if vote.take_vote().is_some() {
+                self.num_unprocessed_votes -= 1;
+                match vote.source() {
+                    VoteSource::Gossip => num_dropped_gossip += 1,
+                    VoteSource::Tpu => num_dropped_tpu += 1,
                 }
-            });
+            }
+        }
+        (num_dropped_gossip, num_dropped_tpu)
     }
 
     pub fn cache_epoch_boundary_info(&mut self, bank: &Bank) {
@@ -533,7 +550,11 @@ pub(crate) mod tests {
 
         let vote = packet_from_slots(vec![(0, 1)], &keypair, None);
         let mut vote_storage = VoteStorage::new(&bank);
-        vote_storage.insert_batch(VoteSource::Tpu, std::iter::once(to_sanitized_view(vote)));
+        vote_storage.insert_batch(
+            VoteSource::Tpu,
+            0,
+            std::iter::once((to_sanitized_view(vote), 0)),
+        );
         assert_eq!(1, vote_storage.len());
 
         // Drain all packets, then re-insert.
@@ -811,7 +832,8 @@ pub(crate) mod tests {
         );
         vote_storage.insert_batch(
             VoteSource::Tpu,
-            std::iter::once(to_sanitized_view(correct_vote)),
+            0,
+            std::iter::once((to_sanitized_view(correct_vote), 0)),
         );
         assert_eq!(1, vote_storage.len());
         assert_eq!(
@@ -828,7 +850,8 @@ pub(crate) mod tests {
         );
         vote_storage.insert_batch(
             VoteSource::Tpu,
-            std::iter::once(to_sanitized_view(unauthorized_vote)),
+            0,
+            std::iter::once((to_sanitized_view(unauthorized_vote), 0)),
         );
         // Should still be 1 (unauthorized vote was filtered)
         assert_eq!(1, vote_storage.len());
@@ -847,7 +870,8 @@ pub(crate) mod tests {
         );
         vote_storage.insert_batch(
             VoteSource::Tpu,
-            std::iter::once(to_sanitized_view(correct_vote_2)),
+            0,
+            std::iter::once((to_sanitized_view(correct_vote_2), 0)),
         );
         assert_eq!(1, vote_storage.len());
         assert_eq!(
@@ -918,7 +942,8 @@ pub(crate) mod tests {
         );
         vote_storage.insert_batch(
             VoteSource::Tpu,
-            std::iter::once(to_sanitized_view(epoch1_vote)),
+            0,
+            std::iter::once((to_sanitized_view(epoch1_vote), 0)),
         );
         assert_eq!(
             1,
@@ -936,7 +961,8 @@ pub(crate) mod tests {
         );
         vote_storage.insert_batch(
             VoteSource::Tpu,
-            std::iter::once(to_sanitized_view(wrong_epoch_vote)),
+            0,
+            std::iter::once((to_sanitized_view(wrong_epoch_vote), 0)),
         );
         // Should still be 1 - the vote with wrong authorized voter was rejected
         assert_eq!(
@@ -972,7 +998,7 @@ pub(crate) mod tests {
         let mut vote_storage = VoteStorage::new(&bank_0);
 
         // Insert batch should filter out all votes as they are unstaked
-        vote_storage.insert_batch(VoteSource::Tpu, votes().into_iter());
+        vote_storage.insert_batch(VoteSource::Tpu, 0, votes().into_iter().map(|v| (v, 0)));
         assert!(vote_storage.is_empty());
 
         // Bank in same epoch should not update stakes
@@ -987,7 +1013,7 @@ pub(crate) mod tests {
         );
         assert_eq!(bank.epoch(), 0);
         vote_storage.cache_epoch_boundary_info(&bank);
-        vote_storage.insert_batch(VoteSource::Tpu, votes().into_iter());
+        vote_storage.insert_batch(VoteSource::Tpu, 0, votes().into_iter().map(|v| (v, 0)));
         assert!(vote_storage.is_empty());
 
         // Bank in next epoch should update stakes
@@ -998,7 +1024,7 @@ pub(crate) mod tests {
         let bank = Bank::new_from_parent(bank_0, SlotLeader::new_unique(), MINIMUM_SLOTS_PER_EPOCH);
         assert_eq!(bank.epoch(), 1);
         vote_storage.cache_epoch_boundary_info(&bank);
-        vote_storage.insert_batch(VoteSource::Gossip, votes().into_iter());
+        vote_storage.insert_batch(VoteSource::Gossip, 0, votes().into_iter().map(|v| (v, 0)));
         assert_eq!(vote_storage.len(), 1);
         assert_eq!(
             vote_storage.get_latest_vote_slot(keypair_b.vote_keypair.pubkey()),
@@ -1021,7 +1047,7 @@ pub(crate) mod tests {
         assert_eq!(bank.epoch(), 2);
         vote_storage.cache_epoch_boundary_info(&bank);
         assert_eq!(vote_storage.len(), 0);
-        vote_storage.insert_batch(VoteSource::Tpu, votes().into_iter());
+        vote_storage.insert_batch(VoteSource::Tpu, 0, votes().into_iter().map(|v| (v, 0)));
         assert_eq!(vote_storage.len(), 1);
         assert_eq!(
             vote_storage.get_latest_vote_slot(keypair_c.vote_keypair.pubkey()),

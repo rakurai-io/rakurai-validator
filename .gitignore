@@ -1,6 +1,7 @@
 svm/tests/example-programs/*/Cargo.lock
 farf/
 target/
+build*
 /solana-release/
 /solana-release.tar.bz2
 /solana-metrics/
@@ -9,7 +10,8 @@ target/
 /test-ledger/
 
 **/*.rs.bk
-.cargo
+.cargo/*
+!.cargo/config.toml
 
 /config/
 
@@ -44,3 +46,4 @@ log-*/
 
 .env
 docker-output/
+.cursor

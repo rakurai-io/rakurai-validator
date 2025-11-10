@@ -212,6 +212,7 @@ impl From<&AHashMap<Pubkey, u64>> for FeatureSnapshot {
 
 #[cfg_attr(feature = "frozen-abi", derive(solana_frozen_abi_macro::AbiExample))]
 #[derive(Debug, Clone, Eq, PartialEq)]
+#[repr(C)]
 pub struct FeatureSet {
     active: AHashMap<Pubkey, u64>,
     inactive: AHashSet<Pubkey>,

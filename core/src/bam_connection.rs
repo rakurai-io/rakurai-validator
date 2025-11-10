@@ -4,6 +4,7 @@
 use {
     crate::{
         bam_dependencies::{BamOutboundMessage, v0_to_versioned_proto},
+        banking_trace::BankingPacketSender,
         tonic_endpoint,
     },
     jito_protos::proto::{
@@ -64,6 +65,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<AtomicTxnBatch>,
         outbound_receiver: &mut Option<mpsc::Receiver<BamOutboundMessage>>,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<Self, TryInitError> {
         // Create connection and inbound and outbound streams
         let backend_endpoint = Self::endpoint_from_url(&url)?
@@ -107,6 +109,7 @@ impl BamConnection {
             metrics.clone(),
             is_healthy.clone(),
             outbound_receiver,
+            non_vote_sender,
         ));
 
         Ok(Self {
@@ -130,6 +133,7 @@ impl BamConnection {
         metrics: Arc<BamConnectionMetrics>,
         is_healthy: Arc<AtomicBool>,
         mut outbound_receiver: mpsc::Receiver<BamOutboundMessage>,
+        non_vote_sender: BankingPacketSender,
     ) -> mpsc::Receiver<BamOutboundMessage> {
         let mut last_heartbeat = None;
         let mut heartbeat_interval = interval(VALIDATOR_HEARTBEAT_INTERVAL);
@@ -248,9 +252,12 @@ impl BamConnection {
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
                             for batch in batches.batches {
                                 metrics.bundle_received.fetch_add(1, Relaxed);
-                                if batch_sender.try_send(batch).is_err() {
+                                if batch_sender.try_send(batch.clone()).is_err() {
                                     metrics.bundle_forward_to_scheduler_fail.fetch_add(1, Relaxed);
                                 }
+                                let _ = non_vote_sender.send_bam_batch(Arc::new(batch)).inspect_err(|_| {
+                                    error!("Failed to send BAM batch to trace sender");
+                                });
                             }
                         }
                         SchedulerResponseV0 { resp: Some(Resp::Ping(ping)), .. } => {

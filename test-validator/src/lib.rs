@@ -20,9 +20,16 @@ use {
     solana_compute_budget::compute_budget::ComputeBudget,
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
+        banking_stage::{
+            PostPackConfirmationConfig, PostPackConfirmationConfigStatus, RakuraiConfig,
+            RakuraiMode,
+        },
         consensus::tower_storage::TowerStorage,
+        proxy::block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
         tip_manager::{TipDistributionAccountConfig, TipManagerConfig},
-        validator::{Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig},
+        validator::{
+            ClientMode, Validator, ValidatorConfig, ValidatorStartProgress, ValidatorTpuConfig,
+        },
     },
     solana_epoch_schedule::EpochSchedule,
     solana_fee_calculator::FeeRateGovernor,
@@ -79,7 +86,7 @@ use {
         num::{NonZero, NonZeroU64},
         path::{Path, PathBuf},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
         time::Duration,
     },
     tokio::time::sleep,
@@ -151,6 +158,16 @@ pub struct TestValidatorGenesis {
     pub geyser_plugin_manager: Arc<ArcSwap<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
+    pub reset_rakurai: Arc<AtomicBool>,
+    pub postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+    pub postpack_confirmation_active_entries:
+        solana_core::banking_stage::PostPackConfirmationActiveEntries,
+    pub post_pack_confirmation_uuid_blocklist:
+        solana_core::banking_stage::PostPackConfirmationUuidBlocklist,
+    pub block_engine_url: String,
+    pub secondary_block_engine_entries: Vec<BlockEngineEntry>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -188,6 +205,31 @@ impl Default for TestValidatorGenesis {
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                rs_mode: RakuraiMode::Mode1,
+                rs_cfg_d1: 40,
+                rs_cfg_ct1: 65,
+                rs_cfg_nd1: 30,
+                rs_cfg_ff1: 1.0,
+                rs_cfg_ft1: 400,
+                rs_cfg_tf1: 1.077,
+                rs_cfg_ntft: 500,
+                rs_cfg_nm: 1,
+                rs_cfg_fp: 0,
+            })),
+            reset_rakurai: Arc::new(AtomicBool::new(false)),
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                PostPackConfirmationConfig::default(),
+            )),
+            postpack_confirmation_active_entries: Arc::new(arc_swap::ArcSwap::from_pointee(
+                PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(arc_swap::ArcSwap::from_pointee(
+                Vec::new(),
+            )),
+            block_engine_url: String::default(),
+            secondary_block_engine_entries: vec![],
         }
     }
 }
@@ -1159,6 +1201,14 @@ impl TestValidator {
                 },
             },
             bam_url: config.bam_url.clone(),
+            block_engine_config: Arc::new(ArcSwap::from_pointee(BlockEngineConfig {
+                block_engine_url: config.block_engine_url.clone(),
+                disable_block_engine_autoconfig: true,
+                trust_packets: false,
+            })),
+            secondary_block_engine_entries: Arc::new(ArcSwap::from_pointee(
+                config.secondary_block_engine_entries.clone(),
+            )),
             ..ValidatorConfig::default_for_test()
         };
         if let Some(ref tower_storage) = config.tower_storage {

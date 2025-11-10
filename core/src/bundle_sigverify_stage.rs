@@ -1,5 +1,9 @@
 use {
-    crate::packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    crate::{
+        banking_trace::TracedSender,
+        packet_bundle::{PacketBundle, VerifiedPacketBundle},
+        gui::GuiCoreMetrics,
+    },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::ThreadPool,
     solana_perf::sigverify::ed25519_verify,
@@ -13,6 +17,15 @@ use {
     },
 };
 
+pub struct BundleSigverifyStageStats {
+    pub num_bundles_received: usize,
+    pub num_packets_received: usize,
+    pub num_bundles_failed_sigverify: usize,
+    pub num_packets_failed_sigverify: usize,
+    pub num_bundles_failed_send: usize,
+    pub num_packets_failed_send: usize,
+}
+
 pub struct BundleSigverifyStage {
     thread: JoinHandle<()>,
 }
@@ -23,8 +36,12 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
-        let thread = spawn(move || Self::sigverify_service(thread_pool, receiver, sender, exit));
+        let thread = spawn(move || {
+            Self::sigverify_service(thread_pool, receiver, sender, exit, non_vote_sender, gui_core_metrics_sender)
+        });
         Self { thread }
     }
 
@@ -37,6 +54,8 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) {
         let mut workspace = Vec::with_capacity(100);
 
@@ -55,6 +74,18 @@ impl BundleSigverifyStage {
                     if (num_bundles_received > 0 || num_packets_received > 0)
                         && last_update.elapsed().as_millis() > 20
                     {
+                        if let Some(gui_core_metrics_sender) = &gui_core_metrics_sender {
+                            if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleSigverify(BundleSigverifyStageStats {
+                                num_bundles_received,
+                                num_packets_received,
+                                num_bundles_failed_sigverify,
+                                num_packets_failed_sigverify,
+                                num_bundles_failed_send,
+                                num_packets_failed_send,
+                            })) {
+                                warn!("failed to send BundleSigverify gui metrics: {err}");
+                            }
+                        }
                         datapoint_info!(
                             "bundle_sigverify_stage",
                             ("num_bundles_received", num_bundles_received, i64),
@@ -85,6 +116,10 @@ impl BundleSigverifyStage {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
 
+            let mut bundle_block_engine_urls: Vec<String> = bundles
+                .iter()
+                .map(|bundle| bundle.block_engine_url().to_string())
+                .collect();
             workspace.extend(bundles.into_iter().map(|bundle| bundle.take()));
 
             let packet_count: usize = workspace.iter().map(|bundle| bundle.len()).sum();
@@ -94,7 +129,7 @@ impl BundleSigverifyStage {
 
             ed25519_verify(&thread_pool, &mut workspace, false, packet_count, false);
 
-            for bundle in workspace.drain(..) {
+            for (bundle, block_engine_url) in workspace.drain(..).zip(bundle_block_engine_urls.drain(..)) {
                 let num_packets_failed_sigverify_in_bundle = bundle
                     .iter()
                     .filter(|packet| packet.meta().discard())
@@ -103,7 +138,12 @@ impl BundleSigverifyStage {
                 // all the transactions in the bundle need to be verified to be valid
                 let len = bundle.len();
                 if num_packets_failed_sigverify_in_bundle == 0
-                    && sender.send(VerifiedPacketBundle::new(bundle)).is_err()
+                    && sender
+                        .send(VerifiedPacketBundle::new_with_block_engine_url(
+                            bundle.clone(),
+                            block_engine_url.clone(),
+                        ))
+                        .is_err()
                 {
                     warn!("failed to send verified packet bundle");
                     num_bundles_failed_send += 1;
@@ -112,6 +152,8 @@ impl BundleSigverifyStage {
                 } else if num_packets_failed_sigverify_in_bundle > 0 {
                     num_bundles_failed_sigverify += 1;
                     num_packets_failed_sigverify += num_packets_failed_sigverify_in_bundle;
+                } else {
+                    let _ = non_vote_sender.send_bundle(Arc::new((bundle, block_engine_url)));
                 }
             }
 
@@ -191,6 +233,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         let txs_2 = (0..4).map(|_| test_tx()).collect::<Vec<_>>();
@@ -202,6 +245,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender
@@ -267,6 +311,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender.send(vec![packet_bundle_1]).unwrap();

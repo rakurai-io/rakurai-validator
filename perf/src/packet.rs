@@ -31,6 +31,7 @@ pub const NUM_RCVMMSGS: usize = 64;
 /// Representation of a packet used in TPU.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
@@ -79,6 +80,18 @@ impl BytesPacket {
         }
 
         Ok(Self { buffer, meta })
+    }
+
+    /// Construct a `BytesPacket` by copying `packet_data` into a fresh `Bytes`
+    /// buffer. Does not share backing storage with the source slice.
+    pub fn from_copied_slice(packet_data: &[u8]) -> Self {
+        Self::from_copied_slice_with_meta(packet_data, Meta::default())
+    }
+
+    /// Like [`Self::from_copied_slice`], but uses the provided `Meta`.
+    pub fn from_copied_slice_with_meta(packet_data: &[u8], mut meta: Meta) -> Self {
+        meta.size = packet_data.len();
+        Self::new(Bytes::copy_from_slice(packet_data), meta)
     }
 
     #[inline]
@@ -146,6 +159,7 @@ impl BytesPacket {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub enum PacketBatch {
     Pinned(RecycledPacketBatch),
     Bytes(BytesPacketBatch),
@@ -640,6 +654,7 @@ impl IndexedParallelIterator for PacketBatchParIterMut<'_> {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct RecycledPacketBatch {
     packets: RecycledVec<Packet>,
 }
@@ -816,6 +831,7 @@ fn to_packet_batches_for_tests<T: Serialize>(items: &[T]) -> Vec<PacketBatch> {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct BytesPacketBatch {
     packets: Vec<BytesPacket>,
 }

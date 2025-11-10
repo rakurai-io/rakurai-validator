@@ -6,19 +6,22 @@ use {
     arc_swap::ArcSwap,
     assert_matches::assert_matches,
     clap::{Arg, Command, crate_description, crate_name},
-    crossbeam_channel::{Receiver, unbounded},
+    crossbeam_channel::{Receiver, bounded, unbounded},
     log::*,
     solana_accounts_db::accounts_db::AccountsDbConfig,
     solana_core::{
         bam_dependencies::{BamConnectionState, BamDependencies},
+        banking_simulation::DummyClusterInfo,
         banking_stage::{
-            BankingStage, transaction_scheduler::scheduler_controller::SchedulerConfig,
+            BankingStage, DecisionState, PostPackConfirmationConfig, RakuraiConfig, RakuraiMode,
+            SchedlingStrategy, reward_distributor::RewardDistributionConfig,
+            transaction_scheduler::scheduler_controller::SchedulerConfig,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
         banking_trace::{BankingTracer, Channels},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
-        validator::BlockProductionMethod,
+        validator::{BlockProductionMethod, ClientMode},
     },
     solana_entry::entry_or_marker::EntryOrMarker,
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
@@ -44,8 +47,9 @@ use {
     solana_system_transaction as system_transaction,
     solana_time_utils::timestamp,
     std::{
+        collections::HashMap,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU8, Ordering},
         },
         thread::{sleep, spawn},
@@ -115,7 +119,7 @@ fn main() {
             bank.clone(),
             blockstore.clone(),
             None,
-            Some(leader_schedule_cache),
+            Some(leader_schedule_cache.clone()),
         );
     let (banking_tracer, tracer_thread) = BankingTracer::new(None).unwrap();
     let prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
@@ -173,6 +177,45 @@ fn main() {
         gossip_vote_receiver,
     } = banking_tracer.create_channels();
 
+    let slot_leader = RwLock::new(leader_schedule_cache.slot_leader_at(0, None).unwrap());
+    let id = slot_leader.read().unwrap().id;
+    let cluster_info_for_banking = Arc::new(DummyClusterInfo {
+        id: RwLock::new(id),
+    });
+
+    let tx_io_check = false;
+    let oms_connector = false;
+    const TX_IO_CHANNEL_SZIE: usize = 1024;
+    let (input_tx_signature_sender, _input_tx_signature_receiver) = if tx_io_check {
+        let (input_tx_signature_sender, input_tx_signature_receiver) = bounded(TX_IO_CHANNEL_SZIE);
+        (
+            Some((input_tx_signature_sender, exit.clone())),
+            Some(input_tx_signature_receiver),
+        )
+    } else {
+        (None, None)
+    };
+    let (output_tx_signature_sender, _output_tx_signature_receiver) =
+        if tx_io_check || oms_connector {
+            let (output_tx_signature_sender, output_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some(output_tx_signature_sender),
+                Some(output_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
+
+    let shared_decision = (
+        Arc::new(RwLock::new(DecisionState::Hold)),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let client_mode = Arc::new(Mutex::new(ClientMode::RakuraiBAM));
+    let nonce_packets = Arc::new(RwLock::new(HashMap::new()));
+    let (_nonce_packet_sender, nonce_packet_receiver) = unbounded();
+
     let banking_stage = BankingStage::new_num_threads(
         // this doesn't matter for the BAM test
         BlockProductionMethod::CentralScheduler,
@@ -194,6 +237,40 @@ fn main() {
         BundleAccountLocker::default(),
         None,
         Some(bam_dependencies),
+        &cluster_info_for_banking,
+        blockstore.clone(),
+        RewardDistributionConfig::default(),
+        Arc::new(RwLock::new(RakuraiConfig {
+            rs_mode: RakuraiMode::Mode1,
+            rs_cfg_d1: 40,
+            rs_cfg_ct1: 65,
+            rs_cfg_nd1: 30,
+            rs_cfg_ff1: 1.0,
+            rs_cfg_ft1: 400,
+            rs_cfg_tf1: 1.077,
+            rs_cfg_ntft: 500,
+            rs_cfg_nm: 1,
+            rs_cfg_fp: 0,
+        })),
+        input_tx_signature_sender,
+        output_tx_signature_sender,
+        shared_decision,
+        exit.clone(),
+        client_mode,
+        Arc::new(AtomicBool::new(false)),
+        Some(SchedlingStrategy::Strategy1),
+        nonce_packets,
+        nonce_packet_receiver,
+        Arc::new(RwLock::new(PostPackConfirmationConfig {
+            entries: Vec::new(),
+        })),
+        Arc::new(arc_swap::ArcSwap::from_pointee(
+            solana_core::banking_stage::PostPackConfirmationConfigStatus::default(),
+        )),
+        Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
+        Arc::new(RwLock::new(HashMap::new())),
+        None,
+        None,
     );
 
     let bank_setting_thread = {

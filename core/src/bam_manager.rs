@@ -4,11 +4,12 @@
 /// - Updates TPU config
 /// - Updates block builder fee info
 /// - Sets `bam_enabled` flag that is used everywhere
+use crate::validator::ClientMode;
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     str::FromStr,
     sync::{
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -19,6 +20,7 @@ use {
             BamConnection, MAX_DURATION_BETWEEN_NODE_HEARTBEATS, WAIT_TO_RECONNECT_DURATION,
         },
         bam_dependencies::{BamConnectionState, BamDependencies, BamOutboundMessage},
+        banking_trace::BankingPacketSender,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
     },
     arc_swap::ArcSwap,
@@ -77,6 +79,8 @@ impl BamManager {
         outbound_receiver: mpsc::Receiver<BamOutboundMessage>,
         poh_recorder: Arc<RwLock<PohRecorder>>,
         identity_notifiers: Arc<RwLock<KeyUpdaters>>,
+        non_vote_sender: BankingPacketSender,
+        client_mode: Arc<Mutex<ClientMode>>,
     ) -> Self {
         let identity_changed = Arc::new(AtomicBool::new(false));
         let new_identity = Arc::new(ArcSwap::from_pointee(None));
@@ -103,6 +107,8 @@ impl BamManager {
                     poh_recorder,
                     identity_changed,
                     new_identity,
+                    non_vote_sender,
+                    client_mode,
                 )
             }),
         }
@@ -116,6 +122,8 @@ impl BamManager {
         poh_recorder: Arc<RwLock<PohRecorder>>,
         identity_changed: Arc<AtomicBool>,
         new_identity: Arc<ArcSwap<Option<Pubkey>>>,
+        non_vote_sender: BankingPacketSender,
+        client_mode: Arc<Mutex<ClientMode>>,
     ) {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(8)
@@ -132,8 +140,22 @@ impl BamManager {
         let fallback_client_id = ClientId::JitoLabs;
         let mut current_client_id = fallback_client_id;
         let bam_client_id = ClientId::AgaveBam;
+        let mut prev_client_mode = client_mode.lock().unwrap().clone();
 
         while !exit.load(Ordering::Relaxed) {
+            if prev_client_mode != client_mode.lock().unwrap().clone() {
+                prev_client_mode = client_mode.lock().unwrap().clone();
+                current_connection = None;
+                cached_builder_config = None;
+
+                dependencies
+                    .bam_enabled
+                    .store(BamConnectionState::Disconnected as u8, Ordering::Relaxed);
+                std::thread::sleep(WAIT_TO_RECONNECT_DURATION);
+                continue;
+            }
+
+            if client_mode.lock().unwrap().clone() != ClientMode::RakuraiJito {
             let configured_bam_url = bam_url.load_full();
             if configured_bam_url != last_observed_bam_url {
                 match configured_bam_url.as_deref() {
@@ -180,6 +202,7 @@ impl BamManager {
                         dependencies.cluster_info.clone(),
                         dependencies.batch_sender.clone(),
                         &mut outbound_receiver,
+                        non_vote_sender.clone(),
                     ));
                     let connection = match result {
                         Ok(connection) => connection,
@@ -210,7 +233,9 @@ impl BamManager {
 
                     info!("BAM connection established");
                     if let Some(builder_config) = connection.get_latest_config() {
-                        Self::update_tpu_config(&builder_config, &dependencies);
+                        if client_mode.lock().unwrap().clone() == ClientMode::BAMStrictCompliance {
+                            Self::update_tpu_config(&builder_config, &dependencies);
+                        }
                         Self::update_shred_socks_config(&builder_config, &dependencies);
                         Self::update_block_engine_key_and_commission(
                             &builder_config,
@@ -301,6 +326,11 @@ impl BamManager {
 
             // Sleep for a short duration to avoid busy-waiting
             std::thread::sleep(std::time::Duration::from_millis(5));
+            } else {
+                current_connection = None;
+                cached_builder_config = None;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
         }
     }
 

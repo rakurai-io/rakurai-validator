@@ -18,12 +18,20 @@ use {
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
+        gui::{
+            metrics::GuiTxnTpuSource,
+            slot_txn::{
+                capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
+                GuiTxnEvent,
+            },
+            GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_VOTE,
+        },
     },
     agave_transaction_view::{
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
     arrayvec::ArrayVec,
-    crossbeam_channel::RecvTimeoutError,
+    crossbeam_channel::{Sender, RecvTimeoutError},
     itertools::Itertools,
     solana_accounts_db::account_locks::validate_account_locks,
     solana_clock::FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
@@ -37,6 +45,7 @@ use {
     solana_svm::{
         account_loader::TransactionCheckResult, transaction_error_metrics::TransactionErrorMetrics,
     },
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::svm_message::SVMMessage,
     solana_time_utils::timestamp,
     solana_transaction::sanitized::MessageHash,
@@ -70,6 +79,8 @@ pub struct VoteWorker {
     bank_forks: Arc<RwLock<BankForks>>,
     consumer: Consumer,
     bundle_account_locker: BundleAccountLocker,
+    gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+    gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
 }
 
 impl VoteWorker {
@@ -83,6 +94,8 @@ impl VoteWorker {
         bank_forks: Arc<RwLock<BankForks>>,
         consumer: Consumer,
         bundle_account_locker: BundleAccountLocker,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self {
             exit,
@@ -94,12 +107,19 @@ impl VoteWorker {
             bank_forks,
             consumer,
             bundle_account_locker,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         }
     }
 
     pub fn run(mut self) {
         let mut banking_stage_stats = BankingStageStats::new();
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::default();
+        let report_interval_ms = if self.gui_core_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
 
         let mut last_metrics_update = Instant::now();
 
@@ -145,7 +165,8 @@ impl VoteWorker {
                     break;
                 }
             }
-            banking_stage_stats.report(1000);
+            banking_stage_stats.report(report_interval_ms, self.gui_core_metrics_sender.as_ref());
+            slot_metrics_tracker.maybe_report_and_reset_interval(self.gui_core_metrics_sender.as_ref());
         }
     }
 
@@ -154,7 +175,7 @@ impl VoteWorker {
         banking_stage_stats: &mut BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) {
-        let (decision, make_decision_us) =
+        let ((decision, _, _), make_decision_us) =
             measure_us!(self.decision_maker.make_consume_or_forward_decision());
         let metrics_action = slot_metrics_tracker.check_leader_slot_boundary(decision.bank());
         slot_metrics_tracker.increment_make_decision_us(make_decision_us);
@@ -166,9 +187,9 @@ impl VoteWorker {
         slot_metrics_tracker.apply_action(metrics_action);
 
         match decision {
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 let (_, consume_buffered_packets_us) = measure_us!(self.consume_buffered_packets(
-                    &bank,
+                    &bank_start.working_bank,
                     banking_stage_stats,
                     slot_metrics_tracker,
                 ));
@@ -180,7 +201,13 @@ impl VoteWorker {
                 // load all accounts from address loader;
                 let current_bank = self.bank_forks.read().unwrap().working_bank();
                 self.storage.cache_epoch_boundary_info(&current_bank);
-                self.storage.clear();
+                let (num_dropped_gossip, num_dropped_tpu) = self.storage.clear();
+                banking_stage_stats
+                    .dropped_forward_gossip_packets_count
+                    .fetch_add(num_dropped_gossip as usize, Ordering::Relaxed);
+                banking_stage_stats
+                    .dropped_forward_tpu_packets_count
+                    .fetch_add(num_dropped_tpu as usize, Ordering::Relaxed);
             }
             BufferedPacketsDecision::ForwardAndHold => {
                 // get current working bank from bank_forks, use it to sanitize transaction and
@@ -257,6 +284,11 @@ impl VoteWorker {
         let mut reached_end_of_slot = false;
         let mut error_counters: TransactionErrorMetrics = TransactionErrorMetrics::default();
         let mut resolved_txs = ArrayVec::<_, UNPROCESSED_BUFFER_STEP_SIZE>::new();
+        // Parallel to `resolved_txs`: `(VoteSource, arrival_nanos, source_ipv4, mb_start_nanos)`.
+        // `mb_start_nanos` is stamped when GUI is on, right after a packet resolves.
+        let mut resolved_sources =
+            ArrayVec::<(VoteSource, i64, u32, i64), UNPROCESSED_BUFFER_STEP_SIZE>::new();
+        let capture_gui = self.gui_txn_event_sender.is_some();
         for chunk in Itertools::chunks(all_vote_packets.into_iter(), UNPROCESSED_BUFFER_STEP_SIZE)
             .into_iter()
         {
@@ -264,17 +296,25 @@ impl VoteWorker {
 
             // Short circuit if we've reached the end of slot.
             if reached_end_of_slot {
-                self.storage.reinsert_packets(chunk.into_iter());
+                self.storage.reinsert_packets(chunk.into_iter().map(
+                    |(packet, source, arrival, ip)| (packet, source, arrival, ip),
+                ));
 
                 continue;
             }
 
             // Sanitize & resolve our chunk.
-            for packet in chunk.into_iter() {
+            for (packet, source, arrival_nanos, source_ipv4) in chunk.into_iter() {
                 if let Some(tx) =
                     consume_scan_should_process_packet(bank, packet, &mut error_counters)
                 {
+                    let mb_start = if capture_gui {
+                        wallclock_timestamp_nanos()
+                    } else {
+                        0
+                    };
                     resolved_txs.push(tx);
+                    resolved_sources.push((source, arrival_nanos, source_ipv4, mb_start));
                 }
             }
 
@@ -282,22 +322,33 @@ impl VoteWorker {
                 bank,
                 &mut reached_end_of_slot,
                 &resolved_txs,
+                &resolved_sources,
                 banking_stage_stats,
                 consumed_buffered_packets_count,
                 rebuffered_packet_count,
                 slot_metrics_tracker,
             ) {
-                self.storage.reinsert_packets(
-                    Self::extract_retryable(&mut resolved_txs, retryable_vote_indices)
-                        .map(|tx| tx.into_inner_transaction().into_view()),
-                );
+                self.storage.reinsert_packets(Self::extract_retryable_with_sources(
+                    &mut resolved_txs,
+                    &mut resolved_sources,
+                    retryable_vote_indices,
+                ));
             } else {
                 self.storage.reinsert_packets(
-                    resolved_txs
-                        .drain(..)
-                        .map(|tx| tx.into_inner_transaction().into_view()),
+                    resolved_txs.drain(..).zip(resolved_sources.drain(..)).map(
+                        |(tx, (source, arrival, ipv4, _mb))| {
+                            (
+                                tx.into_inner_transaction().into_view(),
+                                source,
+                                arrival,
+                                ipv4,
+                            )
+                        },
+                    ),
                 );
             }
+            resolved_sources.clear();
+            resolved_txs.clear();
         }
 
         reached_end_of_slot
@@ -309,6 +360,7 @@ impl VoteWorker {
         bank: &Bank,
         reached_end_of_slot: &mut bool,
         sanitized_transactions: &[RuntimeTransactionView],
+        vote_sources: &[(VoteSource, i64, u32, i64)],
         banking_stage_stats: &BankingStageStats,
         consumed_buffered_packets_count: &mut usize,
         rebuffered_packet_count: &mut usize,
@@ -322,6 +374,7 @@ impl VoteWorker {
             measure_us!(self.process_packets_transactions(
                 bank,
                 sanitized_transactions,
+                vote_sources,
                 banking_stage_stats,
                 slot_metrics_tracker,
             ));
@@ -362,6 +415,7 @@ impl VoteWorker {
         &self,
         bank: &Bank,
         sanitized_transactions: &[impl TransactionWithMeta],
+        vote_sources: &[(VoteSource, i64, u32, i64)],
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> ProcessTransactionsSummary {
@@ -370,7 +424,9 @@ impl VoteWorker {
                 &self.consumer,
                 bank,
                 sanitized_transactions,
-                &self.bundle_account_locker
+                &self.bundle_account_locker,
+                self.gui_txn_event_sender.as_ref(),
+                vote_sources,
             ));
         slot_metrics_tracker.increment_process_transactions_us(process_transactions_us);
         banking_stage_stats
@@ -423,18 +479,67 @@ impl VoteWorker {
         bank: &Bank,
         transactions: &[impl TransactionWithMeta],
         bundle_account_locker: &BundleAccountLocker,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
+        vote_sources: &[(VoteSource, i64, u32, i64)],
     ) -> ProcessTransactionsSummary {
-        let process_transaction_batch_output = consumer.process_and_record_transactions(
+        let mut process_transaction_batch_output = consumer.process_and_record_transactions(
             bank,
             transactions,
             bundle_account_locker,
             false,
         );
 
+        if let Some(sender) = gui_txn_event_sender {
+            let microblock_end_timestamp_nanos = wallclock_timestamp_nanos();
+            let output = &process_transaction_batch_output.execute_and_commit_transactions_output;
+            let gui_timestamps_per_tx = output
+                .execute_and_commit_timings
+                .execute_timings
+                .gui_timestamps_per_tx
+                .clone();
+            // Vote path uses a dedicated GUI bank row; mb_start stamped at scan resolve.
+            let schedule_info: Vec<GuiTxnScheduleInfo> = vote_sources
+                .iter()
+                .map(|(source, arrival_nanos, source_ipv4, mb_start)| GuiTxnScheduleInfo {
+                    bank_idx: GUI_TXN_BANK_IDX_VOTE,
+                    microblock_start_timestamp_nanos: *mb_start,
+                    timestamp_arrival_nanos: *arrival_nanos,
+                    source_ipv4: *source_ipv4,
+                    source_tpu: match source {
+                        VoteSource::Gossip => GuiTxnTpuSource::Gossip,
+                        VoteSource::Tpu => GuiTxnTpuSource::Quic,
+                    },
+                    ..GuiTxnScheduleInfo::default()
+                })
+                .collect();
+            if !schedule_info.is_empty() {
+                let commit_details = gui_commit_details_for_batch(
+                    &output.commit_transactions_result,
+                    schedule_info.len(),
+                );
+                let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(transactions);
+                if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+                    slot: bank.slot(),
+                    gui_timestamps_per_tx,
+                    microblock_end_timestamp_nanos,
+                    gui_schedule_info: schedule_info,
+                    compute_units_requested: std::mem::take(
+                        &mut process_transaction_batch_output.compute_units_requested,
+                    ),
+                    commit_details,
+                    signatures,
+                    is_simple_vote,
+                })) {
+                    warn!("failed to send TxnBatch gui event: {err}");
+                }
+            }
+        }
+
         let ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+            ..
         } = process_transaction_batch_output;
 
         let ExecuteAndCommitTransactionsOutput {
@@ -519,7 +624,7 @@ impl VoteWorker {
             .collect()
     }
 
-    fn extract_retryable<const N: usize>(
+    fn _extract_retryable<const N: usize>(
         vote_packets: &mut ArrayVec<RuntimeTransactionView, N>,
         retryable_vote_indices: Vec<usize>,
     ) -> impl Iterator<Item = RuntimeTransactionView> + '_ {
@@ -534,6 +639,38 @@ impl VoteWorker {
                     retryable_vote_indices.next();
 
                     packet
+                })
+            })
+    }
+
+    fn extract_retryable_with_sources<'a>(
+        vote_packets: &'a mut ArrayVec<RuntimeTransactionView, UNPROCESSED_BUFFER_STEP_SIZE>,
+        vote_sources: &'a mut ArrayVec<(VoteSource, i64, u32, i64), UNPROCESSED_BUFFER_STEP_SIZE>,
+        retryable_vote_indices: Vec<usize>,
+    ) -> impl Iterator<
+        Item = (
+            SanitizedTransactionView<SharedBytes>,
+            VoteSource,
+            i64,
+            u32,
+        ),
+    > + 'a {
+        debug_assert!(retryable_vote_indices.is_sorted());
+        let mut retryable_vote_indices = retryable_vote_indices.into_iter().peekable();
+
+        vote_packets
+            .drain(..)
+            .zip(vote_sources.drain(..))
+            .enumerate()
+            .filter_map(move |(i, (tx, (source, arrival, ipv4, _mb)))| {
+                (Some(&i) == retryable_vote_indices.peek()).then(|| {
+                    retryable_vote_indices.next();
+                    (
+                        tx.into_inner_transaction().into_view(),
+                        source,
+                        arrival,
+                        ipv4,
+                    )
                 })
             })
     }
@@ -780,7 +917,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = unbounded();
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
 
         // Create and process a simple transfer transaction
         let pubkey = solana_pubkey::new_rand();
@@ -797,6 +934,8 @@ mod tests {
             &bank,
             &transactions,
             &BundleAccountLocker::default(),
+            None,
+            &[],
         );
 
         // Assert - Transaction were prcoessed.

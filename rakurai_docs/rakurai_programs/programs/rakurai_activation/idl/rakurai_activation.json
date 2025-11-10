@@ -1,0 +1,865 @@
+{
+  "address": "pmQHMpnpA534JmxEdwY3ADfwDBFmy5my3CeutHM2QTt",
+  "metadata": {
+    "name": "rakurai_activation",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "A multisig-based Solana smart contract for enabling or disabling the Rakurai scheduler. It also governs the commission on block rewards for both, the Client (i.e: Rakurai) and the validator. Note: The remaining block rewards after deducting the two commissions are distributed to stakers via the RewardDistributionProgram."
+  },
+  "instructions": [
+    {
+      "name": "close_rakurai_activation_account",
+      "docs": [
+        "Closes the Rakurai activation account and claims any remaining lamports to validator identity account. This can only be done by the client authority."
+      ],
+      "discriminator": [
+        9,
+        199,
+        29,
+        48,
+        129,
+        165,
+        216,
+        112
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "The global configuration account for Rakurai settings."
+          ]
+        },
+        {
+          "name": "activation_account",
+          "docs": [
+            "PDA storing validator-specific Rakurai activation state; closed during this instruction."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  65,
+                  75,
+                  85,
+                  82,
+                  65,
+                  73,
+                  95,
+                  65,
+                  67,
+                  84,
+                  73,
+                  86,
+                  65,
+                  84,
+                  73,
+                  79,
+                  78,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "validator_identity_account"
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator_identity_account",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "docs": [
+            "Signer authorized to close activation accounts (must match client_authority)."
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initialize",
+      "docs": [
+        "Sets up the singleton [RakuraiActivationConfigAccount] to store global configuration settings for Rakurai."
+      ],
+      "discriminator": [
+        175,
+        175,
+        109,
+        31,
+        13,
+        152,
+        155,
+        237
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "The Rakurai config account (PDA)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  65,
+                  67,
+                  84,
+                  73,
+                  86,
+                  65,
+                  84,
+                  73,
+                  79,
+                  78,
+                  95,
+                  67,
+                  79,
+                  78,
+                  70,
+                  73,
+                  71,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "docs": [
+            "Solana system program required to create accounts."
+          ],
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "initializer",
+          "docs": [
+            "Payer for account creation; must sign the transaction."
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "client_authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "client_commission_account",
+          "type": "pubkey"
+        },
+        {
+          "name": "client_commission_bps",
+          "type": "u16"
+        },
+        {
+          "name": "bump",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "initialize_rakurai_activation_account",
+      "docs": [
+        "Initialize a new [RakuraiActivationAccount] associated with the given validator identity account key and a seed."
+      ],
+      "discriminator": [
+        170,
+        69,
+        49,
+        105,
+        104,
+        62,
+        105,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "The global configuration account for Rakurai settings."
+          ]
+        },
+        {
+          "name": "activation_account",
+          "docs": [
+            "The Rakurai activation PDA account to be created for the validator.",
+            "Seeds: [b\"rakurai_activation\", validator_identity_account.key()]"
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  65,
+                  75,
+                  85,
+                  82,
+                  65,
+                  73,
+                  95,
+                  65,
+                  67,
+                  84,
+                  73,
+                  86,
+                  65,
+                  84,
+                  73,
+                  79,
+                  78,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "validator_identity_account"
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator_vote_account"
+        },
+        {
+          "name": "validator_identity_account"
+        },
+        {
+          "name": "signer",
+          "docs": [
+            "Payer for account creation; must sign the transaction. In current context validator's identity account."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "docs": [
+            "Standard Solana system program for account creation."
+          ],
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "block_reward_commission_bps",
+          "type": "u16"
+        },
+        {
+          "name": "bump",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "update_config",
+      "docs": [
+        "Update config fields. Only the [RakuraiActivationConfigAccount] authority can invoke this."
+      ],
+      "discriminator": [
+        29,
+        158,
+        252,
+        191,
+        10,
+        83,
+        219,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "Mutable config account storing Rakurai activation settings."
+          ],
+          "writable": true
+        },
+        {
+          "name": "authority",
+          "docs": [
+            "Authorized signer allowed to update the config."
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "new_config",
+          "type": {
+            "defined": {
+              "name": "RakuraiActivationConfigAccount"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_rakurai_activation_approval",
+      "docs": [
+        "Updates rakurai activation account approval. This can be done either by the Validator or the client."
+      ],
+      "discriminator": [
+        203,
+        121,
+        29,
+        144,
+        20,
+        217,
+        46,
+        176
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "The global configuration account for Rakurai settings."
+          ]
+        },
+        {
+          "name": "activation_account",
+          "docs": [
+            "PDA storing validator-specific Rakurai activation state."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  65,
+                  75,
+                  85,
+                  82,
+                  65,
+                  73,
+                  95,
+                  65,
+                  67,
+                  84,
+                  73,
+                  86,
+                  65,
+                  84,
+                  73,
+                  79,
+                  78,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "validator_identity_account"
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator_identity_account"
+        },
+        {
+          "name": "signer",
+          "docs": [
+            "Signer must match either validator authority or client authority"
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "grant_approval",
+          "type": "bool"
+        },
+        {
+          "name": "hash",
+          "type": {
+            "option": {
+              "array": [
+                "u8",
+                64
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_rakurai_activation_commission",
+      "docs": [
+        "Updates commission BPS for either Validator or client based on signer authority."
+      ],
+      "discriminator": [
+        159,
+        94,
+        213,
+        167,
+        109,
+        37,
+        14,
+        186
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "docs": [
+            "The global configuration account for Rakurai settings."
+          ]
+        },
+        {
+          "name": "activation_account",
+          "docs": [
+            "PDA storing validator-specific Rakurai activation state."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  65,
+                  75,
+                  85,
+                  82,
+                  65,
+                  73,
+                  95,
+                  65,
+                  67,
+                  84,
+                  73,
+                  86,
+                  65,
+                  84,
+                  73,
+                  79,
+                  78,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "validator_identity_account"
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator_identity_account",
+          "writable": true
+        },
+        {
+          "name": "signer",
+          "docs": [
+            "Signer who must be either validator authority or client authority."
+          ],
+          "writable": true,
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "commission_bps",
+          "type": "u16"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "RakuraiActivationAccount",
+      "discriminator": [
+        23,
+        29,
+        221,
+        229,
+        148,
+        135,
+        217,
+        153
+      ]
+    },
+    {
+      "name": "RakuraiActivationConfigAccount",
+      "discriminator": [
+        46,
+        64,
+        171,
+        251,
+        213,
+        197,
+        130,
+        76
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "ConfigUpdatedEvent",
+      "discriminator": [
+        245,
+        158,
+        129,
+        99,
+        60,
+        100,
+        214,
+        220
+      ]
+    },
+    {
+      "name": "RakuraiActivationAccountClosedEvent",
+      "discriminator": [
+        165,
+        203,
+        16,
+        207,
+        96,
+        4,
+        21,
+        192
+      ]
+    },
+    {
+      "name": "RakuraiActivationAccountInitializedEvent",
+      "discriminator": [
+        248,
+        211,
+        166,
+        27,
+        27,
+        219,
+        27,
+        137
+      ]
+    },
+    {
+      "name": "UpdateRakuraiActivationApprovalEvent",
+      "discriminator": [
+        57,
+        193,
+        172,
+        131,
+        191,
+        208,
+        97,
+        145
+      ]
+    },
+    {
+      "name": "UpdateRakuraiActivationCommissionEvent",
+      "discriminator": [
+        99,
+        250,
+        77,
+        94,
+        183,
+        235,
+        151,
+        216
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "AccountValidationFailure",
+      "msg": "Account failed validation."
+    },
+    {
+      "code": 6001,
+      "name": "ArithmeticError",
+      "msg": "Encountered an arithmetic under/overflow error."
+    },
+    {
+      "code": 6002,
+      "name": "MaxCommissionBpsExceeded",
+      "msg": "Validator's commission basis points must be less than or equal to 10_000"
+    },
+    {
+      "code": 6003,
+      "name": "MissingHashForEnable",
+      "msg": "Hash must be provided when enabling the account as client."
+    },
+    {
+      "code": 6004,
+      "name": "Unauthorized",
+      "msg": "Unauthorized signer."
+    }
+  ],
+  "types": [
+    {
+      "name": "ConfigUpdatedEvent",
+      "docs": [
+        "Emitted when the global config is updated."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "The authority that performed the update."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RakuraiActivationAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "is_enabled",
+            "docs": [
+              "Whether the rakurai scheduler is enabled."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "proposer",
+            "docs": [
+              "Who proposed this change (optional)."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "validator_authority",
+            "docs": [
+              "Main validator's signing authority."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "block_reward_commission_bps",
+            "docs": [
+              "Validator commission on Block Rewards in basis points."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "client_commission_bps",
+            "docs": [
+              "Client commission in basis points."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "hash",
+            "docs": [
+              "Optional hash."
+            ],
+            "type": {
+              "option": {
+                "array": [
+                  "u8",
+                  64
+                ]
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "RakuraiActivationAccountClosedEvent",
+      "docs": [
+        "Emitted when a Rakurai activation account is closed and funds are claimed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "activation_account",
+            "docs": [
+              "The closed activation account."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_claimed",
+            "docs": [
+              "Total lamports claimed during closure."
+            ],
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RakuraiActivationAccountInitializedEvent",
+      "docs": [
+        "Emitted when a new Rakurai activation account is initialized."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "activation_account",
+            "docs": [
+              "The newly initialized activation account."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RakuraiActivationConfigAccount",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "docs": [
+              "Primary authority over this PDA."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "client_authority",
+            "docs": [
+              "Co-signer authority required to update Rakurai activation status."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "client_commission_bps",
+            "docs": [
+              "Commission charged by the client (in basis points)."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "client_commission_account",
+            "docs": [
+              "Account where the commission is sent."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Bump seed for PDA."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRakuraiActivationApprovalEvent",
+      "docs": [
+        "Emitted when one of the authorities approves a Rakurai activation update."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "activation_account",
+            "docs": [
+              "The activation account receiving the update."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "signer",
+            "docs": [
+              "The signer (authority) who approved the update."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateRakuraiActivationCommissionEvent",
+      "docs": [
+        "Emitted when the operator commission of an activation account is updated."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "activation_account",
+            "docs": [
+              "The activation account whose commission was updated."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "operator_commission",
+            "docs": [
+              "The new operator commission (basis points or percent, depending on program logic)."
+            ],
+            "type": "u16"
+          }
+        ]
+      }
+    }
+  ]
+}

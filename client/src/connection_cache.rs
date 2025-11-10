@@ -26,6 +26,7 @@ const DEFAULT_CONNECTION_CACHE_USE_QUIC: bool = true;
 /// A thin wrapper over connection-cache/ConnectionCache to ease
 /// construction of the ConnectionCache for code dealing both with udp and quic.
 /// For the scenario only using udp or quic, use connection-cache/ConnectionCache directly.
+#[repr(C)]
 pub enum ConnectionCache {
     Quic(Arc<BackendConnectionCache<QuicPool, QuicConnectionManager, QuicConfig>>),
     Udp(Arc<BackendConnectionCache<UdpPool, UdpConnectionManager, UdpConfig>>),

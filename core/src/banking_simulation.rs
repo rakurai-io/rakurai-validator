@@ -2,7 +2,9 @@
 use {
     crate::{
         banking_stage::{
-            BankingStage, BankingStageHandle, LikeClusterInfo,
+            BankingStage, BankingStageHandle, DecisionState, LikeClusterInfo, RakuraiConfig,
+            RakuraiMode, SchedlingStrategy, house_keeper::HouseKeeper,
+            reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
@@ -11,9 +13,8 @@ use {
             TimedTracedEvent, TracedEvent, TracedSender, TracerThread,
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        validator::BlockProductionMethod,
+        validator::{BlockProductionMethod, ClientMode},
     },
-    agave_banking_stage_ingress_types::BankingPacketBatch,
     agave_votor_messages::migration::MigrationStatus,
     arc_swap::ArcSwap,
     assert_matches::assert_matches,
@@ -23,7 +24,11 @@ use {
     log::*,
     solana_clock::{DEFAULT_MS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET, Slot},
     solana_genesis_config::GenesisConfig,
-    solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfoQuery, node::Node},
+    solana_gossip::{
+        cluster_info::ClusterInfo,
+        contact_info::{ContactInfo, ContactInfoQuery},
+        node::Node,
+    },
     solana_keypair::Keypair,
     solana_ledger::{
         blockstore::{Blockstore, PurgeType},
@@ -33,10 +38,14 @@ use {
         SocketAddrSpace,
         sockets::{SocketConfiguration, bind_in_range_with_config},
     },
+    solana_perf::packet::PacketBatch,
     solana_poh::{
         poh_controller::PohController,
         poh_recorder::{GRACE_TICKS_FACTOR, MAX_GRACE_SLOTS, PohRecorder},
-        poh_service::{DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE, PohService},
+        poh_service::{
+            DEFAULT_HASHES_PER_BATCH, DEFAULT_PINNED_CPU_CORE, PohService,
+            TARGET_SLOT_ADJUSTMENT_NS,
+        },
         record_channels::record_channels,
         transaction_recorder::TransactionRecorder,
     },
@@ -50,14 +59,14 @@ use {
     solana_signer::Signer,
     solana_turbine::broadcast_stage::{BroadcastStage, BroadcastStageType},
     std::{
-        collections::BTreeMap,
+        collections::{self, BTreeMap, HashMap},
         fmt::Display,
         fs::File,
         io::{self, BufRead, BufReader},
         net::{IpAddr, Ipv4Addr},
         path::PathBuf,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle, sleep},
@@ -140,12 +149,12 @@ const WARMUP_DURATION: Duration =
     Duration::from_millis(HOLD_TRANSACTIONS_SLOT_OFFSET * DEFAULT_MS_PER_SLOT + 5000);
 
 /// BTreeMap is intentional because events could be unordered slightly due to tracing jitter.
-type PacketBatchesByTime = BTreeMap<SystemTime, (ChannelLabel, BankingPacketBatch)>;
+type PacketBatchesByTime = BTreeMap<SystemTime, (ChannelLabel, Arc<Vec<PacketBatch>>)>;
 
 type FreezeTimeBySlot = BTreeMap<Slot, SystemTime>;
 
 type TimedBatchesToSend = Vec<(
-    (Duration, (ChannelLabel, BankingPacketBatch)),
+    (Duration, (ChannelLabel, Arc<Vec<PacketBatch>>)),
     (usize, usize),
 )>;
 
@@ -200,8 +209,8 @@ impl BankingTraceEvents {
             ) {
                 // Silence errors here as this can happen under normal operation...
                 warn!(
-                    "Reading {event_file_path:?} failed {read_result:?} due to file corruption or \
-                     unclean validator shutdown",
+                    "Reading {:?} failed {:?} due to file corruption or unclean validator shutdown",
+                    event_file_path, read_result,
                 );
             } else {
                 read_result?
@@ -234,18 +243,18 @@ impl BankingTraceEvents {
                 self.hash_overrides.add_override(slot, blockhash, bank_hash);
                 assert!(is_new);
             }
+            _ => todo!(),
         }
     }
-
     pub fn hash_overrides(&self) -> &HashOverrides {
         &self.hash_overrides
     }
 }
 
-struct DummyClusterInfo {
+pub struct DummyClusterInfo {
     // Artificially wrap Pubkey with RwLock to induce lock contention if any to mimic the real
     // ClusterInfo
-    id: RwLock<Pubkey>,
+    pub id: RwLock<Pubkey>,
 }
 
 impl LikeClusterInfo for Arc<DummyClusterInfo> {
@@ -255,6 +264,14 @@ impl LikeClusterInfo for Arc<DummyClusterInfo> {
 
     fn lookup_contact_info<R>(&self, _: &Pubkey, _: impl ContactInfoQuery<R>) -> Option<R> {
         None
+    }
+
+    fn my_contact(&self) -> Arc<RwLock<ContactInfo>> {
+        Arc::new(RwLock::new(ContactInfo::default()))
+    }
+
+    fn keypair(&self) -> Arc<Keypair> {
+        Arc::new(Keypair::new())
     }
 }
 
@@ -334,6 +351,7 @@ impl SimulatorLoopLogger {
     }
 }
 
+#[derive(Clone)]
 struct SenderLoop {
     parent_slot: Slot,
     first_simulated_slot: Slot,
@@ -394,7 +412,7 @@ impl SenderLoop {
                 ChannelLabel::GossipVote => &self.gossip_vote_sender,
                 ChannelLabel::Dummy => unreachable!(),
             };
-            sender.send(batches_with_stats).unwrap();
+            sender.send(batches_with_stats, &None).unwrap();
 
             logger.on_sending_batches(&simulation_duration, label, batch_count, tx_count);
             if self.exit.load(Ordering::Relaxed) {
@@ -537,18 +555,20 @@ struct SimulatorThreads {
     broadcast_stage: BroadcastStage,
     retracer_thread: TracerThread,
     exit: Arc<AtomicBool>,
+    house_keeper_thread: HouseKeeper,
 }
 
 impl SimulatorThreads {
     fn finish(self, sender_thread: EventSenderThread, retransmit_slots_sender: Sender<Slot>) {
         info!("Sleeping a bit before signaling exit");
-        sleep(Duration::from_millis(100));
+        sleep(Duration::from_millis(200));
         self.exit.store(true, Ordering::Relaxed);
 
         // The order is important. Consuming sender_thread by joining will drop some channels. That
         // triggers termination of banking_stage, in turn retracer thread will be terminated.
         sender_thread.join().unwrap();
         self.banking_stage.join().unwrap();
+        self.house_keeper_thread.join().unwrap();
         self.poh_service.join().unwrap();
         if let Some(retracer_thread) = self.retracer_thread {
             retracer_thread.join().unwrap().unwrap();
@@ -752,6 +772,8 @@ impl BankingSimulator {
             &leader_schedule_cache,
             &genesis_config.poh_config,
             exit.clone(),
+            TARGET_SLOT_ADJUSTMENT_NS,
+            None,
         );
         let poh_recorder = Arc::new(RwLock::new(poh_recorder));
         let (record_sender, record_receiver) = record_channels(false);
@@ -769,6 +791,7 @@ impl BankingSimulator {
             poh_service_message_receiver,
             Arc::new(MigrationStatus::default()),
             record_receiver_sender,
+            TARGET_SLOT_ADJUSTMENT_NS,
         );
 
         // Enable BankingTracer to approximate the real environment as close as possible because
@@ -843,11 +866,58 @@ impl BankingSimulator {
             Arc::new(ArcSwap::default()),
         );
 
+        let bundle_account_locker = BundleAccountLocker::default();
+
+        let tx_io_check = None;
+        let oms_connector = false;
+
+        // uncomment this to enable tx_io_check and oms_connector
+        // let tx_io_check = Some("/var/tmp/tx_io.log".to_string());
+        // let oms_connector = true;
+
+        const TX_IO_CHANNEL_SZIE: usize = 1024;
+        let (input_tx_signature_sender, input_tx_signature_receiver) = if tx_io_check.is_some() {
+            let (input_tx_signature_sender, input_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some((input_tx_signature_sender, exit.clone())),
+                Some(input_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
+        let (output_tx_signature_sender, output_tx_signature_receiver) =
+            if tx_io_check.is_some() || oms_connector {
+                let (output_tx_signature_sender, output_tx_signature_receiver) =
+                    bounded(TX_IO_CHANNEL_SZIE);
+                (
+                    Some(output_tx_signature_sender),
+                    Some(output_tx_signature_receiver),
+                )
+            } else {
+                (None, None)
+            };
+
+        // Create a partially-dummy ClusterInfo for the banking stage.
+        let cluster_info_for_banking = Arc::new(DummyClusterInfo {
+            id: simulated_leader.into(),
+        });
+
+        let shared_decision = (
+            Arc::new(RwLock::new(DecisionState::Hold)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let client_mode = Arc::new(Mutex::new(ClientMode::RakuraiBAM));
+        let nonce_packets = Arc::new(RwLock::new(HashMap::new()));
+        let (_nonce_packet_sender, nonce_packet_receiver) = unbounded();
+
+        let scheduler_postpack_conf_signatures = Arc::new(RwLock::new(HashMap::new()));
+
         info!("Start banking stage!...");
         let banking_stage = BankingStage::new_num_threads(
             block_production_method,
             poh_recorder.clone(),
-            transaction_recorder,
+            transaction_recorder.clone(),
             non_vote_receiver,
             tpu_vote_receiver,
             gossip_vote_receiver,
@@ -855,14 +925,60 @@ impl BankingSimulator {
             num_workers,
             SchedulerConfig::default(),
             None,
-            replay_vote_sender,
+            replay_vote_sender.clone(),
             None,
             bank_forks.clone(),
             None,
-            Arc::default(),
-            BundleAccountLocker::default(),
+            Arc::new(collections::HashSet::default()),
+            bundle_account_locker.clone(),
             None,
             None,
+            &cluster_info_for_banking,
+            blockstore.clone(),
+            RewardDistributionConfig::default(),
+            Arc::new(RwLock::new(RakuraiConfig {
+                rs_cfg_d1: 40,
+                rs_cfg_ct1: 65,
+                rs_cfg_nd1: 30,
+                rs_cfg_ff1: 1.0,
+                rs_cfg_ft1: 2500,
+                rs_cfg_tf1: 1.129,
+                rs_cfg_ntft: 500,
+                rs_mode: RakuraiMode::Mode2,
+                rs_cfg_nm: 1,
+                rs_cfg_fp: 0,
+            })),
+            input_tx_signature_sender,
+            output_tx_signature_sender,
+            shared_decision.clone(),
+            exit.clone(),
+            client_mode,
+            Arc::new(AtomicBool::new(false)),
+            Some(SchedlingStrategy::Strategy1),
+            nonce_packets,
+            nonce_packet_receiver,
+            Arc::new(RwLock::new(
+                crate::banking_stage::PostPackConfirmationConfig {
+                    entries: Vec::new(),
+                },
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+            )),
+            Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
+            scheduler_postpack_conf_signatures,
+            None,
+            None,
+        );
+
+        // House keeper
+        let house_keeper_thread = HouseKeeper::new(
+            input_tx_signature_receiver,
+            output_tx_signature_receiver,
+            tx_io_check.clone(),
+            oms_connector,
+            shared_decision,
+            exit.clone(),
         );
 
         let (&_slot, &raw_base_event_time) = freeze_time_by_slot
@@ -926,6 +1042,7 @@ impl BankingSimulator {
             broadcast_stage,
             retracer_thread,
             exit,
+            house_keeper_thread,
         };
 
         (sender_loop, simulator_loop, simulator_threads)

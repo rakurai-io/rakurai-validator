@@ -47,6 +47,7 @@ pub struct Pong {
 /// ping message, and on-the-fly ping messages pending a pong response from the
 /// remote node.
 /// Const generic parameter N corresponds to token size in Ping<N> type.
+#[repr(C)]
 pub struct PingCache<const N: usize> {
     // Time-to-live of received pong messages.
     ttl: Duration,

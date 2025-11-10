@@ -89,8 +89,8 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::shred::shred_receiver_command(default_args))
         .subcommand(commands::shred::shred_retransmit_receiver_command(
             default_args,
-        ));
-
+        ))
+        .subcommand(commands::secondary_block_engine_urls::command(default_args));
     commands::run::add_args(app, default_args)
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
@@ -888,6 +888,23 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
         )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
         .arg(commands::bam::argument())
+        .arg(
+            Arg::with_name("block_engine_url")
+                .long("block-engine-url")
+                .help("Block engine url.  Set to empty string to disable block engine connection.")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("secondary_block_engines_urls")
+                .long("secondary-block-engines-urls")
+                .value_name("URL,UUID")
+                .help(
+                    "Specify extra block engine entries to receive bundles from. \
+                    Each value must be url,uuid. May be specified multiple times.",
+                )
+                .takes_value(true)
+                .multiple(true),
+        )
 }
 
 pub struct DefaultTestArgs {

@@ -34,9 +34,8 @@ pub trait TransactionMeta {
     fn instruction_data_len(&self) -> u16;
 }
 
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
-pub(crate) struct CachedTransactionMeta {
+#[derive(Debug, Clone)]
+pub struct CachedTransactionMeta {
     pub(crate) message_hash: Hash,
     pub(crate) is_simple_vote_transaction: bool,
     pub(crate) signature_details: TransactionSignatureDetails,
@@ -44,8 +43,7 @@ pub(crate) struct CachedTransactionMeta {
     pub(crate) instruction_data_len: u16,
 }
 
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TransactionConfiguration {
     pub updated_heap_bytes: u32,
     pub compute_unit_limit: u32,
@@ -69,9 +67,8 @@ impl TransactionConfiguration {
     }
 }
 
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
-pub(crate) enum VersionedTransactionConfiguration {
+#[derive(Debug, Clone)]
+pub enum VersionedTransactionConfiguration {
     LegacyAndV0(ComputeBudgetInstructionDetails),
     V1(TransactionConfiguration),
 }

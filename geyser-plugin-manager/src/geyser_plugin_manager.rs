@@ -388,6 +388,9 @@ pub enum GeyserPluginManagerError {
 
     #[error("The GeyserPlugin on_load method failed (error: {0})")]
     PluginStartError(String),
+
+    #[error("Geyser plugin version mismatch (expected: {expected}, found: {found}); expected lib format: lib<name>-{expected}.so; version check is disabled by default. Set `check_version: true` to enforce; mismatches versions may cause node crashes")]
+    VersionMismatch { expected: String, found: String },
 }
 
 /// # Safety
@@ -435,6 +438,43 @@ pub(crate) fn load_plugin_from_config(
     let libpath = result["libpath"]
         .as_str()
         .ok_or(GeyserPluginManagerError::LibPathNotSet)?;
+
+    // Check geyser lib version
+    let check_version = result["check_version"].as_bool().unwrap_or(false); // default = false
+    if check_version {
+        let file = Path::new(libpath)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .ok_or(GeyserPluginManagerError::LibPathNotSet)?
+            .strip_prefix("lib")
+            .ok_or(GeyserPluginManagerError::InvalidConfigFileFormat(format!(
+                "Invalid lib name format (missing 'lib' prefix): {}",
+                libpath
+            )))?
+            .strip_suffix(".so")
+            .ok_or(GeyserPluginManagerError::InvalidConfigFileFormat(format!(
+                "Invalid lib name format (missing '.so' suffix): {}",
+                libpath
+            )))?;
+
+        let major: u16 = env!("CARGO_PKG_VERSION_MAJOR").parse().unwrap();
+        let minor: u16 = env!("CARGO_PKG_VERSION_MINOR").parse().unwrap();
+        let patch: u16 = env!("CARGO_PKG_VERSION_PATCH").parse().unwrap();
+        let release_version = format!("{}_{}_{}", major, minor, patch);
+
+        // The lib filename is lib<name>-<version>.so where <version> is
+        // MAJOR_MINOR_PATCH (clean) or MAJOR_MINOR_PATCH-<prerelease> (with suffix).
+        // Match if the segment after the plugin name starts with the expected version.
+        let version_suffix = format!("-{}", release_version);
+        if !file.contains(&version_suffix) {
+            let found = file.rsplit_once('-').map(|(_, v)| v).unwrap_or(file);
+            return Err(GeyserPluginManagerError::VersionMismatch {
+                expected: release_version,
+                found: found.to_string(),
+            });
+        }
+    }
+
     let mut libpath = PathBuf::from(libpath);
     if libpath.is_relative() {
         let config_dir = geyser_plugin_config_file.parent().ok_or_else(|| {

@@ -7,6 +7,7 @@ use {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[repr(C)]
 pub struct Version {
     pub major: u16,
     pub minor: u16,

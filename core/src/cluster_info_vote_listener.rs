@@ -7,7 +7,6 @@ use {
         result::{Error, Result},
         sigverify_stage::GossipSigVerifyHandle,
     },
-    agave_banking_stage_ingress_types::BankingPacketBatch,
     agave_votor_messages::migration::MigrationStatus,
     crossbeam_channel::{Receiver, RecvTimeoutError, Select, Sender, unbounded},
     log::*,
@@ -505,7 +504,7 @@ impl ClusterInfoVoteListener {
                 let (vote_txs, packets) =
                     Self::verify_votes(votes, &mut gossip_sigverify_handle, &sharable_banks)?;
                 verified_vote_transactions_sender.send(vote_txs)?;
-                verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                verified_packets_sender.send(Arc::new(packets), &None)?;
             }
             sleep(Duration::from_millis(GOSSIP_SLEEP_MILLIS));
         }

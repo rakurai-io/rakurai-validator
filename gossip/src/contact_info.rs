@@ -78,6 +78,7 @@ pub enum Error {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[repr(C)]
 pub struct ContactInfo {
     pubkey: Pubkey,
     #[serde(with = "serde_varint")]
@@ -102,7 +103,8 @@ pub struct ContactInfo {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub(crate) struct SocketEntry {
+#[repr(C)]
+pub struct SocketEntry {
     pub(crate) key: u8,   // Protocol identifier, e.g. tvu, tpu, etc
     pub(crate) index: u8, // IpAddr index in the accompanying addrs vector.
     #[serde(with = "serde_varint")]
@@ -245,7 +247,7 @@ impl ContactInfo {
     }
 
     #[inline]
-    pub(crate) fn version(&self) -> &solana_version::Version {
+    pub fn version(&self) -> &solana_version::Version {
         &self.version
     }
 

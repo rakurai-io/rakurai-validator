@@ -18,6 +18,8 @@ pub struct CommittedTransaction {
     pub fee_details: FeeDetails,
     pub loaded_account_stats: TransactionLoadedAccountsStats,
     pub fee_payer_post_balance: u64,
+    /// Tip-account balance increase (raw, before commission).
+    pub tips: u64,
 }
 
 pub trait TransactionCommitResultExtensions {

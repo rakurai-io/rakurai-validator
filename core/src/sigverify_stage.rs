@@ -7,6 +7,7 @@
 use {
     crate::{
         banking_trace::BankingPacketSender,
+        gui::{GuiCoreMetrics, GuiSigVerifierStats},
         sigverify::{
             GossipSigVerifier, GossipVerifiedVoteBatch, SigVerifyWorkerPool, SigVerifyWorkerStats,
             TransactionSigVerifier,
@@ -23,6 +24,7 @@ use {
     solana_runtime::bank_forks::SharableBanks,
     solana_streamer::streamer::{self, StreamerError},
     solana_transaction::Transaction,
+    std::sync::atomic::AtomicBool,
     std::{
         num::NonZeroUsize,
         sync::{
@@ -76,10 +78,24 @@ struct SigVerifierStats {
 impl SigVerifierStats {
     const REPORT_INTERVAL: Duration = Duration::from_secs(2);
 
-    fn maybe_report_and_reset(&mut self, name: &'static str) {
+    fn maybe_report_and_reset(
+        &mut self,
+        name: &'static str,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) {
         // No need to report a datapoint if no batches/packets received
         if self.total_batches == 0 {
             return;
+        }
+
+        if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+            if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::SigVerify(GuiSigVerifierStats {
+                total_packets: self.total_packets as u64,
+                total_dedup: self.total_dedup as u64,
+                total_valid_packets: self.total_valid_packets.load(Ordering::Relaxed) as u64,
+            })) {
+                warn!("failed to send SigVerify gui metrics: {err}");
+            }
         }
 
         datapoint_info!(
@@ -195,6 +211,8 @@ impl SigVerifyStage {
         num_workers: NonZeroUsize,
         forward_non_votes: bool,
         sharable_banks: SharableBanks,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> (Self, GossipSigVerifyHandle) {
         let (gossip_verified_vote_sender, verified_vote_receiver) = unbounded();
         let non_vote_stats = SigVerifierStats::default();
@@ -215,6 +233,7 @@ impl SigVerifyStage {
                 total_valid_packets: tpu_vote_stats.total_valid_packets.clone(),
                 total_verify_time_us: tpu_vote_stats.total_verify_time_us.clone(),
             },
+            input_tx_signature_sender,
         );
         let non_vote_thread_hdl = Self::verifier_service(
             packet_receiver,
@@ -222,6 +241,7 @@ impl SigVerifyStage {
             "solSigVerTpu",
             "tpu-verifier",
             non_vote_stats,
+            gui_core_metrics_sender.clone(),
         );
         let tpu_vote_thread_hdl = Self::verifier_service(
             vote_packet_receiver,
@@ -229,6 +249,7 @@ impl SigVerifyStage {
             "solSigVerTpuVot",
             "tpu-vote-verifier",
             tpu_vote_stats,
+            gui_core_metrics_sender,
         );
         let gossip_sigverify_handle = GossipSigVerifyHandle {
             verifier: worker_pool.gossip_verifier(),
@@ -294,11 +315,17 @@ impl SigVerifyStage {
         thread_name: &'static str,
         metrics_name: &'static str,
         mut stats: SigVerifierStats,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> JoinHandle<()> {
         let mut last_print = Instant::now();
         const MAX_DEDUPER_AGE: Duration = Duration::from_secs(2);
         const DEDUPER_FALSE_POSITIVE_RATE: f64 = 0.001;
         const DEDUPER_NUM_BITS: u64 = 63_999_979;
+        let report_interval = if gui_core_metrics_sender.is_some() {
+            Duration::from_millis(50)
+        } else {
+            SigVerifierStats::REPORT_INTERVAL
+        };
         Builder::new()
             .name(thread_name.to_string())
             .spawn(move || {
@@ -321,8 +348,11 @@ impl SigVerifyStage {
                             _ => error!("{e:?}"),
                         }
                     }
-                    if last_print.elapsed() > SigVerifierStats::REPORT_INTERVAL {
-                        stats.maybe_report_and_reset(metrics_name);
+                    if last_print.elapsed() > report_interval {
+                        stats.maybe_report_and_reset(
+                            metrics_name,
+                            gui_core_metrics_sender.as_ref(),
+                        );
                         last_print = Instant::now();
                     }
                 }
@@ -452,6 +482,7 @@ mod tests {
             NonZeroUsize::new(4).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let now = Instant::now();
@@ -526,6 +557,7 @@ mod tests {
             NonZeroUsize::new(1).unwrap(),
             false,
             sharable_banks,
+            None,
         );
 
         let mut bytes_batch = BytesPacketBatch::with_capacity(1);

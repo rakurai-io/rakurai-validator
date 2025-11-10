@@ -99,6 +99,7 @@ pub fn dedup_packets_and_count_discards<const K: usize>(
                     .map(|data| deduper.dedup(data))
                     .unwrap_or(true)
             {
+                packet.meta_mut().set_duplicate(true);
                 packet.meta_mut().set_discard(true);
             }
             u64::from(packet.meta().discard())

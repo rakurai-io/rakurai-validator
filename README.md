@@ -1,117 +1,52 @@
-<p align="center">
-  <a href="https://anza.xyz">
-    <img alt="Anza" src="https://i.postimg.cc/VkKTnMM9/agave-logo-talc-1.png" width="250" />
-  </a>
-</p>
+# Rakurai-Solana Docs
 
-[![Build status](https://badge.buildkite.com/3a7c88c0f777e1a0fddacc190823565271ae4c251ef78d83a8.svg)](https://buildkite.com/jito/jito-solana)
-
-# About
-
-This repository contains Jito's fork of the Solana validator.
-
-We recommend checking out our [Gitbook](https://jito-foundation.gitbook.io/mev/jito-solana/building-the-software) for
-more detailed instructions on building and running Jito-Solana.
+Welcome to the Rakurai documentation. These guides are intended for validator operators, searchers, and traders using the Rakurai ecosystem.
 
 ---
 
-## **1. Install rustc, cargo and rustfmt.**
+## 1. Background
 
-```bash
-$ curl https://sh.rustup.rs -sSf | sh
-$ source $HOME/.cargo/env
-$ rustup component add rustfmt
-```
+### 1.1. What is Rakurai-Solana?
 
-The `rust-toolchain.toml` file pins a specific rust version and ensures that
-cargo commands run with that version. Note that cargo will automatically install
-the correct version if it is not already installed.
+Rakurai-Solana is a high-performance Solana validator node designed to achieve **superior block rewards** and **higher Transactions Per Second (TPS)**. It incorporates heuristics-based **transaction scheduling** and other optimization techniques to efficiently process high-value transactions, boosting both performance and profitability for node operators.
 
-On Linux systems you may need to install libssl-dev, pkg-config, zlib1g-dev, protobuf etc.
+### 1.2. High-Level Flow Architecture
 
-On Ubuntu:
+The Rakurai node is composed of five main components:
 
-```bash
-$ sudo apt-get update
-$ sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev
-```
+1. **Rakurai Scheduler Library** — A scheduler optimized for selecting high-value transactions.
+2. **Rakurai Agave Client** — A fork of the jito-solana client modified to run the Rakurai scheduler library.
+3. **Rakurai Activation Program** — A smart contract that controls node participation and enables validators to run a Rakurai node.
+4. **Reward Distribution Program** — Distributes block rewards to stakers via per-epoch **Reward Collection Accounts (RCA)** and post-epoch Merkle claims; tracks on-chain tip and MevShare revenue in per-validator, per-service **Tips Collection Accounts (TCA)** and **MevShare Collection Accounts (MCA)**.
+5. **Rakurai Tip Manager Program** — Manages tips sent to Rakurai validators across eight tip PDAs; drains and splits tips into the validator's TCA.
 
-On Fedora:
+### 1.3. Validator Incentives and Rewards Flow
 
-```bash
-$ sudo dnf install openssl-devel systemd-devel pkg-config zlib-devel llvm clang cmake make protobuf-devel protobuf-compiler perl-core libclang-dev
-```
+With Rakurai's advanced transaction scheduler, validators can capture higher block rewards while improving both TPS and CU utilization. At present, Rakurai does not charge any fees for running its client. Validators may keep these rewards entirely or choose to share a portion with their stakers. Distribution is executed via a **configurable, trustless, merkle-root-based system**. In the future, Rakurai plans to charge a small commission on the block rewards earned by the validator.
 
-## **2. Download the source code.**
+### 1.4. How Rakurai Interacts with the Solana Ecosystem
 
-```bash
-$ git clone https://github.com/jito-foundation/jito-solana.git
-$ cd jito-solana
-```
+Rakurai nodes function like standard Solana validators but include performance enhancements focused on transaction throughput and block reward optimization. They remain fully compatible with the Solana protocol while offering measurable improvements in validator economics. Rakurai actively maintains and updates the scheduler library to ensure compatibility with the latest Solana releases.
 
-## **3. Build.**
+---
 
-```bash
-$ ./cargo build
-```
+## 2. Documentation
 
-> [!NOTE]
-> Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [`docs/src/cli/install.md`](docs/src/cli/install.md#build-from-source) for instructions to build a release version for test and production uses.
+| Section                                                               | Description                                                                                                  |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| [Validators](./rakurai_docs/validators/README.md)                     | Setup, operation, upgrades, binary attestation, and Geyser integration for Rakurai validators.               |
+| [Transaction Inclusion](./rakurai_docs/transaction_inclusion/README.md) | Integrate with Rakurai transaction inclusion, bundle support, virtual priority, and post-pack confirmations. |
+| [Programs](./rakurai_docs/rakurai_programs/README.md)                 | Documentation for Rakurai on-chain programs and protocol components.                                         |
 
-# Testing
+---
 
-**Run the test suite:**
+## 3. Contacts
 
-```bash
-$ ./cargo nextest run --profile ci  --cargo-profile ci --config-file .config/nextest.toml
-```
-
-### Starting a local testnet
-
-Start your own testnet locally, instructions are in the [online docs](https://docs.anza.xyz/clusters/benchmark).
-
-### Accessing the remote development cluster
-
-* `devnet` - stable public cluster for development accessible via
-devnet.solana.com. Runs 24/7. Learn more about the [public clusters](https://docs.anza.xyz/clusters)
-
-# Benchmarking
-
-First, install the nightly build of rustc. `cargo bench` requires the use of the
-unstable features only available in the nightly build.
-
-```bash
-$ rustup install nightly
-```
-
-Run the benchmarks:
-
-```bash
-$ cargo +nightly bench
-```
-
-# Release Process
-
-The release process for this project is described [here](RELEASE.md).
-
-# Code coverage
-
-To generate code coverage statistics:
-
-```bash
-$ scripts/coverage.sh
-$ open target/cov/lcov-local/index.html
-```
-
-Why coverage? While most see coverage as a code quality metric, we see it primarily as a developer
-productivity metric. When a developer makes a change to the codebase, presumably it's a *solution* to
-some problem. Our unit-test suite is how we encode the set of *problems* the codebase solves. Running
-the test suite should indicate that your change didn't *infringe* on anyone else's solutions. Adding a
-test *protects* your solution from future changes. Say you don't understand why a line of code exists,
-try deleting it and running the unit-tests. The nearest test failure should tell you what problem
-was solved by that code. If no test fails, go ahead and submit a Pull Request that asks, "what
-problem is solved by this code?" On the other hand, if a test does fail and you can think of a
-better way to solve the same problem, a Pull Request with your solution would most certainly be
-welcome! Likewise, if rewriting a test can better communicate what code it's protecting, please
-send us that patch!
-
+| Channel | Link |
+| ------- | ---- |
+| Website | [rakurai.io](https://rakurai.io) |
+| Telegram | [t.me/rakurai_official](https://t.me/rakurai_official) |
+| Discord | [discord.gg/XS7GmnmCJg](https://discord.gg/XS7GmnmCJg) |
+| X | [@Rakurai_io](https://x.com/Rakurai_io) |
+| LinkedIn | [Rakurai](https://www.linkedin.com/company/rakurai/) |
+| GitHub | [rakurai-io/rakurai-validator](https://github.com/rakurai-io/rakurai-validator) |

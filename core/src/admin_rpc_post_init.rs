@@ -2,7 +2,10 @@ use {
     crate::{
         banking_stage::BankingControlMsg,
         cluster_slots_service::cluster_slots::ClusterSlots,
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::{
+            block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
+            relayer_stage::RelayerConfig,
+        },
         repair::repair_service::OutstandingShredRepairs,
     },
     agave_votor::event::VotorEventSender,
@@ -15,7 +18,7 @@ use {
     solana_turbine::ShredReceiverAddresses,
     std::{
         collections::{HashMap, HashSet},
-        net::UdpSocket,
+        net::{IpAddr, UdpSocket},
         sync::{Arc, RwLock},
     },
     tokio::sync::mpsc,
@@ -40,6 +43,8 @@ pub enum KeyUpdaterType {
     BlsConnectionCache,
     /// For the BAM connection
     BamConnection,
+    /// GUI dashboard identity / peer broadcast
+    Gui,
 }
 
 /// Responsible for managing the updaters for identity key change
@@ -97,7 +102,10 @@ pub struct AdminRpcRequestMetadataPostInit {
     pub blockstore: Arc<Blockstore>,
     pub votor_event_sender: VotorEventSender,
     pub block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+    pub secondary_block_engine_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+    pub block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
     pub shred_retransmit_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
+    pub gui_ip_whitelist: Arc<RwLock<HashSet<IpAddr>>>,
 }

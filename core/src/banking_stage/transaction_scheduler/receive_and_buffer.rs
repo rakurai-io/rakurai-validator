@@ -1,3 +1,7 @@
+use crate::banking_stage::DecisionState;
+
+use ahash::HashSet;
+use solana_pubkey::Pubkey;
 use {
     super::{
         transaction_priority_id::TransactionPriorityId,
@@ -15,7 +19,6 @@ use {
         resolved_transaction_view::ResolvedTransactionView, transaction_data::TransactionData,
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
-    ahash::HashSet,
     arrayvec::ArrayVec,
     core::time::Duration,
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
@@ -24,7 +27,6 @@ use {
     solana_clock::{Epoch, Slot},
     solana_cost_model::cost_model::CostModel,
     solana_message::v0::LoadedAddresses,
-    solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
         bank_forks::{BankPair, SharableBanks},
@@ -35,6 +37,7 @@ use {
         transaction_with_meta::TransactionWithMeta,
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::svm_message::SVMMessage,
     solana_transaction::sanitized::MessageHash,
     solana_transaction_error::TransactionError,
@@ -42,11 +45,23 @@ use {
 };
 
 #[derive(Debug)]
-pub(crate) struct DisconnectedError;
+pub struct DisconnectedError;
 
+#[derive(Default)]
+pub struct BufferStats {
+    pub num_dropped_on_sanitization: usize,
+    pub num_dropped_on_lock_validation: usize,
+    pub num_dropped_on_compute_budget: usize,
+    pub num_dropped_on_age: usize,
+    pub num_dropped_on_already_processed: usize,
+    pub num_dropped_on_fee_payer: usize,
+    pub num_dropped_on_capacity: usize,
+    pub num_buffered: usize,
+    pub num_dropped_on_blacklisted_account: usize,
+}
 /// Stats/metrics returned by `receive_and_buffer_packets`.
 #[derive(Default)]
-pub(crate) struct ReceivingStats {
+pub struct ReceivingStats {
     pub num_received: usize,
     /// Count of packets that passed sigverify but were dropped
     /// without further checks because we were outside the holding
@@ -69,7 +84,7 @@ pub(crate) struct ReceivingStats {
 }
 
 impl ReceivingStats {
-    pub(crate) fn accumulate(&mut self, other: ReceivingStats) {
+    pub fn accumulate(&mut self, other: ReceivingStats) {
         self.num_received += other.num_received;
         self.num_dropped_without_parsing += other.num_dropped_without_parsing;
         self.num_dropped_on_parsing_and_sanitization +=
@@ -87,7 +102,7 @@ impl ReceivingStats {
     }
 }
 
-pub(crate) trait ReceiveAndBuffer {
+pub trait ReceiveAndBuffer {
     type Transaction: TransactionWithMeta + Send + Sync;
     type Container: StateContainer<Self::Transaction> + Send + Sync;
 
@@ -96,14 +111,24 @@ pub(crate) trait ReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError>;
+
+    fn packet_receiver(&self) -> BankingPacketReceiver;
+
+    fn skip_wait(&mut self) -> Option<&mut bool>;
+
+    #[allow(unused)]
+    fn on_skip_wait_disabled(&mut self);
 }
 
+#[derive(Clone)]
 pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub sharable_banks: SharableBanks,
     pub filter_keys: Arc<HashSet<Pubkey>>,
+    pub capture_gui_timestamps: bool,
 }
 
 pub(crate) fn contains_blacklisted_account<'a>(
@@ -123,8 +148,15 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError> {
+        let decision = if let Some(decision) = decision {
+            decision
+        } else {
+            return Ok(ReceivingStats::default()); // in case decision is not found
+        };
+
         let BankPair {
             root_bank,
             working_bank,
@@ -232,7 +264,35 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
             buffer_time_us: stats.buffer_time_us,
         })
     }
+
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        self.receiver.clone()
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
+    }
+
+    fn on_skip_wait_disabled(&mut self) {}
 }
+
+// /// Returns the total number of locks required by the transaction.
+// fn total_num_locks(tx: &SanitizedVersionedTransaction) -> usize {
+//     let extract_table_key_len = |table: &MessageAddressTableLookup| {
+//         table
+//             .writable_indexes
+//             .len()
+//             .wrapping_add(table.readonly_indexes.len())
+//     };
+
+//     let message = &tx.get_message().message;
+//     message.static_account_keys().len().wrapping_add(
+//         message
+//             .address_table_lookups()
+//             .map(|l| l.iter().map(extract_table_key_len).sum())
+//             .unwrap_or(0),
+//     )
+// }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PacketHandlingError {
@@ -241,6 +301,14 @@ pub enum PacketHandlingError {
     ComputeBudget,
     ALTResolution,
     FilterKey,
+}
+
+/// Source IPv4 of a packet as a big-endian `u32` (0 for unset/non-IPv4).
+fn source_ipv4_from_packet(packet: solana_perf::packet::PacketRef<'_>) -> u32 {
+    match packet.meta().addr {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    }
 }
 
 impl TransactionViewReceiveAndBuffer {
@@ -328,13 +396,15 @@ impl TransactionViewReceiveAndBuffer {
                     num_buffered += 1;
                 }
                 // Push non-errored transaction into queue.
-                num_dropped_on_capacity += container.push_ids_into_queue(
-                    check_results
-                        .into_iter()
-                        .zip(transaction_priority_ids.drain(..))
-                        .filter(|(r, _)| r.is_ok())
-                        .map(|(_, id)| id),
-                );
+                num_dropped_on_capacity += container
+                    .push_ids_into_queue(
+                        check_results
+                            .into_iter()
+                            .zip(transaction_priority_ids.drain(..))
+                            .filter(|(r, _)| r.is_ok())
+                            .map(|(_, id)| id),
+                    )
+                    .0;
             };
 
         let mut num_received = 0;
@@ -343,7 +413,12 @@ impl TransactionViewReceiveAndBuffer {
         let mut num_dropped_on_lock_validation = 0;
         let mut num_dropped_on_compute_budget = 0;
 
+        let capture_gui_timestamps = self.capture_gui_timestamps;
         for packet_batch in packet_batch_message.iter() {
+            // One syscall per received batch: when these packets entered the buffer.
+            let packet_batch_arrival_timestamp_nanos = capture_gui_timestamps
+                .then(wallclock_timestamp_nanos)
+                .unwrap_or(0);
             for packet in packet_batch.iter() {
                 let Some(packet_data) = packet.data(..) else {
                     continue;
@@ -389,6 +464,14 @@ impl TransactionViewReceiveAndBuffer {
                         }
                     })
                 {
+                    if capture_gui_timestamps {
+                        if let Some(state) = container.get_mut_transaction_state(transaction_id) {
+                            state.set_ingress_metadata(
+                                packet_batch_arrival_timestamp_nanos,
+                                source_ipv4_from_packet(packet),
+                            );
+                        }
+                    }
                     let priority = container
                         .get_mut_transaction_state(transaction_id)
                         .expect("transaction must exist")
@@ -465,7 +548,7 @@ impl TransactionViewReceiveAndBuffer {
 /// Perform sanitization checks and transition from data to an executable
 /// [`RuntimeTransaction`]. This additionally returns the minimum slot for
 /// ALT deactivation, if any. If no minimum slot, Slot::MAX is returned.
-pub(crate) fn translate_to_runtime_view<D: TransactionData>(
+pub fn translate_to_runtime_view<D: TransactionData>(
     data: D,
     bank: &Bank,
     transaction_account_lock_limit: usize,
@@ -548,7 +631,7 @@ pub(crate) fn load_addresses_for_view<D: TransactionData>(
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-pub(crate) fn calculate_priority_and_cost(
+pub fn calculate_priority_and_cost(
     transaction: &impl TransactionWithMeta,
     transaction_configuration: &TransactionConfiguration,
     bank: &Bank,
@@ -660,6 +743,7 @@ mod tests {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             filter_keys,
+            capture_gui_timestamps: false,
         };
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)

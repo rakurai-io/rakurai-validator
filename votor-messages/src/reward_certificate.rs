@@ -22,7 +22,7 @@ pod_wrapper! {
 pub const NUM_SLOTS_FOR_REWARD: u64 = 8;
 
 /// Different types of errors that can be returned when constructing a new reward certificate.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum RewardCertError {
     /// Invalid bitmap was supplied.
     #[error("invalid bitmap was supplied")]

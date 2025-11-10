@@ -1564,6 +1564,13 @@ fn main() {
                         .long("no-block-cost-limits")
                         .takes_value(false)
                         .help("Disable block cost limits effectively by setting them to the max"),
+                )
+                .arg(
+                    Arg::with_name("version")
+                        .long("version")
+                        .short("v")
+                        .takes_value(true)
+                        .help("TraceData Version: v2.2, v2.3"),
                 ),
         )
         .subcommand(

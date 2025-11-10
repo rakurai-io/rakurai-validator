@@ -136,6 +136,7 @@ struct WorkerPoolChannels {
     sharable_banks: SharableBanks,
     non_vote_stats: SigVerifyWorkerStats,
     tpu_vote_stats: SigVerifyWorkerStats,
+    input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
 }
 
 pub(crate) struct SigVerifyWorkerPool {
@@ -168,6 +169,7 @@ impl SigVerifyWorkerPool {
         sharable_banks: SharableBanks,
         non_vote_stats: SigVerifyWorkerStats,
         tpu_vote_stats: SigVerifyWorkerStats,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> Self {
         let (non_vote_sender, non_vote_receiver) = bounded(SIGVERIFY_NON_VOTE_WORK_CHANNEL_SIZE);
         let (tpu_vote_sender, tpu_vote_receiver) = bounded(SIGVERIFY_TPU_VOTE_WORK_CHANNEL_SIZE);
@@ -183,6 +185,7 @@ impl SigVerifyWorkerPool {
             sharable_banks,
             non_vote_stats,
             tpu_vote_stats,
+            input_tx_signature_sender,
         };
         let exit = Arc::new(AtomicBool::new(false));
         let worker_hdls = (0..num_workers.get())
@@ -241,6 +244,7 @@ impl SigVerifyWorkerPool {
                         false,
                         &channels.sharable_banks,
                         &channels.non_vote_stats,
+                        &channels.input_tx_signature_sender,
                     ),
                     Err(_) => false,
                 }
@@ -256,6 +260,7 @@ impl SigVerifyWorkerPool {
                         true,
                         &channels.sharable_banks,
                         &channels.tpu_vote_stats,
+                        &channels.input_tx_signature_sender,
                     ),
                     Err(_) => false,
                 }
@@ -282,6 +287,7 @@ impl SigVerifyWorkerPool {
         is_tpu_vote: bool,
         sharable_banks: &SharableBanks,
         stats: &SigVerifyWorkerStats,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> bool {
         let enable_tx_v1 = sharable_banks.working().feature_set.snapshot().enable_tx_v1;
         let (_, verify_time_us) = measure_us!(sigverify::ed25519_verify_serial(
@@ -298,7 +304,9 @@ impl SigVerifyWorkerPool {
             .fetch_add(verify_time_us as usize, Ordering::Relaxed);
 
         let banking_packet_batch = BankingPacketBatch::new(vec![work.batch]);
-        if let Err(err) = banking_stage_sender.send(banking_packet_batch.clone()) {
+        if let Err(err) =
+            banking_stage_sender.send(banking_packet_batch.clone(), &input_tx_signature_sender)
+        {
             error!("sigverify send failed: {err:?}");
             return false;
         }

@@ -100,6 +100,15 @@ while [[ -n $1 ]]; do
     elif [[ $1 == --disable-block-engine-autoconfig ]]; then
       args+=("$1")
       shift
+    elif [[ $1 = --rakurai-activation-program-id  ]]; then
+      args+=("$1" "$2")
+      shift 2
+    elif [[ $1 == --reward-distribution-program-id ]]; then
+      args+=("$1" "$2")
+      shift 2
+    elif [[ $1 == --rakurai-tip-manager-program-id ]]; then
+      args+=("$1" "$2")
+      shift 2
     elif [[ $1 == --tip-payment-program-pubkey ]]; then
       args+=("$1" "$2")
       shift 2
@@ -181,12 +190,19 @@ args+=(
   --no-wait-for-vote-to-start-leader
   --full-rpc-api
   --allow-private-addr
+  --rewards-merkle-root-authority "$identity"
+  # --transaction-structure view
 )
 default_arg --gossip-port 8001
 default_arg --log -
+default_arg --rakurai-activation-program-id "CuvTfdaxcDbvvtACkXrW2j69YeQbWuNnwg9FefYDrSug"
+default_arg --reward-distribution-program-id "CtVB7ze4Kz2iUHGrWLWY9EG5Au1erbRCMvKTWFuKv8wq"
+default_arg --rakurai-tip-manager-program-id "6z4rnNKVzSYBxqfshk1QZFgJv17KjZoirFhpWSjqQMfu"
 default_arg --tip-payment-program-pubkey "DThZmRNNXh7kvTQW9hXeGoWGPKktK8pgVAyoTLjH7UrT"
 default_arg --tip-distribution-program-pubkey "FjrdANjvo76aCYQ4kf9FM1R8aESUcEE6F8V7qyoVUQcM"
 default_arg --commission-bps 0
+default_arg --tx-io-check ~/tx_io.log
+default_arg --oms-connector
 
 
 pid=

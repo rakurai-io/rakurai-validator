@@ -2,7 +2,7 @@
 
 use {
     crate::result::{Error, Result},
-    crossbeam_channel::{RecvTimeoutError, TrySendError, unbounded},
+    crossbeam_channel::{Sender, RecvTimeoutError, TrySendError, unbounded},
     solana_clock::{DEFAULT_TICKS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
     solana_metrics::{inc_new_counter_debug, inc_new_counter_info},
     solana_packet::PacketFlags,
@@ -13,8 +13,10 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_streamer::{
         evicting_sender::EvictingSender,
+        quic::{GuiStreamerMetrics, GuiStreamerReceiveStats},
         streamer::{self, PacketBatchReceiver, PacketBatchSender, StreamerReceiveStats},
     },
+    crate::gui::GuiCoreMetrics,
     std::{
         net::UdpSocket,
         sync::{
@@ -36,6 +38,8 @@ impl FetchStage {
         exit: Arc<AtomicBool>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> (Self, PacketBatchReceiver, PacketBatchReceiver) {
         let (sender, receiver) = unbounded();
         let (vote_sender, vote_receiver) =
@@ -50,6 +54,8 @@ impl FetchStage {
                 forward_receiver,
                 poh_recorder,
                 coalesce,
+                gui_core_metrics_sender,
+                gui_streamer_metrics_sender,
             ),
             receiver,
             vote_receiver,
@@ -64,6 +70,8 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> Self {
         let tpu_vote_sockets = tpu_vote_sockets.into_iter().map(Arc::new).collect();
         Self::new_multi_socket(
@@ -74,6 +82,8 @@ impl FetchStage {
             forward_receiver,
             poh_recorder,
             coalesce,
+            gui_core_metrics_sender,
+            gui_streamer_metrics_sender,
         )
     }
 
@@ -81,6 +91,7 @@ impl FetchStage {
         recvr: &PacketBatchReceiver,
         sendr: &PacketBatchSender,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
+        gui_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
     ) -> Result<()> {
         let mark_forwarded = |mut packet: PacketRefMut| {
             packet.meta_mut().flags |= PacketFlags::FORWARDED;
@@ -122,9 +133,19 @@ impl FetchStage {
             inc_new_counter_debug!("fetch_stage-honor_forwards", packets_sent);
             if packets_dropped > 0 {
                 inc_new_counter_error!("fetch_stage-dropped_forwards", packets_dropped);
+                if let Some(gui_metrics_sender) = gui_metrics_sender {
+                    if let Err(err) = gui_metrics_sender.try_send(GuiCoreMetrics::FetchStageForwardDropped(packets_dropped as u64)) {
+                        warn!("failed to send FetchStageForwardDropped gui metrics: {err}");
+                    }
+                }
             }
         } else {
             inc_new_counter_info!("fetch_stage-discard_forwards", num_packets);
+            if let Some(gui_metrics_sender) = gui_metrics_sender {
+                if let Err(err) = gui_metrics_sender.try_send(GuiCoreMetrics::FetchStageForwardDiscard(num_packets as u64)) {
+                    warn!("failed to send FetchStageForwardDiscard gui metrics: {err}");
+                }
+            }
         }
 
         Ok(())
@@ -138,10 +159,17 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> Self {
         let recycler: PacketBatchRecycler = Recycler::new();
 
         let tpu_vote_stats = Arc::new(StreamerReceiveStats::new("tpu_vote_receiver"));
+        let report_interval_ms = if gui_streamer_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
         let tpu_vote_threads: Vec<_> = tpu_vote_sockets
             .into_iter()
             .enumerate()
@@ -168,7 +196,7 @@ impl FetchStage {
             .spawn(move || {
                 loop {
                     if let Err(e) =
-                        Self::handle_forwarded_packets(&forward_receiver, &sender, &poh_recorder)
+                        Self::handle_forwarded_packets(&forward_receiver, &sender, &poh_recorder, gui_core_metrics_sender.as_ref())
                     {
                         match e {
                             Error::RecvTimeout(RecvTimeoutError::Disconnected) => break,
@@ -186,8 +214,20 @@ impl FetchStage {
             .name("solFetchStgMetr".to_string())
             .spawn(move || {
                 loop {
-                    sleep(Duration::from_secs(1));
+                    sleep(Duration::from_millis(report_interval_ms));
 
+                    if let Some(gui_metrics_sender) = &gui_streamer_metrics_sender {
+                        if let Err(err) = gui_metrics_sender.try_send(GuiStreamerMetrics::Udp(GuiStreamerReceiveStats {
+                            name: tpu_vote_stats.name,
+                            packets_count: tpu_vote_stats.packets_count.load(Ordering::Relaxed),
+                            packet_batches_count: tpu_vote_stats.packet_batches_count.load(Ordering::Relaxed),
+                            full_packet_batches_count: tpu_vote_stats.full_packet_batches_count.load(Ordering::Relaxed),
+                            max_channel_len: tpu_vote_stats.max_channel_len.load(Ordering::Relaxed),
+                            num_packets_dropped: tpu_vote_stats.num_packets_dropped.load(Ordering::Relaxed),
+                        })) {
+                            warn!("failed to send Udp gui metrics: {err}");
+                        }
+                    }
                     tpu_vote_stats.report();
 
                     if exit.load(Ordering::Relaxed) {

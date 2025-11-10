@@ -40,7 +40,7 @@ use {
         net::{IpAddr, Ipv4Addr, SocketAddr},
         path::{Path, PathBuf},
         process::exit,
-        sync::{Arc, Mutex, RwLock},
+        sync::{Arc, Mutex, RwLock, atomic::AtomicBool},
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     },
@@ -438,6 +438,9 @@ fn main() {
             exit(1);
         }),
     ));
+
+    genesis.reset_rakurai = Arc::new(AtomicBool::new(false));
+
     admin_rpc_service::run(
         &ledger_path,
         admin_rpc_service::AdminRpcRequestMetadata {
@@ -452,6 +455,16 @@ fn main() {
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
             bam_url: genesis.bam_url.clone(),
+            client_mode: genesis.client_mode.clone(),
+            rakurai_config: genesis.rakurai_config.clone(),
+            reset_rakurai: genesis.reset_rakurai.clone(),
+            postpack_confirmation_config: genesis.postpack_confirmation_config.clone(),
+            postpack_confirmation_active_entries: genesis
+                .postpack_confirmation_active_entries
+                .clone(),
+            post_pack_confirmation_uuid_blocklist: genesis
+                .post_pack_confirmation_uuid_blocklist
+                .clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {
@@ -620,6 +633,19 @@ fn main() {
     if let Some(compute_unit_limit) = compute_unit_limit {
         genesis.compute_unit_limit(compute_unit_limit);
     }
+
+    genesis.block_engine_url = matches
+        .value_of("block_engine_url")
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    genesis.secondary_block_engine_entries = matches
+        .values_of("secondary_block_engines_urls")
+        .unwrap_or_default()
+        .map(|value| {
+            solana_core::proxy::block_engine_stage::parse_block_engine_entry(value)
+                .unwrap_or_else(|err| panic!("invalid secondary block engine entry: {err}"))
+        })
+        .collect();
 
     match genesis.start_with_mint_address_and_geyser_plugin_rpc(
         mint_address,

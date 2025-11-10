@@ -1,12 +1,16 @@
 //! The `validator` module hosts all the validator microservices.
 
+use crate::banking_stage::{
+    RakuraiConfig, reward_distributor::RewardDistributionConfig,
+};
 pub use solana_perf::report_target_features;
 use {crate::tip_manager::TipManagerConfig, solana_turbine::ShredReceiverAddresses};
+
 use {
     crate::{
         admin_rpc_post_init::{AdminRpcRequestMetadataPostInit, KeyUpdaterType, KeyUpdaters},
         banking_stage::{
-            BankingStage, transaction_scheduler::scheduler_controller::SchedulerConfig,
+            BankingStage, RakuraiMode, transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         banking_trace::{self, BankingTracer, TraceError},
         block_creation_loop::{BlockCreationLoop, BlockCreationLoopConfig, ReplayHighestFrozen},
@@ -17,10 +21,14 @@ use {
             tower_storage::{NullTowerStorage, TowerStorage},
         },
         forwarding_stage::ForwardingClientConfig,
+        gui::{Gui, GuiContext, gui_bank_tile_count},
         multicast_shred_check_service::{
             MulticastShredCheckService, multicast_shred_addresses_for_cluster,
         },
-        proxy::{block_engine_stage::BlockEngineConfig, relayer_stage::RelayerConfig},
+        proxy::{
+            block_engine_stage::{BlockEngineConfig, BlockEngineEntry},
+            relayer_stage::RelayerConfig,
+        },
         repair::{
             self, repair_handler::RepairHandlerType, serve_repair_service::ServeRepairService,
         },
@@ -154,7 +162,7 @@ use {
         borrow::Cow,
         cmp,
         collections::{HashMap, HashSet},
-        net::{SocketAddr, SocketAddrV4},
+        net::{IpAddr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -175,7 +183,27 @@ use {
 const MAX_COMPLETED_DATA_SETS_IN_CHANNEL: usize = 100_000;
 const WAIT_FOR_SUPERMAJORITY_THRESHOLD_PERCENT: u64 = 80;
 
-#[derive(Clone, EnumCount, EnumIter, EnumString, VariantNames, Default, IntoStaticStr, Display)]
+#[derive(
+    Default, Clone, EnumString, VariantNames, IntoStaticStr, Display, EnumIter, PartialEq, Eq, Copy,
+)]
+#[strum(serialize_all = "kebab-case")]
+pub enum ClientMode {
+    #[default]
+    RakuraiJito,
+    BAMStrictCompliance,
+    RakuraiBAM,
+}
+
+impl ClientMode {
+    pub const fn cli_names() -> &'static [&'static str] {
+        Self::VARIANTS
+    }
+
+    pub fn cli_message() -> &'static str {
+        "Select the client mode for validator"
+    }
+}
+#[derive(Clone, EnumCount, EnumIter, VariantNames, EnumString, Default, IntoStaticStr, Display)]
 #[strum(serialize_all = "kebab-case")]
 pub enum BlockVerificationMethod {
     #[default]
@@ -402,9 +430,11 @@ pub struct ValidatorConfig {
     // jito configuration
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
-    /// Configured external receivers for this validator's own broadcast path.
-    /// Used for direct leader shreds and replay-triggered rebroadcasts of this
-    /// validator's slots.
+    pub secondary_block_engine_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+    pub block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
+    /// Configured leader shred receiver addresses. This list may be empty.
+    /// Auto-detected multicast may still be appended when the cluster
+    /// route exists and the multicast address is not already present.
     pub shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
     /// Configured external receivers for TVU retransmit-stage shreds.
     /// Does not apply to this validator's own direct leader broadcast path.
@@ -415,6 +445,23 @@ pub struct ValidatorConfig {
     pub bam_url: Arc<ArcSwap<Option<String>>>,
     /// Skips automatic multicast route detection and multicast receiver updates.
     pub disable_multicast_shred_check: bool,
+    pub reward_distribution_config: RewardDistributionConfig,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
+    pub target_slot_adjustment_ms: u64,
+    pub tx_io_check: Option<String>,
+    pub oms_connector: bool,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub reset_rakurai: Arc<AtomicBool>,
+    pub scheduling_strategy: Option<crate::banking_stage::SchedlingStrategy>,
+    pub postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
+    pub postpack_confirmation_active_entries:
+        crate::banking_stage::PostPackConfirmationActiveEntries,
+    pub post_pack_confirmation_uuid_blocklist:
+        crate::banking_stage::PostPackConfirmationUuidBlocklist,
+    pub enable_gui: bool,
+    pub gui_listen_addr: String,
+    pub gui_max_websocket_connections: usize,
+    pub gui_ip_whitelist: Arc<RwLock<HashSet<IpAddr>>>,
 }
 
 impl ValidatorConfig {
@@ -500,6 +547,8 @@ impl ValidatorConfig {
             snapshot_packager_niceness_adj: 0,
             relayer_config: Arc::new(ArcSwap::from_pointee(RelayerConfig::default())),
             block_engine_config: Arc::new(ArcSwap::from_pointee(BlockEngineConfig::default())),
+            secondary_block_engine_entries: Arc::new(ArcSwap::from_pointee(vec![])),
+            block_engine_uuid_blocklist: Arc::new(ArcSwap::from_pointee(vec![])),
             shred_receiver_addresses: Arc::new(
                 ArcSwap::from_pointee(ShredReceiverAddresses::new()),
             ),
@@ -510,6 +559,42 @@ impl ValidatorConfig {
             tip_manager_config: TipManagerConfig::default(),
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
             disable_multicast_shred_check: false,
+            reward_distribution_config: RewardDistributionConfig::default(),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                rs_mode: RakuraiMode::Mode1,
+                rs_cfg_d1: 40,
+                rs_cfg_ct1: 65,
+                rs_cfg_nd1: 30,
+                rs_cfg_ff1: 1.0,
+                rs_cfg_ft1: 400,
+                rs_cfg_tf1: 1.077,
+                rs_cfg_ntft: 500,
+                rs_cfg_nm: 1,
+                rs_cfg_fp: 0,
+            })),
+            target_slot_adjustment_ms: 0,
+            tx_io_check: None,
+            oms_connector: false,
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
+            reset_rakurai: Arc::new(AtomicBool::new(false)),
+            scheduling_strategy: None,
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                crate::banking_stage::PostPackConfirmationConfig {
+                    entries: Vec::new(),
+                },
+            )),
+            postpack_confirmation_active_entries: Arc::new(arc_swap::ArcSwap::from_pointee(
+                crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(arc_swap::ArcSwap::from_pointee(
+                Vec::new(),
+            )),
+            enable_gui: false,
+            gui_listen_addr: "127.0.0.1:8765".to_string(),
+            gui_max_websocket_connections: 5,
+            gui_ip_whitelist: Arc::new(RwLock::new(HashSet::from([IpAddr::from(
+                [127, 0, 0, 1],
+            )]))),
         }
     }
 
@@ -703,6 +788,7 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
+    gui_service: Gui,
 }
 
 impl Validator {
@@ -901,6 +987,7 @@ impl Validator {
             entry_notifier,
             block_metadata_notifier,
             slot_status_notifier,
+            tick_notifier,
         ) = if let Some(service) = &geyser_plugin_service {
             (
                 service.get_accounts_update_notifier(),
@@ -909,9 +996,10 @@ impl Validator {
                 service.get_entry_notifier(),
                 service.get_block_metadata_notifier(),
                 service.get_slot_status_notifier(),
+                service.get_tick_notifier(),
             )
         } else {
-            (None, None, None, None, None, None)
+            (None, None, None, None, None, None, None)
         };
 
         info!(
@@ -1086,6 +1174,9 @@ impl Validator {
         let leader_schedule_cache = Arc::new(leader_schedule_cache);
         let (poh_recorder, entry_receiver) = {
             let bank = &bank_forks.read().unwrap().working_bank();
+            let tick_notifier_callback = tick_notifier.as_ref().map(|tn| {
+                solana_geyser_plugin_manager::TickNotifierImpl::create_callback(tn.clone())
+            });
             PohRecorder::new_with_clear_signal(
                 bank.tick_height(),
                 bank.last_blockhash(),
@@ -1098,6 +1189,8 @@ impl Validator {
                 &leader_schedule_cache,
                 &genesis_config.poh_config,
                 exit.clone(),
+                config.target_slot_adjustment_ms * 1_000_000,
+                tick_notifier_callback,
             )
         };
         let (record_sender, record_receiver) = record_channels(transaction_status_sender.is_some());
@@ -1440,6 +1533,47 @@ impl Validator {
         let epoch_specs: Box<dyn solana_gossip::epoch_specs::EpochSpecs> =
             Box::new(crate::epoch_specs::EpochSpecs::from(bank_forks.clone()));
 
+        let (gui_core_metrics_sender,
+            gui_core_metrics_receiver,
+            gui_streamer_metrics_sender,
+            gui_streamer_metrics_receiver,
+            gui_txn_event_sender,
+            gui_txn_event_receiver,
+        ) = if config.enable_gui {
+            let (gui_core_metrics_sender, gui_core_metrics_receiver) = bounded(4096);
+            let (gui_streamer_metrics_sender, gui_streamer_metrics_receiver) = bounded(4096);
+            let (gui_txn_event_sender, gui_txn_event_receiver) = bounded(65_536);
+            (
+                Some(gui_core_metrics_sender),
+                Some(gui_core_metrics_receiver),
+                Some(gui_streamer_metrics_sender),
+                Some(gui_streamer_metrics_receiver),
+                Some(gui_txn_event_sender),
+                Some(gui_txn_event_receiver),
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
+
+        let shared_leader_state = poh_recorder.read().unwrap().shared_leader_state();
+        let gui_context = GuiContext {
+            identity: Arc::new(arc_swap::ArcSwap::from_pointee(cluster_info.id())),
+            bank_forks: bank_forks.clone(),
+            bank_tile_count: gui_bank_tile_count(config.block_production_num_workers.get()),
+        };
+        let gui_service = Gui::new(
+            gui_core_metrics_receiver,
+            gui_streamer_metrics_receiver,
+            gui_txn_event_receiver,
+            shared_leader_state,
+            gui_context,
+            exit.clone(),
+            &config.gui_listen_addr,
+            config.gui_max_websocket_connections,
+            config.gui_ip_whitelist.clone(),
+            Some(key_notifiers.clone()),
+        );
+
         let gossip_service = GossipService::new(
             &cluster_info,
             Some(epoch_specs),
@@ -1496,6 +1630,7 @@ impl Validator {
             poh_service_message_receiver,
             migration_status.clone(),
             record_receiver_sender,
+            config.target_slot_adjustment_ms * 1_000_000,
         );
 
         let replay_highest_frozen = Arc::new(ReplayHighestFrozen::default());
@@ -1756,6 +1891,8 @@ impl Validator {
             cancel,
             votor_event_sender.clone(),
             config.block_engine_config.clone(),
+            config.secondary_block_engine_entries.clone(),
+            config.block_engine_uuid_blocklist.clone(),
             config.relayer_config.clone(),
             config.tip_manager_config.clone(),
             shredstream_receiver_address,
@@ -1763,6 +1900,19 @@ impl Validator {
             bam_shred_receiver_addresses,
             config.multicast_receiver_address.clone(),
             config.bam_url.clone(),
+            config.reward_distribution_config.clone(),
+            config.rakurai_config.clone(),
+            config.tx_io_check.clone(),
+            config.oms_connector,
+            config.client_mode.clone(),
+            config.reset_rakurai.clone(),
+            config.scheduling_strategy,
+            config.postpack_confirmation_config.clone(),
+            config.postpack_confirmation_active_entries.clone(),
+            config.post_pack_confirmation_uuid_blocklist.clone(),
+            gui_core_metrics_sender.clone(),
+            gui_streamer_metrics_sender.clone(),
+            gui_txn_event_sender.clone(),
         );
 
         datapoint_info!(
@@ -1798,9 +1948,12 @@ impl Validator {
             blockstore: blockstore.clone(),
             votor_event_sender,
             block_engine_config: config.block_engine_config.clone(),
+            secondary_block_engine_entries: config.secondary_block_engine_entries.clone(),
+            block_engine_uuid_blocklist: config.block_engine_uuid_blocklist.clone(),
             relayer_config: config.relayer_config.clone(),
             shred_receiver_addresses: config.shred_receiver_addresses.clone(),
             shred_retransmit_receiver_addresses: config.shred_retransmit_receiver_addresses.clone(),
+            gui_ip_whitelist: config.gui_ip_whitelist.clone(),
         });
 
         let multicast_shred_addresses = (!config.disable_multicast_shred_check)
@@ -1855,6 +2008,7 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
+            gui_service,
         })
     }
 
@@ -2016,6 +2170,7 @@ impl Validator {
             .expect("snapshot_packager_service");
 
         self.gossip_service.join().expect("gossip_service");
+        self.gui_service.join().expect("gui_service");
         self.serve_repair_service
             .join()
             .expect("serve_repair_service");

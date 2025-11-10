@@ -64,6 +64,7 @@ const VOTE_SLOTS_METRICS_CAP: usize = 100;
 // log2(680k) = ~19.375.
 pub(crate) const SIGNATURE_SAMPLE_LEADING_ZEROS: u32 = 19;
 
+#[repr(C)]
 pub struct Crds {
     /// Stores the map of labels and values
     table: IndexMap<CrdsValueLabel, VersionedCrdsValue>,
@@ -101,6 +102,7 @@ pub enum GossipRoute<'a> {
 
 type CrdsCountsArray = [usize; 14];
 
+#[repr(C)]
 pub(crate) struct CrdsDataStats {
     pub(crate) counts: CrdsCountsArray,
     pub(crate) fails: CrdsCountsArray,
@@ -108,6 +110,7 @@ pub(crate) struct CrdsDataStats {
 }
 
 #[derive(Default)]
+#[repr(C)]
 pub(crate) struct CrdsStats {
     pub(crate) pull: CrdsDataStats,
     pub(crate) push: CrdsDataStats,
@@ -119,6 +122,7 @@ pub(crate) struct CrdsStats {
 
 /// This structure stores some local metadata associated with the CrdsValue
 #[derive(PartialEq, Eq, Debug, Clone)]
+#[repr(C)]
 pub struct VersionedCrdsValue {
     /// Ordinal index indicating insert order.
     ordinal: u64,
@@ -132,6 +136,7 @@ pub struct VersionedCrdsValue {
 }
 
 #[derive(Clone, Copy, Default)]
+#[repr(C)]
 pub struct Cursor(u64);
 
 impl Cursor {

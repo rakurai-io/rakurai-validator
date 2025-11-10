@@ -8,7 +8,7 @@ use {
 };
 
 /// Metadata for accessing message header fields in a transaction view.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct MessageHeaderFrame {
     /// The offset to the first byte of the message in the transaction packet.
     pub(crate) offset: u16,

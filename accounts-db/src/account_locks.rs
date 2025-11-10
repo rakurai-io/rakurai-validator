@@ -10,6 +10,7 @@ use {
 };
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct AccountLocks {
     write_locks: AHashMap<Pubkey, u64>,
     readonly_locks: AHashMap<Pubkey, u64>,

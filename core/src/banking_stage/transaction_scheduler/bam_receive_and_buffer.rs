@@ -22,8 +22,10 @@ use {
                 },
                 transaction_state_container::StateContainer,
             },
+            DecisionState,
         },
     },
+    agave_banking_stage_ingress_types::BankingPacketReceiver,
     agave_transaction_view::{
         resolved_transaction_view::ResolvedTransactionView,
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
@@ -757,7 +759,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError> {
         let is_bam_enabled = BamConnectionState::from_u8(self.bam_enabled.load(Ordering::Relaxed))
             == BamConnectionState::Connected;
@@ -767,6 +770,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         while let Ok(batch_stats) = self.recv_stats_receiver.try_recv() {
             stats.accumulate(batch_stats);
         }
+
+        let Some(decision) = decision else {
+            return Ok(stats);
+        };
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
@@ -839,6 +846,16 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
 
         Ok(stats)
     }
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        let (_sender, receiver) = crossbeam_channel::unbounded();
+        receiver
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
+    }
+
+    fn on_skip_wait_disabled(&mut self) {}
 }
 
 impl Drop for BamReceiveAndBuffer {

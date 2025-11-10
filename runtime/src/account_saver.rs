@@ -206,6 +206,7 @@ mod tests {
                     return_data: None,
                     executed_units: 0,
                     accounts_deltas,
+                    tips: 0,
                 },
                 loaded_transaction,
                 programs_modified_by_tx: HashMap::new(),

@@ -21,6 +21,7 @@ use {
     },
     solana_clock::Slot,
     solana_cost_model::{cost_model::CostModel, transaction_cost::TransactionCost},
+    solana_entry::poh::PohEntry,
     solana_entry::{
         block_component::BlockComponent,
         entry::{self, Entry, EntrySlice, EntryType, create_ticks},
@@ -79,6 +80,10 @@ use {
 };
 #[cfg(feature = "dev-context-only-utils")]
 use {qualifier_attr::qualifiers, solana_runtime::bank::HashOverrides};
+
+// TickSource::BlockstoreProcessor = 1 (from agave_geyser_plugin_interface::geyser_plugin_interface::TickSource)
+// This constant is used when calling tick_notifier to indicate ticks come from blockstore processing
+const TICK_SOURCE_BLOCKSTORE_PROCESSOR: u32 = 1;
 
 pub struct TransactionBatchWithIndexes<'a, 'b, Tx: SVMMessage> {
     pub batch: TransactionBatch<'a, 'b, Tx>,
@@ -683,6 +688,9 @@ pub fn process_entries_for_tests(
         &mut batch_timing,
         None,
         None,
+        None,  // tick_notifier
+        None,  // leader_schedule_cache
+        false, // skip_tick_notifications - notifications not sent earlier in test path
     );
 
     debug!("process_entries: {batch_timing:?}");
@@ -698,10 +706,18 @@ fn process_entries(
     batch_timing: &mut BatchExecutionTiming,
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    leader_schedule_cache: Option<&LeaderScheduleCache>,
+    skip_tick_notifications: bool,
 ) -> Result<()> {
     // accumulator for entries that can be processed in parallel
     let mut batches = vec![];
     let mut tick_hashes = vec![];
+    // Get slot and leader info once (they don't change during entry processing)
+    let slot = bank.slot();
+    let ticks_per_slot = bank.ticks_per_slot();
+    let hashes_per_tick = bank.hashes_per_tick().unwrap_or(0);
+    let leader = leader_schedule_cache.and_then(|cache| cache.slot_leader_at(slot, Some(bank)));
 
     for ReplayEntry {
         entry,
@@ -711,7 +727,34 @@ fn process_entries(
         match entry {
             EntryType::Tick(hash) => {
                 // If it's a tick, save it for later
+                // Save the tick hash first so tick_index calculation includes this tick
                 tick_hashes.push(hash);
+
+                // Calculate tick_index for this tick (before it's registered)
+                // tick_index is based on the tick_height after all ticks in tick_hashes (including this one) are registered
+                let tick_index =
+                    ((bank.tick_height() + tick_hashes.len() as u64) % ticks_per_slot) as u64;
+
+                // Notify geyser plugins about the tick immediately when received
+                // Note: For entries processed through confirm_slot_entries, notifications are sent
+                // earlier when entries are first encountered (before verification), so we skip
+                // duplicate notifications here.
+                if !skip_tick_notifications {
+                    if let Some(ref tick_notifier) = tick_notifier {
+                        let poh_entry = PohEntry {
+                            num_hashes: hashes_per_tick,
+                            hash,
+                        };
+                        tick_notifier.as_ref()(
+                            slot,
+                            tick_index,
+                            &poh_entry,
+                            leader.as_ref().map(|leader| leader.id).as_ref(),
+                            TICK_SOURCE_BLOCKSTORE_PROCESSOR,
+                        );
+                    }
+                }
+
                 if bank.is_block_boundary(bank.tick_height() + tick_hashes.len() as u64) {
                     break;
                 }
@@ -1145,6 +1188,8 @@ fn confirm_full_slot(
         opts.runtime_config.log_messages_bytes_limit,
         None,
         migration_status,
+        None, // tick_notifier - TODO: pass from confirm_full_slot if needed
+        None, // leader_schedule_cache - TODO: pass from confirm_full_slot if needed
     )?;
 
     timing.accumulate(&confirmation_timing.batch_execute.totals);
@@ -1665,6 +1710,8 @@ pub fn confirm_slot(
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
     migration_status: &MigrationStatus,
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    leader_schedule_cache: Option<&LeaderScheduleCache>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     match bank
         .feature_set
@@ -1685,6 +1732,8 @@ pub fn confirm_slot(
             log_messages_bytes_limit,
             prioritization_fee_cache,
             migration_status,
+            tick_notifier,
+            leader_schedule_cache,
         ),
         false => confirm_slot_with_entries(
             blockstore,
@@ -1700,6 +1749,8 @@ pub fn confirm_slot(
             log_messages_bytes_limit,
             prioritization_fee_cache,
             migration_status,
+            tick_notifier,
+            leader_schedule_cache,
         ),
     }
 }
@@ -1719,6 +1770,8 @@ fn confirm_slot_with_entries(
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
     migration_status: &MigrationStatus,
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    leader_schedule_cache: Option<&LeaderScheduleCache>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let slot = bank.slot();
 
@@ -1749,6 +1802,8 @@ fn confirm_slot_with_entries(
         log_messages_bytes_limit,
         prioritization_fee_cache,
         migration_status,
+        tick_notifier,
+        leader_schedule_cache,
     )
 }
 
@@ -1768,6 +1823,8 @@ fn confirm_slot_with_components(
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
     migration_status: &MigrationStatus,
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    leader_schedule_cache: Option<&LeaderScheduleCache>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let slot = bank.slot();
 
@@ -1816,6 +1873,8 @@ fn confirm_slot_with_components(
                     log_messages_bytes_limit,
                     prioritization_fee_cache,
                     migration_status,
+                    tick_notifier.clone(),
+                    leader_schedule_cache.clone(),
                 )?;
             }
             BlockComponent::BlockMarker(marker) => {
@@ -1850,7 +1909,6 @@ fn confirm_slot_with_components(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 fn confirm_slot_entries(
     bank: &BankWithScheduler,
     replay_tx_thread_pool: &ThreadPool,
@@ -1864,6 +1922,8 @@ fn confirm_slot_entries(
     log_messages_bytes_limit: Option<usize>,
     prioritization_fee_cache: Option<&PrioritizationFeeCache>,
     migration_status: &MigrationStatus,
+    tick_notifier: Option<Arc<dyn Fn(Slot, u64, &PohEntry, Option<&Pubkey>, u32) + Send + Sync>>,
+    leader_schedule_cache: Option<&LeaderScheduleCache>,
 ) -> result::Result<(), BlockstoreProcessorError> {
     let ConfirmationTiming {
         confirmation_elapsed,
@@ -1884,10 +1944,37 @@ fn confirm_slot_entries(
     let num_entries = entries.len();
     let mut entry_tx_starting_indexes = Vec::with_capacity(num_entries);
     let mut entry_tx_starting_index = progress.num_txs;
+
+    // Get values needed for immediate tick notifications
+    let ticks_per_slot = bank.ticks_per_slot();
+    let hashes_per_tick = bank.hashes_per_tick().unwrap_or(0);
+    let leader = leader_schedule_cache.and_then(|cache| cache.slot_leader_at(slot, Some(bank)));
+    let mut ticks_seen_in_batch = 0u64;
+
     let num_txs = entries
         .iter()
         .enumerate()
         .map(|(i, entry)| {
+            // Notify on ticks immediately when encountered (before verification)
+            if entry.is_tick() {
+                if let Some(ref tick_notifier) = tick_notifier {
+                    let tick_index =
+                        ((bank.tick_height() + ticks_seen_in_batch) % ticks_per_slot) as u64;
+                    let poh_entry = PohEntry {
+                        num_hashes: hashes_per_tick,
+                        hash: entry.hash,
+                    };
+                    tick_notifier.as_ref()(
+                        slot,
+                        tick_index,
+                        &poh_entry,
+                        leader.as_ref().map(|leader| leader.id).as_ref(),
+                        TICK_SOURCE_BLOCKSTORE_PROCESSOR,
+                    );
+                }
+                ticks_seen_in_batch += 1;
+            }
+
             if let Some(entry_notification_sender) = entry_notification_sender {
                 let entry_index = progress.num_entries.saturating_add(i);
                 if let Err(err) = entry_notification_sender.send(EntryNotification {
@@ -2086,6 +2173,9 @@ fn confirm_slot_entries(
         batch_execute_timing,
         log_messages_bytes_limit,
         prioritization_fee_cache,
+        tick_notifier,
+        leader_schedule_cache,
+        true, // skip_tick_notifications - notifications already sent earlier when entries were first encountered
     )
     .map_err(BlockstoreProcessorError::from);
     replay_timer.stop();
@@ -2759,6 +2849,7 @@ type WorkSequence = u64;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
+#[repr(C)]
 pub enum TransactionStatusMessage {
     Batch((TransactionStatusBatch, Option<WorkSequence>)),
     Freeze(Arc<Bank>),
@@ -2776,6 +2867,8 @@ pub struct TransactionStatusBatch {
 }
 
 #[derive(Clone, Debug)]
+#[repr(C)]
+
 pub struct TransactionStatusSender {
     pub sender: Sender<TransactionStatusMessage>,
     pub dependency_tracker: Option<Arc<DependencyTracker>>,
@@ -5425,6 +5518,8 @@ pub mod tests {
             None,
             None,
             &MigrationStatus::default(),
+            None, // tick_notifier
+            None, // leader_schedule_cache
         )?;
         progress.wait_for_all_verification_results(&mut 0, &mut 0)
     }
@@ -5520,6 +5615,8 @@ pub mod tests {
             None,
             None,
             &MigrationStatus::default(),
+            None, // tick_notifier
+            None, // leader_schedule_cache
         )
         .unwrap();
         progress
@@ -5568,6 +5665,8 @@ pub mod tests {
             None,
             None,
             &MigrationStatus::default(),
+            None, // tick_notifier
+            None, // leader_schedule_cache
         )
         .unwrap();
         progress

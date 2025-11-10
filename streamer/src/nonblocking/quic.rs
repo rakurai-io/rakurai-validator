@@ -4,7 +4,7 @@ use {
             connection_rate_limiter::ConnectionRateLimiter,
             qos::{ConnectionContext, OpaqueStreamerCounter, QosController},
         },
-        quic::{QuicServerError, QuicStreamerConfig, StreamerStats, configure_server},
+        quic::{QuicServerError, QuicStreamerConfig, StreamerStats, GuiStreamerMetrics, GuiStreamerStats, configure_server},
         quic_socket::QuicSocket,
         streamer::StakedNodes,
     },
@@ -144,6 +144,7 @@ pub(crate) fn spawn_server<Q, C>(
     quic_server_params: QuicStreamerConfig,
     qos: Q,
     cancel: CancellationToken,
+    gui_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
 ) -> Result<SpawnNonBlockingServerResult, QuicServerError>
 where
     Q: QosController<C> + Send + Sync + 'static,
@@ -177,6 +178,7 @@ where
             quic_server_params,
             cancel,
             qos,
+            gui_metrics_sender,
         )
     });
 
@@ -242,6 +244,7 @@ async fn run_server<Q, C>(
     quic_server_params: QuicStreamerConfig,
     cancel: CancellationToken,
     qos: Q,
+    gui_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
 ) -> ()
 where
     Q: QosController<C> + Send + Sync + 'static,
@@ -263,6 +266,12 @@ where
     ));
 
     const WAIT_FOR_CONNECTION_TIMEOUT: Duration = Duration::from_secs(1);
+    let report_interval_ms = if gui_metrics_sender.is_some() {
+        50
+    } else {
+        5000
+    };
+
     debug!("spawn quic server");
     let mut last_datapoint = Instant::now();
     stats
@@ -305,7 +314,21 @@ where
             _ = cancel.cancelled() => break,
         };
 
-        if last_datapoint.elapsed().as_secs() >= 5 {
+        if last_datapoint.elapsed().as_millis() >= report_interval_ms {
+            if let Some(gui_metrics_sender) = &gui_metrics_sender {
+                if let Err(err) = gui_metrics_sender.try_send(GuiStreamerMetrics::Quic(GuiStreamerStats {
+                    total_packets_sent_to_consumer: stats.total_packets_sent_to_consumer.load(Ordering::Relaxed) as u64,
+                    total_handle_chunk_to_packet_send_err: stats.total_handle_chunk_to_packet_send_err.load(Ordering::Relaxed) as u64,
+                    total_handle_chunk_to_packet_send_full_err: stats.total_handle_chunk_to_packet_send_full_err.load(Ordering::Relaxed) as u64,
+                    total_handle_chunk_to_packet_send_disconnected_err: stats.total_handle_chunk_to_packet_send_disconnected_err.load(Ordering::Relaxed) as u64,
+                    total_packet_batches_none: stats.total_packet_batches_none.load(Ordering::Relaxed) as u64,
+                    invalid_stream_size: stats.invalid_stream_size.load(Ordering::Relaxed) as u64,
+                    total_stream_read_errors: stats.total_stream_read_errors.load(Ordering::Relaxed) as u64,
+                    total_stream_read_timeouts: stats.total_stream_read_timeouts.load(Ordering::Relaxed) as u64,
+                })) {
+                    warn!("failed to send Quic gui metrics: {err}");
+                }
+            }
             stats.report(name);
             last_datapoint = Instant::now();
         }

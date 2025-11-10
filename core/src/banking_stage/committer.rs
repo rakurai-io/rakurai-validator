@@ -1,7 +1,10 @@
 use {
     super::leader_slot_timing_metrics::LeaderExecuteAndCommitTimings,
+    crate::banking_stage::house_keeper::TxOutputStatus,
+    crossbeam_channel::Sender,
     itertools::Itertools,
     solana_cost_model::cost_model::CostModel,
+    solana_fee_structure::FeeDetails,
     solana_ledger::{
         blockstore_processor::TransactionStatusSender,
         transaction_balances::compile_collected_balances,
@@ -31,15 +34,21 @@ pub enum CommitTransactionDetails {
         loaded_accounts_data_size: u32,
         fee_payer_post_balance: u64,
         result: Result<(), TransactionError>,
+        fee_details: FeeDetails,
+        /// Tip-account balance increase (raw, before commission).
+        tips: u64,
     },
     NotCommitted(TransactionError),
 }
 
 #[derive(Clone)]
+#[repr(C)]
+
 pub struct Committer {
-    transaction_status_sender: Option<TransactionStatusSender>,
-    replay_vote_sender: ReplayVoteSender,
-    prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+    pub transaction_status_sender: Option<TransactionStatusSender>,
+    pub replay_vote_sender: ReplayVoteSender,
+    pub prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+    pub output_tx_signature_sender: Option<Sender<TxOutputStatus>>,
 }
 
 impl Committer {
@@ -47,11 +56,13 @@ impl Committer {
         transaction_status_sender: Option<TransactionStatusSender>,
         replay_vote_sender: ReplayVoteSender,
         prioritization_fee_cache: Option<Arc<PrioritizationFeeCache>>,
+        output_tx_signature_sender: Option<Sender<TxOutputStatus>>,
     ) -> Self {
         Self {
             transaction_status_sender,
             replay_vote_sender,
             prioritization_fee_cache,
+            output_tx_signature_sender,
         }
     }
 
@@ -90,6 +101,8 @@ impl Committer {
                         .loaded_accounts_data_size,
                     result: committed_tx.status.clone(),
                     fee_payer_post_balance: committed_tx.fee_payer_post_balance,
+                    fee_details: committed_tx.fee_details,
+                    tips: committed_tx.tips,
                 },
                 Err(err) => CommitTransactionDetails::NotCommitted(err.clone()),
             })
