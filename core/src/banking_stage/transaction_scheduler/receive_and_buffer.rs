@@ -1,5 +1,10 @@
 #[cfg(feature = "dev-context-only-utils")]
 use qualifier_attr::qualifiers;
+
+use crate::banking_stage::DecisionState;
+
+use ahash::HashSet;
+use solana_pubkey::Pubkey;
 use {
     super::{
         transaction_priority_id::TransactionPriorityId,
@@ -17,7 +22,6 @@ use {
         resolved_transaction_view::ResolvedTransactionView, transaction_data::TransactionData,
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
-    ahash::HashSet,
     arrayvec::ArrayVec,
     core::time::Duration,
     crossbeam_channel::{RecvTimeoutError, TryRecvError},
@@ -27,7 +31,6 @@ use {
     solana_cost_model::cost_model::CostModel,
     solana_fee_structure::FeeBudgetLimits,
     solana_message::v0::LoadedAddresses,
-    solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_runtime_transaction::{
         runtime_transaction::RuntimeTransaction, transaction_meta::StaticMeta,
@@ -45,12 +48,24 @@ use {
 
 #[derive(Debug)]
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct DisconnectedError;
+pub struct DisconnectedError;
 
+#[derive(Default)]
+pub struct BufferStats {
+    pub num_dropped_on_sanitization: usize,
+    pub num_dropped_on_lock_validation: usize,
+    pub num_dropped_on_compute_budget: usize,
+    pub num_dropped_on_age: usize,
+    pub num_dropped_on_already_processed: usize,
+    pub num_dropped_on_fee_payer: usize,
+    pub num_dropped_on_capacity: usize,
+    pub num_buffered: usize,
+    pub num_dropped_on_blacklisted_account: usize,
+}
 /// Stats/metrics returned by `receive_and_buffer_packets`.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
 #[derive(Default)]
-pub(crate) struct ReceivingStats {
+pub struct ReceivingStats {
     pub num_received: usize,
     /// Count of packets that passed sigverify but were dropped
     /// without further checks because we were outside the holding
@@ -73,7 +88,7 @@ pub(crate) struct ReceivingStats {
 }
 
 impl ReceivingStats {
-    pub(crate) fn accumulate(&mut self, other: ReceivingStats) {
+    pub fn accumulate(&mut self, other: ReceivingStats) {
         self.num_received += other.num_received;
         self.num_dropped_without_parsing += other.num_dropped_without_parsing;
         self.num_dropped_on_parsing_and_sanitization +=
@@ -92,20 +107,26 @@ impl ReceivingStats {
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) trait ReceiveAndBuffer {
-    type Transaction: TransactionWithMeta + Send + Sync;
-    type Container: StateContainer<Self::Transaction> + Send + Sync;
+pub trait ReceiveAndBuffer {
+    type Transaction: TransactionWithMeta + Send + Sync + Clone;
+    type Container: StateContainer<Self::Transaction> + Send + Sync + Clone;
 
     /// Return Err if the receiver is disconnected AND no packets were
     /// received. Otherwise return Ok(num_received).
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError>;
+
+    fn packet_receiver(&self) -> BankingPacketReceiver;
+
+    fn skip_wait(&mut self) -> Option<&mut bool>;
 }
 
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
+#[derive(Clone)]
 pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub bank_forks: Arc<RwLock<BankForks>>,
@@ -119,8 +140,14 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError> {
+        let decision = if let Some(decision) = decision {
+            decision
+        } else {
+            return Ok(ReceivingStats::default()); // in case decision is not found
+        };
         let (root_bank, working_bank) = {
             let bank_forks = self.bank_forks.read().unwrap();
             let root_bank = bank_forks.root_bank();
@@ -227,7 +254,33 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
             buffer_time_us: stats.buffer_time_us,
         })
     }
+
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        self.receiver.clone()
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
+    }
 }
+
+// /// Returns the total number of locks required by the transaction.
+// fn total_num_locks(tx: &SanitizedVersionedTransaction) -> usize {
+//     let extract_table_key_len = |table: &MessageAddressTableLookup| {
+//         table
+//             .writable_indexes
+//             .len()
+//             .wrapping_add(table.readonly_indexes.len())
+//     };
+
+//     let message = &tx.get_message().message;
+//     message.static_account_keys().len().wrapping_add(
+//         message
+//             .address_table_lookups()
+//             .map(|l| l.iter().map(extract_table_key_len).sum())
+//             .unwrap_or(0),
+//     )
+// }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PacketHandlingError {
@@ -322,13 +375,15 @@ impl TransactionViewReceiveAndBuffer {
                     num_buffered += 1;
                 }
                 // Push non-errored transaction into queue.
-                num_dropped_on_capacity += container.push_ids_into_queue(
-                    check_results
-                        .into_iter()
-                        .zip(transaction_priority_ids.drain(..))
-                        .filter(|(r, _)| r.is_ok())
-                        .map(|(_, id)| id),
-                );
+                num_dropped_on_capacity += container
+                    .push_ids_into_queue(
+                        check_results
+                            .into_iter()
+                            .zip(transaction_priority_ids.drain(..))
+                            .filter(|(r, _)| r.is_ok())
+                            .map(|(_, id)| id),
+                    )
+                    .0;
             };
 
         let mut num_received = 0;
@@ -500,7 +555,19 @@ pub(crate) fn translate_to_runtime_view<D: TransactionData>(
         return Err(PacketHandlingError::LockValidation);
     }
 
-    let (loaded_addresses, deactivation_slot) = load_addresses_for_view(&view, root_bank)?;
+    // Load addresses for transaction.
+    let load_addresses_result = match view.version() {
+        TransactionVersion::Legacy => Ok((None, u64::MAX)),
+        TransactionVersion::V0 => root_bank
+            .load_addresses_from_ref(view.address_table_lookup_iter())
+            .map(|(loaded_addresses, deactivation_slot)| {
+                (Some(loaded_addresses), deactivation_slot)
+            }),
+    };
+
+    let Ok((loaded_addresses, deactivation_slot)) = load_addresses_result else {
+        return Err(PacketHandlingError::Sanitization);
+    };
 
     let Ok(view) = RuntimeTransaction::<ResolvedTransactionView<_>>::try_from(
         view,
@@ -548,7 +615,7 @@ pub(crate) fn load_addresses_for_view<D: TransactionData>(
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-pub(crate) fn calculate_priority_and_cost(
+pub fn calculate_priority_and_cost(
     transaction: &impl TransactionWithMeta,
     fee_budget_limits: &FeeBudgetLimits,
     bank: &Bank,

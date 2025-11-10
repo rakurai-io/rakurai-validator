@@ -115,6 +115,7 @@ impl InstructionAccount {
 ///
 /// This context is valid for the entire duration of a transaction being processed.
 #[derive(Debug)]
+#[repr(C)]
 pub struct TransactionContext<'ix_data> {
     accounts: Rc<TransactionAccounts>,
     instruction_stack_capacity: usize,
@@ -496,6 +497,7 @@ impl<'ix_data> TransactionContext<'ix_data> {
 /// Return data at the end of a transaction
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct TransactionReturnData {
     pub program_id: Pubkey,
     pub data: Vec<u8>,
@@ -503,6 +505,7 @@ pub struct TransactionReturnData {
 
 /// Instruction shared between runtime and programs.
 #[derive(Debug, Clone, Default)]
+#[repr(C)]
 pub struct InstructionFrame<'ix_data> {
     pub nesting_level: usize,
     pub program_account_index_in_tx: IndexOfAccount,

@@ -10,6 +10,7 @@ use {
     crate::{
         bam_dependencies::{BamConnectionState, BamOutboundMessage},
         banking_stage::{
+            DecisionState,
             consumer::Consumer,
             decision_maker::BufferedPacketsDecision,
             scheduler_messages::MaxAge,
@@ -57,6 +58,7 @@ use {
         },
         time::{Duration, Instant},
     },
+    agave_banking_stage_ingress_types::BankingPacketReceiver,
 };
 
 type PrevalidationResult = Result<(usize, bool, u32, u64), (Reason, u32)>;
@@ -785,7 +787,8 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError> {
         let is_bam_enabled = BamConnectionState::from_u8(self.bam_enabled.load(Ordering::Relaxed))
             == BamConnectionState::Connected;
@@ -795,6 +798,10 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         while let Ok(batch_stats) = self.recv_stats_receiver.try_recv() {
             stats.accumulate(batch_stats);
         }
+
+        let Some(decision) = decision else {
+            return Ok(stats);
+        };
 
         match decision {
             BufferedPacketsDecision::Consume(_) | BufferedPacketsDecision::Hold => loop {
@@ -866,6 +873,14 @@ impl ReceiveAndBuffer for BamReceiveAndBuffer {
         }
 
         Ok(stats)
+    }
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        let (_sender, receiver) = crossbeam_channel::unbounded();
+        receiver
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
     }
 }
 

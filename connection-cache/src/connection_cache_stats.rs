@@ -4,6 +4,7 @@ use {
 };
 
 #[derive(Default)]
+#[repr(C)]
 pub struct ConnectionCacheStats {
     pub cache_hits: AtomicU64,
     pub cache_misses: AtomicU64,

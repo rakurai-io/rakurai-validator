@@ -37,6 +37,7 @@ pub struct RecordTransactionsSummary {
 
 /// Adds transactions into the PoH stream, by sending them to the PoH service.
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct TransactionRecorder {
     // shared by all users of PohRecorder
     pub record_sender: RecordSender,

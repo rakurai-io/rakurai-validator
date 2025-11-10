@@ -28,6 +28,7 @@ impl ::solana_frozen_abi::abi_example::AbiExample for SysvarCache {
 }
 
 #[derive(Default, Clone, Debug)]
+#[repr(C)]
 pub struct SysvarCache {
     // full account data as provided by bank, including any trailing zero bytes
     clock: Option<Vec<u8>>,

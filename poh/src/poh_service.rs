@@ -37,7 +37,7 @@ pub const DEFAULT_HASHES_PER_BATCH: u64 =
 
 pub const DEFAULT_PINNED_CPU_CORE: usize = 0;
 
-const TARGET_SLOT_ADJUSTMENT_NS: u64 = 50_000_000;
+pub const TARGET_SLOT_ADJUSTMENT_NS: u64 = 50_000_000;
 
 #[derive(Debug)]
 struct PohTiming {
@@ -101,6 +101,7 @@ impl PohService {
         hashes_per_batch: u64,
         record_receiver: RecordReceiver,
         poh_service_receiver: PohServiceMessageReceiver,
+        target_slot_adjustment_ns: u64,
     ) -> Self {
         let poh_config = poh_config.clone();
         let tick_producer = Builder::new()
@@ -143,6 +144,7 @@ impl PohService {
                         Self::target_ns_per_tick(
                             ticks_per_slot,
                             poh_config.target_tick_duration.as_nanos() as u64,
+                            target_slot_adjustment_ns,
                         ),
                     );
                 }
@@ -153,14 +155,19 @@ impl PohService {
         Self { tick_producer }
     }
 
-    pub fn target_ns_per_tick(ticks_per_slot: u64, target_tick_duration_ns: u64) -> u64 {
+    pub fn target_ns_per_tick(
+        ticks_per_slot: u64,
+        target_tick_duration_ns: u64,
+        target_slot_adjustment_ns: u64,
+    ) -> u64 {
         // Account for some extra time outside of PoH generation to account
         // for processing time outside PoH.
         let adjustment_per_tick = if ticks_per_slot > 0 {
-            TARGET_SLOT_ADJUSTMENT_NS / ticks_per_slot
+            target_slot_adjustment_ns / ticks_per_slot
         } else {
             0
         };
+
         target_tick_duration_ns.saturating_sub(adjustment_per_tick)
     }
 

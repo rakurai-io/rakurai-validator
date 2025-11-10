@@ -48,5 +48,9 @@ add_spl_program_to_fetch feature-proposal 1.0.0 Feat1YXHhH6t1juaWF74WLcfv4XoNocj
 # jito programs
 add_spl_program_to_fetch jito_tip_payment 0.1.10 T1pyyaTNZsKv2WcRAB8oVnk93mLJw2XzjtVYqCsaHqt BPFLoaderUpgradeab1e11111111111111111111111 jito
 add_spl_program_to_fetch jito_tip_distribution 0.1.10 4R3gSG8BpU4t19KYj8CfnbtRpnT8gtk4dvTHxVRwc2r7 BPFLoaderUpgradeab1e11111111111111111111111 jito
+# rakurai
+# TODO: fix this to download program.so files from @github/rakurai-io (ref: solana)
+genesis_args+=(--upgradeable-program CuvTfdaxcDbvvtACkXrW2j69YeQbWuNnwg9FefYDrSug BPFLoaderUpgradeab1e11111111111111111111111 ./rakurai_programs/release/downloads/rakurai_activation.so none)
+genesis_args+=(--upgradeable-program CtVB7ze4Kz2iUHGrWLWY9EG5Au1erbRCMvKTWFuKv8wq BPFLoaderUpgradeab1e11111111111111111111111 ./rakurai_programs/release/downloads/reward_distribution.so none)
 
 fetch_programs "$PREFIX" "${programs[@]}"

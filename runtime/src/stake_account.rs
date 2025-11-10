@@ -17,6 +17,7 @@ use {
 /// only wrap a stake-state which is a Delegation; whereas StakeAccount<()>
 /// wraps any account with stake state.
 #[derive(Clone, Debug, Default)]
+#[repr(C)]
 pub struct StakeAccount<T> {
     account: AccountSharedData,
     stake_state: StakeStateV2,

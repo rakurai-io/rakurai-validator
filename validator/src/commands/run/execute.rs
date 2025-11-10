@@ -31,6 +31,7 @@ use {
     },
     solana_clock::{Slot, DEFAULT_SLOTS_PER_EPOCH},
     solana_core::{
+        banking_stage::reward_distributor::RewardDistributionConfig,
         banking_stage::transaction_scheduler::scheduler_controller::SchedulerConfig,
         banking_trace::DISABLED_BAKING_TRACE_DIR,
         consensus::tower_storage,
@@ -43,7 +44,7 @@ use {
         validator::{
             is_snapshot_config_valid, BlockProductionMethod, BlockVerificationMethod,
             SchedulerPacing, Validator, ValidatorConfig, ValidatorError, ValidatorStartProgress,
-            ValidatorTpuConfig,
+            ValidatorTpuConfig, ClientMode,
         },
     },
     solana_genesis_utils::MAX_GENESIS_ARCHIVE_UNPACKED_SIZE,
@@ -544,6 +545,34 @@ pub fn execute(
     }));
 
     let bam_url = Arc::new(Mutex::new(crate::commands::bam::extract_bam_url(matches)?));
+    let reward_distribution_config = RewardDistributionConfig {
+        rewards_merkle_root_authority:pubkey_of(&matches, "rewards_merkle_root_authority")
+        .unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rewards-merkle-root-authority argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        vote_account: pubkey_of(&matches, "vote_account").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--vote-account argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        rakurai_activation_program_id: pubkey_of(&matches, "rakurai_activation_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--rakurai-activation-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        reward_distribution_program_id: pubkey_of(&matches, "reward_distribution_program_id").unwrap_or_else(|| {
+            if !voting_disabled {
+                panic!("--reward-distribution-program-id argument required when validator is voting");
+            }
+            Pubkey::new_unique()
+        }),
+        tip_distribution_program_id:tip_manager_config.tip_distribution_program_id,
+    };
 
     // Defaults are set in cli definition, safe to use unwrap() here
     let expected_heartbeat_interval_ms: u64 =
@@ -582,6 +611,66 @@ pub fn execute(
                 SocketAddr::from_str(addr).expect("shred_retransmit_receiver_address invalid")
             }),
     ));
+
+    // Defaults are set in cli definition, safe to use unwrap() here
+    let banking_packet_delay_ms: u64 =
+        if let Some(banking_packet_delay_ms) = value_of(&matches, "banking_packet_delay_ms") {
+            banking_packet_delay_ms
+        } else {
+            // default to 0 if not specified
+            200
+        };
+    info!("Banking packet delay set to {banking_packet_delay_ms} ms");
+
+    let target_slot_adjustment_ms: u64 =
+        if let Some(target_slot_adjustment_ms) = value_of(&matches, "target_slot_adjustment_ms") {
+            target_slot_adjustment_ms
+        } else {
+            // default to 10 if not specified
+            10
+        };
+
+    let mut client_mode = if matches.is_present("client_mode") {
+        value_t_or_exit!(matches, "client_mode", ClientMode)
+    } else {
+        ClientMode::default()
+    };
+
+    info!("client_mode set to {client_mode}");
+
+    if client_mode == ClientMode::RakuraiBAM {
+        client_mode = ClientMode::RakuraiJito;
+        info!(
+            "Overriding client_mode to {client_mode} as RakuraiBAM is not allowed"
+        );
+    }
+    if client_mode != ClientMode::RakuraiJito && bam_url.lock().unwrap().is_none() {
+        client_mode = ClientMode::RakuraiJito;
+        info!(
+            "Overriding client_mode as BAM URL was not specified. Client mode set to {client_mode}"
+        );
+    }
+
+    let client_mode = Arc::new(Mutex::new(client_mode));
+
+    info!("target_slot_adjustment_ms set to {target_slot_adjustment_ms} ms");
+
+    let tx_io_check: Option<String> = if matches.is_present("tx_io_check") {
+        // if user provided a value, use it; otherwise use default
+        Some(
+            matches
+                .value_of("tx_io_check")
+                .unwrap_or("/var/tmp/tx_io.log")
+                .to_string(),
+        )
+    } else {
+        // flag not used at all
+        None
+    };
+    info!("tx_io_check set to {:?}", tx_io_check);
+
+    let oms_connector = matches.is_present("oms_connector");
+    info!("oms_connector set to {oms_connector}");
 
     let mut validator_config = ValidatorConfig {
         require_tower: matches.is_present("require_tower"),
@@ -705,6 +794,12 @@ pub fn execute(
         shred_retransmit_receiver_address,
         tip_manager_config,
         bam_url,
+        reward_distribution_config,
+        banking_packet_delay_ms,
+        target_slot_adjustment_ms,
+        tx_io_check,
+        oms_connector,
+        client_mode,
     };
 
     let reserved = validator_config
@@ -799,6 +894,7 @@ pub fn execute(
             staked_nodes_overrides,
             rpc_to_plugin_manager_sender,
             bam_url: validator_config.bam_url.clone(),
+            client_mode: validator_config.client_mode.clone(),
         },
     );
 

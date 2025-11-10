@@ -1,0 +1,53 @@
+name: Tx In/Out Test
+
+on:
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: 'Tag to use'
+                required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+    build:
+        runs-on:
+          group: rakurai-validator-testing
+          labels: big_github_runner_1
+
+        steps:
+        - name: Checking out on release tag
+          uses: actions/checkout@v4
+          with:
+            submodules: true 
+      
+        - name: Cloning scheduler repository
+          uses: actions/checkout@v4
+          with:
+            repository: rakurai-io/scheduler_1_0
+            ref: ${{ inputs.ref }}
+            token: ${{ secrets.RAKURAI_SCHEDULER }}
+            path: core/src/banking_stage/rakurai_scheduler
+            submodules: true
+
+        - name: Installing Solana build dependencies
+          run: |
+            rustup update
+            sudo apt-get update
+            sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev libseccomp-dev
+
+        - name: Building scheduler binary
+          run: |
+            git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
+            cargo build --release -p rakurai-scheduler
+
+        - name: Running tx in/out test
+          run: |
+            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
+            cargo build --release --workspace --exclude rakurai-scheduler --features "build_validator,local_build"
+            ./tx_io_integrity_test.sh
+          

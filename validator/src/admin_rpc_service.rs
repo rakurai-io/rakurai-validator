@@ -21,7 +21,8 @@ use {
         },
         repair::repair_service,
         validator::{
-            BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
+            BlockProductionMethod, ClientMode, SchedulerPacing, TransactionStructure,
+            ValidatorStartProgress,
         },
     },
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
@@ -65,6 +66,7 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<Mutex<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -295,6 +297,9 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "setClientMode")]
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -597,6 +602,48 @@ impl AdminRpc for AdminRpcImpl {
         }
 
         *meta.bam_url.lock().unwrap() = bam_url;
+        Ok(())
+    }
+
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()> {
+        let old_client_mode = meta.client_mode.lock().unwrap().clone();
+        info!(
+            "set_client_mode old= {}, new={}",
+            old_client_mode, client_mode
+        );
+
+        let new_client_mode = ClientMode::from_str(&client_mode).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}. Valid options: {:?}",
+                client_mode,
+                e,
+                ClientMode::cli_names()
+            ))
+        })?;
+
+        if new_client_mode == ClientMode::RakuraiBAM {
+            return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}",
+                client_mode,
+                "RakuraiBAM is not allowed for now",
+            )));
+        }
+
+        if new_client_mode != ClientMode::RakuraiJito {
+            if meta.bam_url.lock().unwrap().is_some() {
+                *meta.client_mode.lock().unwrap() = new_client_mode;
+            } else {
+                *meta.client_mode.lock().unwrap() = ClientMode::RakuraiJito;
+                info!(
+                    "BAM URL not specified, Please set bam-url first before switching client mode"
+                );
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "BAM URL not specified, Please set bam-url first before switching client mode",
+                ));
+            }
+        } else {
+            *meta.client_mode.lock().unwrap() = new_client_mode;
+        }
         Ok(())
     }
 
@@ -1264,6 +1311,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1685,6 +1733,7 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(Mutex::new(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
             };
 
             let _validator = Validator::new(

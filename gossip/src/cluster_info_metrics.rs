@@ -15,6 +15,7 @@ use {
 };
 
 #[derive(Default)]
+#[repr(C)]
 pub(crate) struct Counter(AtomicU64);
 
 impl Counter {
@@ -87,6 +88,7 @@ impl<T> Drop for TimedGuard<'_, T> {
 }
 
 #[derive(Default)]
+#[repr(C)]
 pub struct GossipStats {
     pub(crate) bad_prune_destination: Counter,
     pub(crate) entrypoint2: Counter,

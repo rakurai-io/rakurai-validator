@@ -22,6 +22,7 @@ use {
 /// CrdsValue that is replicated across the cluster
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct CrdsValue {
     signature: Signature,
     data: CrdsData,
@@ -62,6 +63,7 @@ impl Signable for CrdsValue {
 /// Type of the replicated value
 /// These are labels for values in a record that is associated with `Pubkey`
 #[derive(PartialEq, Hash, Eq, Clone, Debug)]
+#[repr(C)]
 pub enum CrdsValueLabel {
     LegacyContactInfo(Pubkey),
     Vote(VoteIndex, Pubkey),

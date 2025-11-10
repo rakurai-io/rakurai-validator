@@ -2,9 +2,10 @@
 //! validators
 
 use {
-    agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
+    agave_banking_stage_ingress_types::BankingPacketReceiver,
     crossbeam_channel::RecvTimeoutError,
     log::*,
+    solana_perf::packet::PacketBatch,
     solana_streamer::sendmmsg::batch_send,
     std::{
         net::{SocketAddr, UdpSocket},
@@ -115,7 +116,7 @@ impl PacketBatchSender {
         packet_batch_receiver: BankingPacketReceiver,
         recv_timeout: Duration,
         batch_size: usize,
-    ) -> Result<(usize, Vec<BankingPacketBatch>), RecvTimeoutError> {
+    ) -> Result<(usize, Vec<Arc<Vec<PacketBatch>>>), RecvTimeoutError> {
         let start = Instant::now();
 
         let message = packet_batch_receiver.recv_timeout(recv_timeout)?;

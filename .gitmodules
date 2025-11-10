@@ -4,3 +4,19 @@
 [submodule "jito-protos/bam-protos"]
 	path = jito-protos/bam-protos
 	url = https://github.com/jito-labs/bam-protos.git
+[submodule "rakurai_programs"]
+	path = rakurai_programs
+	url = https://github.com/rakurai-io/rakurai_programs.git
+[submodule "solana-sdk"]
+	path = solana-sdk
+	url = https://github.com/rakurai-io/solana-sdk.git
+	branch = solana-sdk-with-rakurai-mod_v3.0.0
+[submodule "parking_lot"]
+	path = parking_lot
+	url = https://github.com/rakurai-io/parking_lot.git
+[submodule "anchor"]
+	path = anchor
+	url = https://github.com/jito-foundation/anchor.git
+[submodule "jito-programs"]
+	path = jito-programs
+	url = https://github.com/jito-foundation/jito-programs.git

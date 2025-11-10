@@ -19,6 +19,7 @@ use std::sync::{
 
 // To track an external counter which cannot be reset and is always increasing
 #[derive(Default)]
+#[repr(C)]
 pub struct MovingStat {
     value: AtomicU64,
 }

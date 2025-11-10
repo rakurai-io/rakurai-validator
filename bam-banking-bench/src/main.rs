@@ -5,18 +5,20 @@ use {
     crate::mock_bam_server::MockBamServer,
     assert_matches::assert_matches,
     clap::{crate_description, crate_name, Arg, Command},
-    crossbeam_channel::{unbounded, Receiver},
+    crossbeam_channel::{bounded, unbounded, Receiver},
     log::*,
     solana_core::{
         bam_dependencies::{BamConnectionState, BamDependencies},
+        banking_simulation::DummyClusterInfo,
         banking_stage::{
+            reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
-            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage,
+            update_bank_forks_and_poh_recorder_for_new_tpu_bank, BankingStage, DecisionState,
         },
         banking_trace::{BankingTracer, Channels},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
         proxy::block_engine_stage::BlockBuilderFeeInfo,
-        validator::BlockProductionMethod,
+        validator::{BlockProductionMethod, ClientMode},
     },
     solana_gossip::{cluster_info::ClusterInfo, contact_info::ContactInfo},
     solana_keypair::Keypair,
@@ -100,7 +102,7 @@ fn main() {
             bank.clone(),
             blockstore.clone(),
             None,
-            Some(leader_schedule_cache),
+            Some(leader_schedule_cache.clone()),
         );
     let (banking_tracer, tracer_thread) = BankingTracer::new(None).unwrap();
     let prioritization_fee_cache = Arc::new(PrioritizationFeeCache::new(0u64));
@@ -157,6 +159,40 @@ fn main() {
         gossip_vote_receiver,
     } = banking_tracer.create_channels(false);
 
+    let id = RwLock::new(leader_schedule_cache.slot_leader_at(0, None).unwrap());
+    let cluster_info_for_banking = Arc::new(DummyClusterInfo { id });
+
+    let tx_io_check = false;
+    let oms_connector = false;
+    const TX_IO_CHANNEL_SZIE: usize = 1024;
+    let (input_tx_signature_sender, _input_tx_signature_receiver) = if tx_io_check {
+        let (input_tx_signature_sender, input_tx_signature_receiver) = bounded(TX_IO_CHANNEL_SZIE);
+        (
+            Some((input_tx_signature_sender, exit.clone())),
+            Some(input_tx_signature_receiver),
+        )
+    } else {
+        (None, None)
+    };
+    let (output_tx_signature_sender, _output_tx_signature_receiver) =
+        if tx_io_check || oms_connector {
+            let (output_tx_signature_sender, output_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some(output_tx_signature_sender),
+                Some(output_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
+
+    let shared_decision = (
+        Arc::new(RwLock::new(DecisionState::Hold)),
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let client_mode = Arc::new(Mutex::new(ClientMode::RakuraiBAM));
+
     let banking_stage = BankingStage::new_num_threads(
         // this doesn't matter for the BAM test
         BlockProductionMethod::CentralScheduler,
@@ -177,6 +213,15 @@ fn main() {
         BundleAccountLocker::default(),
         None,
         Some(bam_dependencies),
+        &cluster_info_for_banking,
+        blockstore.clone(),
+        RewardDistributionConfig::default(),
+        0,
+        input_tx_signature_sender,
+        output_tx_signature_sender,
+        shared_decision,
+        exit.clone(),
+        client_mode,
     );
 
     let bank_setting_thread = {

@@ -14,6 +14,7 @@ enum CompressionType {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 pub(crate) struct EpochIncompleteSlots {
     first: Slot,
     compression: CompressionType,

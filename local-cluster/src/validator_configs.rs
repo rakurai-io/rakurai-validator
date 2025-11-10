@@ -87,6 +87,12 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         shred_retransmit_receiver_address: config.shred_retransmit_receiver_address.clone(),
         tip_manager_config: config.tip_manager_config.clone(),
         bam_url: config.bam_url.clone(),
+        reward_distribution_config: config.reward_distribution_config.clone(),
+        banking_packet_delay_ms: config.banking_packet_delay_ms,
+        target_slot_adjustment_ms: config.target_slot_adjustment_ms,
+        tx_io_check: config.tx_io_check.clone(),
+        oms_connector: config.oms_connector,
+        client_mode: config.client_mode.clone(),
     }
 }
 

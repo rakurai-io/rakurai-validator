@@ -17,6 +17,7 @@ pub const DEFAULT_MAX_INCREMENTAL_SNAPSHOT_ARCHIVES_TO_RETAIN: NonZeroUsize =
 
 /// Snapshot configuration and runtime information
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct SnapshotConfig {
     /// Specifies the ways thats snapshots are allowed to be used
     pub usage: SnapshotUsage,

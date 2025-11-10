@@ -73,6 +73,7 @@ pub struct RecordSummary {
     pub remaining_hashes_in_slot: u64,
 }
 
+#[repr(C)]
 pub struct Record {
     pub mixins: Vec<Hash>,
     pub transaction_batches: Vec<Vec<VersionedTransaction>>,
@@ -162,6 +163,7 @@ impl PohRecorderMetrics {
     }
 }
 
+#[repr(C)]
 pub struct PohRecorder {
     pub(crate) poh: Arc<Mutex<Poh>>,
     clear_bank_signal: Option<Sender<bool>>,
@@ -172,14 +174,16 @@ pub struct PohRecorder {
     /// This stores the current working bank + scheduler and other metadata,
     /// if they exist.
     /// This field MUST be kept consistent with the `shared_leader_state` field.
-    working_bank: Option<WorkingBank>,
+    pub working_bank: Option<WorkingBank>,
     shared_leader_state: SharedLeaderState,
     working_bank_sender: Sender<WorkingBankEntry>,
     leader_last_tick_height: u64, // zero if none
     grace_ticks: u64,
     blockstore: Arc<Blockstore>,
-    leader_schedule_cache: Arc<LeaderScheduleCache>,
+    pub leader_schedule_cache: Arc<LeaderScheduleCache>,
     ticks_per_slot: u64,
+    target_ns_per_tick: u64,
+
     metrics: PohRecorderMetrics,
     delay_leader_block_for_pending_fork: bool,
     last_reported_slot_for_pending_fork: Arc<Mutex<Slot>>,
@@ -220,6 +224,7 @@ impl PohRecorder {
             leader_schedule_cache,
             poh_config,
             is_exited,
+            crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
         )
     }
 
@@ -236,6 +241,7 @@ impl PohRecorder {
         leader_schedule_cache: &Arc<LeaderScheduleCache>,
         poh_config: &PohConfig,
         is_exited: Arc<AtomicBool>,
+        target_slot_adjustment_ns: u64,
     ) -> (Self, Receiver<WorkingBankEntry>) {
         let tick_number = 0;
         let poh = Arc::new(Mutex::new(Poh::new_with_slot_info(
@@ -244,6 +250,11 @@ impl PohRecorder {
             tick_number,
         )));
 
+        let target_ns_per_tick = PohService::target_ns_per_tick(
+            ticks_per_slot,
+            poh_config.target_tick_duration.as_nanos() as u64,
+            target_slot_adjustment_ns,
+        );
         let (working_bank_sender, working_bank_receiver) = unbounded();
         let (leader_first_tick_height, leader_last_tick_height, grace_ticks) =
             Self::compute_leader_slot_tick_heights(next_leader_slot, ticks_per_slot);
@@ -267,6 +278,7 @@ impl PohRecorder {
                 blockstore,
                 leader_schedule_cache: leader_schedule_cache.clone(),
                 ticks_per_slot,
+                target_ns_per_tick,
                 metrics: PohRecorderMetrics::default(),
                 delay_leader_block_for_pending_fork,
                 last_reported_slot_for_pending_fork: Arc::default(),
@@ -674,6 +686,10 @@ impl PohRecorder {
         self.ticks_per_slot
     }
 
+    pub fn target_ns_per_tick(&self) -> u64 {
+        self.target_ns_per_tick
+    }
+
     pub fn start_slot(&self) -> Slot {
         self.start_bank.slot()
     }
@@ -945,6 +961,7 @@ fn do_create_test_recorder(
         crate::poh_service::DEFAULT_HASHES_PER_BATCH,
         record_receiver,
         poh_service_message_receiver,
+        crate::poh_service::TARGET_SLOT_ADJUSTMENT_NS,
     );
 
     poh_controller
@@ -1017,7 +1034,7 @@ impl SharedLeaderState {
 }
 
 pub struct LeaderState {
-    working_bank: Option<Arc<Bank>>,
+    pub working_bank: Option<Arc<Bank>>,
     tick_height: AtomicU64,
     leader_first_tick_height: Option<u64>,
     next_leader_slot_range: Option<(Slot, Slot)>,

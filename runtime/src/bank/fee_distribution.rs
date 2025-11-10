@@ -26,8 +26,8 @@ enum DepositFeeError {
 
 #[derive(Default)]
 pub struct FeeDistribution {
-    deposit: u64,
-    burn: u64,
+    pub deposit: u64,
+    pub burn: u64,
 }
 
 impl FeeDistribution {

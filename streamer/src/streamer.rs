@@ -75,6 +75,7 @@ pub(crate) const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(1);
 
 // Total stake and nodes => stake map
 #[derive(Default)]
+#[repr(C)]
 pub struct StakedNodes {
     stakes: Arc<HashMap<Pubkey, u64>>,
     overrides: HashMap<Pubkey, u64>,

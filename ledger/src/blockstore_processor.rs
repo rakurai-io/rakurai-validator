@@ -2255,6 +2255,8 @@ type WorkSequence = u64;
 
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
+#[repr(C)]
+
 pub enum TransactionStatusMessage {
     Batch((TransactionStatusBatch, Option<WorkSequence>)),
     Freeze(Arc<Bank>),
@@ -2272,6 +2274,8 @@ pub struct TransactionStatusBatch {
 }
 
 #[derive(Clone, Debug)]
+#[repr(C)]
+
 pub struct TransactionStatusSender {
     pub sender: Sender<TransactionStatusMessage>,
     pub dependency_tracker: Option<Arc<DependencyTracker>>,

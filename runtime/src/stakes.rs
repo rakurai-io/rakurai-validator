@@ -58,6 +58,7 @@ pub type StakeAccount = stake_account::StakeAccount<Delegation>;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct StakesCache(RwLock<Stakes<StakeAccount>>);
 
 impl StakesCache {
@@ -162,6 +163,7 @@ impl StakesCache {
 /// stake-delegations.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[repr(C)]
 pub struct Stakes<T: Clone> {
     /// vote accounts
     vote_accounts: VoteAccounts,

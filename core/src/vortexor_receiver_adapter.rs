@@ -18,7 +18,8 @@ use {
 
 #[inline]
 fn send(sender: &TracedSender, batch: Arc<Vec<PacketBatch>>, count: usize) -> Result<(), String> {
-    match sender.send(batch) {
+    // TODO handle is properly
+    match sender.send(batch, &None) {
         Ok(_) => {
             trace!("Sent batch: {count} received from vortexor successfully");
             Ok(())
@@ -71,6 +72,7 @@ impl VortexorReceiverAdapter {
         self.receiver.join()
     }
 
+    // TODO handle the sending functions properly
     fn recv_send(
         packet_batch_receiver: Receiver<PacketBatch>,
         recv_timeout: Duration,

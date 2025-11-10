@@ -38,6 +38,7 @@ pub enum ClientId {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[repr(C)]
 pub struct Version {
     #[serde(with = "serde_varint")]
     pub major: u16,

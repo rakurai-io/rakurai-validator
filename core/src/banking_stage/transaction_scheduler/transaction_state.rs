@@ -11,10 +11,11 @@ use qualifier_attr::qualifiers;
 /// retryable, the transaction is added back into the Option. If it si not
 /// retryable, the state is dropped.
 #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
-pub(crate) struct TransactionState<Tx> {
+#[derive(Clone)]
+pub struct TransactionState<Tx> {
     /// If `Some`, the transaction is available for scheduling.
     /// If `None`, the transaction is currently scheduled or being processed.
-    transaction: Option<Tx>,
+    pub transaction: Option<Tx>,
     /// Tracks information on the maximum age the transaction's pre-processing
     /// is valid for. This includes sanitization features, as well as resolved
     /// address lookups.
@@ -27,7 +28,7 @@ pub(crate) struct TransactionState<Tx> {
 
 impl<Tx> TransactionState<Tx> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
-    pub(crate) fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
+    pub fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
         Self {
             transaction: Some(transaction),
             max_age,
@@ -39,12 +40,12 @@ impl<Tx> TransactionState<Tx> {
     /// Return the priority of the transaction.
     /// This is *not* the same as the `compute_unit_price` of the transaction.
     /// The priority is used to order transactions for processing.
-    pub(crate) fn priority(&self) -> u64 {
+    pub fn priority(&self) -> u64 {
         self.priority
     }
 
     /// Return the cost of the transaction.
-    pub(crate) fn cost(&self) -> u64 {
+    pub fn cost(&self) -> u64 {
         self.cost
     }
 
@@ -53,7 +54,7 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction has already been scheduled.
-    pub(crate) fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge) {
+    pub fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge) {
         let tx = self
             .transaction
             .take()
@@ -66,7 +67,7 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction is not pending.
-    pub(crate) fn retry_transaction(&mut self, transaction: Tx) {
+    pub fn retry_transaction(&mut self, transaction: Tx) {
         assert!(
             self.transaction.replace(transaction).is_none(),
             "transaction is pending"
@@ -77,10 +78,14 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction is in the `Pending` state.
-    pub(crate) fn transaction(&self) -> &Tx {
+    pub fn transaction(&self) -> &Tx {
         self.transaction
             .as_ref()
             .expect("transaction is not pending")
+    }
+
+    pub fn max_age(&self) -> MaxAge {
+        self.max_age
     }
 }
 
