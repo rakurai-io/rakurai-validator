@@ -14,6 +14,7 @@ use {
 /// The SDK's stake history with clone-on-write semantics
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
+#[repr(C)]
 pub struct StakeHistory(Arc<StakeHistoryInner>);
 
 impl Deref for StakeHistory {

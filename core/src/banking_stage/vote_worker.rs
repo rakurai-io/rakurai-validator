@@ -143,7 +143,7 @@ impl VoteWorker {
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
         reservation_cb: &impl Fn(&Bank) -> u64,
     ) {
-        let (decision, make_decision_us) =
+        let ((decision, _, _), make_decision_us) =
             measure_us!(self.decision_maker.make_consume_or_forward_decision());
         let metrics_action = slot_metrics_tracker.check_leader_slot_boundary(decision.bank());
         slot_metrics_tracker.increment_make_decision_us(make_decision_us);
@@ -155,9 +155,9 @@ impl VoteWorker {
         slot_metrics_tracker.apply_action(metrics_action);
 
         match decision {
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 let (_, consume_buffered_packets_us) = measure_us!(self.consume_buffered_packets(
-                    &bank,
+                    &bank_start.working_bank,
                     banking_stage_stats,
                     slot_metrics_tracker,
                     reservation_cb

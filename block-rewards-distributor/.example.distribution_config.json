@@ -1,0 +1,51 @@
+{
+    "comment": "If any validator has stake accounts from the above stake pool IDs, the rewards from those stake accounts go to the pool reserve (instead of stake account) to avoid epoch delay",
+    "stake_pool_ids": [
+        "RaiDhwyRoMVxLN9KD7kAXAwHbWKf1TCTe5HFSrPVJaD"
+    ],
+    "validators_config": {
+        "4YykTGwg94GgHZEPSsQfbaMaEE9HHAHqSuXT65L6C6wf": {
+            "comment": "Validator-specific config keyed by vote account",
+            "stakers": {
+                "comment": "These stake accounts are excluded and will NOT get rewards. All other stakers must receive at least the minimum specified in the Reward Collection Account. For example, if validator commission = 7000 BPS (70%), each staker must receive at least 30% of rewards.",
+                "excluded_stake_pubkeys": [
+                    "FGxeo1d4n3M52DkXkBxcNyFnCEDbAWMTTQ4Y2N3b1E7N",
+                    "GHTdWfextB1e3b2fXjL9CktdkxbBbfH1qqjgDaFGMzXq"
+                ],
+                "custom_commissions": {
+                    "CAQYdFN9egemPQuELjtwxBk27nDW3d9uMz2TA8RVgCeo": {
+                        "commission_bps": 6000,
+                        "comment": "Validator gets 60%, staker gets 40%"
+                    },
+                    "g8mdSkn25gekQeGNqttdje8FUQmrwjbRWAeWcMYZNFE": {
+                        "commission_bps": 9900,
+                        "comment": "Requested 99% (invalid, > max 7000 BPS). Lowered to 70% commission to validator, staker gets 30%"
+                    },
+                    "CcxbybGo38pQjpyw9N6NwCwemhVUaKKnbHJM3uNnSp83": {
+                        "commission_bps": 4000,
+                        "referral_claimant_pubkey": "CcxbybGo38pQjpyw9N6NwCwemhVUaKKnbHJM3uNnSp81",
+                        "referral_claimant_commission_bps": 0,
+                        "comment": "Validator gets 40%, staker gets 60%. Referral field is set but receives 0%"
+                    },
+                    "FFaUCsxGD5iV32er9Cyudti7xiAirZHoXKb4mYNpk3aS": {
+                        "commission_bps": 6000,
+                        "referral_claimant_pubkey": "FFaUCsxGD5iV32er9Cyudti7xiAirZHoXKb4mYNpk3a1",
+                        "referral_claimant_commission_bps": 1000,
+                        "comment": "Validator gets 60%. From staker’s 40%, 10% is redirected to referral claimant"
+                    },
+                    "91gRMhiL8h4i9hC25ZN9a2aq1koA3f5dkNpV37zcdk4p": {
+                        "commission_bps": 0,
+                        "referral_claimant_pubkey": "91gRMhiL8h4i9hC25ZN9a2aq1koA3f5dkNpV37zcdk41",
+                        "referral_claimant_commission_bps": 2000,
+                        "comment": "Validator gets 0%. Staker gets 100%. From that 100%, 20% goes to referral claimant"
+                    }
+                }
+            },
+            "validator_reward_split": {
+                "claimant_pubkey": "C219EXMbWUGb856duJqdvHgBzfpx6beY1cg8R6baDbvD",
+                "claimant_commission_bps": 5000,
+                "comment": "Any remaining rewards: 50% to claimant, 50% to validator identity. If not specified, all remaining goes to validator identity."
+            }
+        }
+    }
+}

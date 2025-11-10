@@ -1,4 +1,8 @@
 use {
+    crate::{
+        banking_stage::house_keeper::get_serialized_packet_for_logging, packet_bundle::PacketBundle,
+    },
+    jito_protos::proto::bam_types::AtomicTxnBatch,
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     bincode::serialize_into,
     chrono::{DateTime, Local},
@@ -7,6 +11,8 @@ use {
     serde::{Deserialize, Serialize},
     solana_clock::Slot,
     solana_hash::Hash,
+    solana_perf::packet::PacketBatch,
+    solana_transaction::versioned::VersionedTransaction,
     std::{
         fs::{create_dir_all, remove_dir_all},
         io::{self, Write},
@@ -21,6 +27,9 @@ use {
     thiserror::Error,
 };
 
+pub type BamBundle = Arc<AtomicTxnBatch>;
+pub type BundleBatch = Arc<PacketBundle>;
+pub type BundlePacketBatch = Arc<PacketBatch>;
 pub type BankingPacketSender = TracedSender;
 pub type TracerThreadResult = Result<(), TraceError>;
 pub type TracerThread = Option<JoinHandle<TracerThreadResult>>;
@@ -74,6 +83,8 @@ pub struct TimedTracedEvent(pub std::time::SystemTime, pub TracedEvent);
 pub enum TracedEvent {
     PacketBatch(ChannelLabel, BankingPacketBatch),
     BlockAndBankHash(Slot, Hash, Hash),
+    Bundles(BundlePacketBatch),
+    BamBatch(BamBundle),
 }
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
@@ -443,7 +454,11 @@ impl TracedSender {
         }
     }
 
-    pub fn send(&self, batch: BankingPacketBatch) -> Result<(), SendError<BankingPacketBatch>> {
+    pub fn send(
+        &self,
+        batch: BankingPacketBatch,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+    ) -> Result<(), SendError<BankingPacketBatch>> {
         if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
             if !exit.load(Ordering::Relaxed) {
                 trace_sender
@@ -457,7 +472,96 @@ impl TracedSender {
                     })?;
             }
         }
-        self.sender.send(batch)
+
+        // -----------------------------------------------------------------------------
+        // TX Input Signature Reporting
+        //
+        // This block sends all incoming transaction signatures (`tx_in_signature`) to
+        // the HouseKeeper via `input_tx_signature_sender`. Each
+        // transaction in the batch is processed to extract its signature. If a
+        // transaction fails deserialization, a serialized packet fallback is used
+        // to still identify the transaction.
+        //
+        // See the "tx_io_check_readme.md" for details on how these
+        // tx_in_signature messages are recorded and analyzed:
+        //   <repo-root>/tx_io_check_readme.md
+        //
+        // Collecting tx_in_signature ensures end-to-end auditing of transaction
+        // entry into the scheduler, enabling detection of missing or censored
+        // transactions and providing full transparency of scheduler behavior.
+        // -----------------------------------------------------------------------------
+        if let Some((input_tx_signature_sender, exit)) = input_tx_signature_sender {
+            if !exit.load(Ordering::Relaxed) {
+                for packet_batch in batch.iter() {
+                    for packet in packet_batch {
+                        if let Ok(versioned_transaction) =
+                            packet.deserialize_slice::<VersionedTransaction, _>(..)
+                        {
+                            if let Some(signature) = versioned_transaction.signatures.first() {
+                                let _ = input_tx_signature_sender.try_send(signature.to_string());
+                            }
+                        } else {
+                            // in case of deserialization error, fallback to this method of identification
+                            let msg = get_serialized_packet_for_logging(&packet);
+                            let _ = input_tx_signature_sender.try_send(msg);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((_, exit)) = input_tx_signature_sender {
+            if !exit.load(Ordering::Relaxed) {
+                self.sender.send(batch)
+            } else {
+                Err(SendError(batch))
+            }
+        } else {
+            self.sender.send(batch)
+        }
+    }
+
+    pub fn send_bundle(
+        &self,
+        bundle: BundlePacketBatch,
+    ) -> Result<(), SendError<BundlePacketBatch>> {
+        if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
+            if !exit.load(Ordering::Relaxed) {
+                trace_sender
+                    .send(TimedTracedEvent(
+                        SystemTime::now(),
+                        TracedEvent::Bundles(BundlePacketBatch::clone(&bundle)),
+                    ))
+                    .map_err(|err| {
+                        error!(
+                            "unexpected error when tracing a bundle batch event...: {:?}",
+                            err
+                        );
+                        SendError(BundlePacketBatch::clone(&bundle))
+                    })?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn send_bam_batch(&self, batch: BamBundle) -> Result<(), SendError<BamBundle>> {
+        if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer {
+            if !exit.load(Ordering::Relaxed) {
+                trace_sender
+                    .send(TimedTracedEvent(
+                        SystemTime::now(),
+                        TracedEvent::BamBatch(BamBundle::clone(&batch)),
+                    ))
+                    .map_err(|err| {
+                        error!(
+                            "unexpected error when tracing a BAM batch event...: {:?}",
+                            err
+                        );
+                        SendError(BamBundle::clone(&batch))
+                    })?;
+            }
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {

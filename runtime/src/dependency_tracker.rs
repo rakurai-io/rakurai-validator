@@ -3,6 +3,7 @@
 use std::sync::{atomic::AtomicU64, Condvar, Mutex};
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct DependencyTracker {
     /// The current work id
     work_id: AtomicU64,

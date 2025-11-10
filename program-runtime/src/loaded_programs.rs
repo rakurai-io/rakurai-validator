@@ -129,6 +129,7 @@ impl From<ProgramCacheEntryOwner> for Pubkey {
 
 /// Actual payload of [ProgramCacheEntry].
 #[derive(Default)]
+#[repr(C)]
 pub enum ProgramCacheEntryType {
     /// Tombstone for programs which currently do not pass the verifier but could if the feature set changed.
     FailedVerification(ProgramRuntimeEnvironment),
@@ -182,6 +183,7 @@ impl ProgramCacheEntryType {
 ///
 /// It contains the actual program in [ProgramCacheEntryType] and a bunch of meta-data.
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct ProgramCacheEntry {
     /// The program of this entry
     pub program: ProgramCacheEntryType,
@@ -526,6 +528,7 @@ impl ProgramCacheEntry {
 ///
 /// This is only valid in an epoch range as long as no feature affecting RBPF is activated.
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct ProgramRuntimeEnvironments {
     /// For program runtime V1
     pub program_runtime_v1: ProgramRuntimeEnvironment,
@@ -639,6 +642,7 @@ impl LoadingTaskWaiter {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 enum IndexImplementation {
     /// Fork-graph aware index implementation
     V1 {
@@ -703,6 +707,7 @@ impl<FG: ForkGraph> Debug for ProgramCache<FG> {
 /// while the TX batch is guaranteed it will continue to find all the programs it requires.
 /// For program management instructions this also buffers them before they are merged back into the global [ProgramCache].
 #[derive(Clone, Debug, Default)]
+#[repr(C)]
 pub struct ProgramCacheForTxBatch {
     /// Pubkey is the address of a program.
     /// ProgramCacheEntry is the corresponding program entry valid for the slot in which a transaction is being executed.

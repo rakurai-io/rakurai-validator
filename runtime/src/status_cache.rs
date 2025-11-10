@@ -47,6 +47,7 @@ pub type SlotDelta<T> = (Slot, bool, Status<T>);
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct StatusCache<T: Serialize + Clone> {
     // cache[blockhash][tx_key] => [(fork1_slot, tx_result), (fork2_slot, tx_result), ...] used to
     // check if a tx_key was seen on a fork and for rpc to retrieve the tx_result

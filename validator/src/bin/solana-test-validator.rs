@@ -442,6 +442,8 @@ fn main() {
             tower_storage: tower_storage.clone(),
             rpc_to_plugin_manager_sender,
             bam_url: genesis.bam_url.clone(),
+            client_mode: genesis.client_mode.clone(),
+            packet_delay: genesis.packet_delay.clone(),
         },
     );
     let dashboard = if output == Output::Dashboard {

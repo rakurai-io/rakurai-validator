@@ -1,0 +1,132 @@
+name: Tx In/Out Test
+
+on:
+    workflow_dispatch:
+        inputs:
+            ref:
+                description: 'Tag to use'
+                required: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+    build:
+        runs-on:
+          labels: big_github_runner_1
+
+        steps:
+        - name: Checking out on release tag
+          uses: actions/checkout@v4
+          with:
+            submodules: true 
+      
+        - name: Cloning scheduler repository
+          uses: actions/checkout@v4
+          with:
+            repository: rakurai-io/scheduler_1_0
+            ref: ${{ inputs.ref }}
+            token: ${{ secrets.RAKURAI_SCHEDULER }}
+            path: core/src/banking_stage/rakurai_scheduler
+            submodules: true
+
+        - name: Installing Solana build dependencies
+          run: |
+            rustup update
+            sudo apt-get update
+            sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev libseccomp-dev
+
+        - name: Building scheduler binary
+          run: |
+            git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
+            cargo build --release -p rakurai-scheduler
+            VERSION="$(grep ^version Cargo.toml | head -n1 | sed 's/version *= *"\([^"]*\)"/\1/')"
+            VERSION_SAFE="${VERSION//./_}"
+            SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
+            VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
+            RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
+            mv target/release/librakurai_scheduler_1_0.so "target/release/${RENAMED_LIB}"
+
+        - name: Running tx in/out test
+          run: |
+            sudo tee /etc/sysctl.d/21-agave-validator.conf > /dev/null <<'EOF'
+            # Increase max UDP buffer sizes
+            net.core.rmem_max = 134217728
+            net.core.wmem_max = 134217728
+
+            # Increase memory mapped files limit
+            vm.max_map_count = 1000000
+
+            # Increase number of allowed open file descriptors
+            fs.nr_open = 1000000
+            EOF
+
+            sudo sysctl -p /etc/sysctl.d/21-agave-validator.conf
+
+            # systemd manager defaults
+            sudo tee -a /etc/systemd/system.conf > /dev/null <<'EOF'
+
+            DefaultLimitNOFILE=1000000
+            DefaultLimitMEMLOCK=2000000000
+            EOF
+
+            sudo systemctl daemon-reexec
+            sudo systemctl daemon-reload
+
+            sudo tee /etc/security/limits.d/90-solana-nofiles.conf > /dev/null <<'EOF'
+            # Increase process file descriptor count limit
+            * - nofile 1000000
+
+            # Increase memory locked limit (kB)
+            * - memlock 2000000
+            EOF
+          
+            WORKSPACE_PATH=$(pwd)
+            echo "WORKSPACE_PATH: $WORKSPACE_PATH"
+            sudo tee /etc/systemd/system/sol.service > /dev/null << EOF
+            [Unit]
+            Description=Solana Validator
+            After=network.target
+            StartLimitIntervalSec=0
+
+            [Service]
+            Type=simple
+            LimitNOFILE=1000000
+            LimitMEMLOCK=2000000000
+            LogRateLimitIntervalSec=0
+            Environment="CARGO_TERM_COLOR=always"
+            Environment="RUST_BACKTRACE=1"
+            Environment="HOME=/home/runner"
+            Environment="USER=runner"
+            WorkingDirectory=${WORKSPACE_PATH}
+            ExecStart=/bin/bash -c 'source $HOME/.cargo/env && ./tx_io_integrity_test.sh'
+
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            sudo systemctl daemon-reload
+
+            # Start the service and capture its output
+            sudo journalctl -u sol.service -f --no-pager &
+            JOURNAL_PID=$!
+
+            sudo systemctl start sol.service
+            
+            TIMEOUT=5400  # 90 minutes
+            ELAPSED=0
+            while systemctl is-active --quiet sol.service; do
+                sleep 1
+                ELAPSED=$((ELAPSED + 1))
+                if [ $ELAPSED -ge $TIMEOUT ]; then
+                    echo "Service timeout after $TIMEOUT seconds"
+                    sudo systemctl stop sol.service
+                    exit 1
+                fi
+            done
+            
+            kill $JOURNAL_PID
+            sudo systemctl is-failed sol.service && exit 1 || true

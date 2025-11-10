@@ -1,0 +1,127 @@
+# This workflow is used to build scheduler binary and make SLSA compliant Github attestation 
+# to prove build provenance and integrity of the scheduler binary
+
+# It makes sure that the scheduler binary:
+# - Is built correctly and is secure
+# - Is built with the correct dependencies
+# - Is built on the correct version
+# - Is deployed to the backend server without any modifications
+# - Passes static tests to ensure no file I/O, network I/O or validator private key access is present 
+
+# The workflow is triggered when a new tag is pushed on every release
+
+name: Rakurai Scheduler Binary Attestation
+
+on:
+    push:
+        tags:
+            - "**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
+jobs:
+    build:
+        strategy:
+          matrix:
+            os: [ubuntu-22.04, ubuntu-24.04]
+
+        runs-on: ${{ matrix.os }}
+
+        steps:
+        - name: Checking out on release tag
+          uses: actions/checkout@v4
+          with:
+            submodules: true 
+      
+        - name: Cloning scheduler repository
+          uses: actions/checkout@v4
+          with:
+            repository: rakurai-io/scheduler_1_0
+            ref: ${{ github.ref_name }}
+            token: ${{ secrets.RAKURAI_SCHEDULER }}
+            path: core/src/banking_stage/rakurai_scheduler
+            submodules: true
+
+        - name: Installing Solana build dependencies
+          run: |
+            rustup update
+            sudo apt-get update
+            sudo apt-get install libssl-dev libudev-dev pkg-config zlib1g-dev llvm clang cmake make libprotobuf-dev protobuf-compiler libclang-dev libseccomp-dev
+
+        - name: Building scheduler binary
+          run: |
+            git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
+            cargo build --release -p rakurai-scheduler
+
+        - name: Generating SLSA compliant GitHub Artifact Attestation to prove build provenance and integrity of the scheduler binary
+          uses: actions/attest-build-provenance@v3
+          with:
+            subject-path: 'target/release/librakurai_scheduler_1_0.so'
+
+        - name: Generating SBOM for Scheduler
+          run: |
+            cargo install cargo-sbom --locked
+            cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom.json
+
+        - name: Generate SBOM attestation
+          uses: actions/attest-sbom@v2
+          with:
+            subject-path: target/release/librakurai_scheduler_1_0.so
+            sbom-path: rakurai-scheduler-sbom.json
+        
+        - name: Running scheduler test with disabled file and network I/O using libseccomp
+          run: |
+            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
+            cargo build --release -p scheduler-test-setup --features "build_validator,local_build"
+            ./target/release/scheduler-test-setup || echo "Test failed: scheduler test setup exited with non-zero code"
+
+        - name: Running static tests to ensure no logic for spawning processes or loading binaries into running process is present in the scheduler binary
+          run: ./static_scheduler_tests.sh || echo "Static scheduler tests failed"
+
+        - name: Compressing scheduler binary for deployment
+          run: |
+            TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
+            VERSION="$(grep ^version Cargo.toml | head -n1 | sed 's/version *= *"\([^"]*\)"/\1/')"
+            VERSION_SAFE="${VERSION//./_}"
+            SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
+            VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
+            RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
+            mv target/release/librakurai_scheduler_1_0.so "${RENAMED_LIB}"
+
+            echo "Generating SHA512 checksum and GPG detached signature for scheduler binary"
+            gpg --batch --import <<< "${{ secrets.GPG_PRIVATE_KEY }}"
+            sha512sum "${RENAMED_LIB}" > rakurai_scheduler.sha512
+            gpg --batch --yes --detach-sign --armor --local-user "${{ secrets.GPG_KEY_ID }}" rakurai_scheduler.sha512
+
+            mkdir attestations
+            cp "rakurai-scheduler-sbom.json" attestations/
+            cp "rakurai_scheduler.sha512" attestations/
+            cp "rakurai_scheduler.sha512.asc" attestations/
+            tar -cvzf "$TAR_NAME" "$RENAMED_LIB" "attestations/"
+            
+        - name: Deploying scheduler binary to backend server
+          env:
+            BACKEND_SSH_KEY: ${{ secrets.BACKEND_SSH_KEY }}
+            BACKEND_IP: ${{ secrets.BACKEND_IP }}
+            BACKEND_USER: ${{ secrets.BACKEND_USER }}
+            BACKEND_PATH: ${{ secrets.BACKEND_PATH }}
+
+          run: |
+            echo "$BACKEND_SSH_KEY" > backend_key.pem
+            chmod 600 backend_key.pem
+
+            TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
+            scp -o StrictHostKeyChecking=no -i backend_key.pem \
+              $TAR_NAME \
+              ${BACKEND_USER}@${BACKEND_IP}:${BACKEND_PATH}/
+
+            ssh -o StrictHostKeyChecking=no -i backend_key.pem ${BACKEND_USER}@${BACKEND_IP} \
+              "cd ${BACKEND_PATH}/ && ./deploy_binaries.sh '${{ github.ref_name }}'"
+
+            shred -u backend_key.pem

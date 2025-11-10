@@ -14,7 +14,8 @@ use {
     solana_signature::Signature,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub(crate) struct TransactionFrame {
     /// Signature framing data.
     signature: SignatureFrame,

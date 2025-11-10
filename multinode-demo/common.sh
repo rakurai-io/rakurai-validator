@@ -68,7 +68,7 @@ else
       )
     fi
 
-    printf "cargo $CARGO_TOOLCHAIN run $manifest_path $profile_arg --bin %s %s -- " "$program"
+    printf "cargo $CARGO_TOOLCHAIN run $manifest_path $profile_arg --features build_validator --bin %s %s -- " "$program"
   }
 fi
 

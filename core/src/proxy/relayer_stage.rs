@@ -458,7 +458,7 @@ impl RelayerStage {
                     return Ok(());
                 }
 
-                let packet_batch = PacketBatch::from(
+                let mut packet_batch = PacketBatch::from(
                     proto_batch
                         .packets
                         .into_iter()
@@ -469,6 +469,10 @@ impl RelayerStage {
                 relayer_stats
                     .num_packets
                     .add_assign(packet_batch.len() as u64);
+
+                for mut packet in packet_batch.iter_mut() {
+                    packet.meta_mut().bypass_delay(true);
+                }
 
                 packet_tx
                     .send(packet_batch)

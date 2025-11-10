@@ -208,7 +208,7 @@ mod address_lookup_table;
 pub mod bank_hash_details;
 pub mod builtins;
 mod check_transactions;
-mod fee_distribution;
+pub mod fee_distribution;
 mod metrics;
 pub(crate) mod partitioned_epoch_rewards;
 mod recent_blockhashes_account;
@@ -219,6 +219,13 @@ pub(crate) mod tests;
 pub const SECONDS_PER_YEAR: f64 = 365.25 * 24.0 * 60.0 * 60.0;
 
 pub const MAX_LEADER_SCHEDULE_STAKES: Epoch = 5;
+
+#[no_mangle]
+pub static BANK_TEST_MODE: AtomicBool = AtomicBool::new(false);
+
+pub fn is_bank_test_mode() -> bool {
+    BANK_TEST_MODE.load(Ordering::Relaxed)
+}
 
 pub type BankStatusCache = StatusCache<Result<()>>;
 #[cfg_attr(
@@ -246,8 +253,8 @@ impl AddAssign for SquashTiming {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CollectorFeeDetails {
-    transaction_fee: u64,
-    priority_fee: u64,
+    pub transaction_fee: u64,
+    pub priority_fee: u64,
 }
 
 impl CollectorFeeDetails {
@@ -259,9 +266,17 @@ impl CollectorFeeDetails {
             .priority_fee
             .saturating_add(fee_details.prioritization_fee());
     }
-
     pub fn total_transaction_fee(&self) -> u64 {
         self.transaction_fee.saturating_add(self.priority_fee)
+    }
+
+    pub(crate) fn total_block_rewards(&self, fee_rate_governor: FeeRateGovernor) -> u64 {
+        let (deposit, _burn) = if self.transaction_fee != 0 {
+            fee_rate_governor.burn(self.transaction_fee)
+        } else {
+            (0, 0)
+        };
+        deposit.saturating_add(self.priority_fee)
     }
 
     pub fn total_priority_fee(&self) -> u64 {
@@ -279,6 +294,7 @@ impl From<FeeDetails> for CollectorFeeDetails {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct BankRc {
     /// where all the Accounts are stored
     pub accounts: Arc<Accounts>,
@@ -383,6 +399,7 @@ pub type TransactionBalances = Vec<Vec<u64>>;
 pub type PreCommitResult<'a> = Result<Option<RwLockReadGuard<'a, Hash>>>;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+#[repr(C)]
 pub enum TransactionLogCollectorFilter {
     All,
     AllWithVotes,
@@ -392,12 +409,14 @@ pub enum TransactionLogCollectorFilter {
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct TransactionLogCollectorConfig {
     pub mentioned_addresses: HashSet<Pubkey>,
     pub filter: TransactionLogCollectorFilter,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[repr(C)]
 pub struct TransactionLogInfo {
     pub signature: Signature,
     pub result: Result<()>,
@@ -406,6 +425,7 @@ pub struct TransactionLogInfo {
 }
 
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct TransactionLogCollector {
     // All the logs collected for from this Bank.  Exact contents depend on the
     // active `TransactionLogCollectorFilter`
@@ -696,10 +716,12 @@ pub trait DropCallback: fmt::Debug {
 }
 
 #[derive(Debug, Default)]
+#[repr(C)]
 pub struct OptionalDropCallback(Option<Box<dyn DropCallback + Send + Sync>>);
 
 #[derive(Default, Debug, Clone, PartialEq)]
 #[cfg(feature = "dev-context-only-utils")]
+#[repr(C)]
 pub struct HashOverrides {
     hashes: HashMap<Slot, HashOverride>,
 }
@@ -737,12 +759,14 @@ impl HashOverrides {
 
 #[derive(Debug, Clone, PartialEq)]
 #[cfg(feature = "dev-context-only-utils")]
+#[repr(C)]
 struct HashOverride {
     blockhash: Hash,
     bank_hash: Hash,
 }
 
 /// Manager for the state of all accounts and programs after processing its entries.
+#[repr(C)]
 pub struct Bank {
     /// References to accounts, parent and signature status
     pub rc: BankRc,
@@ -751,7 +775,7 @@ pub struct Bank {
     pub status_cache: Arc<RwLock<BankStatusCache>>,
 
     /// FIFO queue of `recent_blockhash` items
-    blockhash_queue: RwLock<BlockhashQueue>,
+    pub blockhash_queue: RwLock<BlockhashQueue>,
 
     /// The set of parents including this bank
     pub ancestors: Ancestors,
@@ -2017,6 +2041,16 @@ impl Bank {
 
     pub fn freeze_started(&self) -> bool {
         self.freeze_started.load(Relaxed)
+    }
+
+    pub fn get_status_cache(
+        &self,
+    ) -> Arc<RwLock<StatusCache<std::result::Result<(), TransactionError>>>> {
+        self.status_cache.clone()
+    }
+
+    pub fn get_compute_budget(&self) -> Option<ComputeBudget> {
+        self.compute_budget.clone()
     }
 
     pub fn status_cache_ancestors(&self) -> Vec<u64> {
@@ -4839,9 +4873,10 @@ impl Bank {
             ("total_us", total_us, i64),
         );
         info!(
-            "bank frozen: {slot} hash: {hash} signature_count: {} last_blockhash: {} \
+            "bank frozen: {slot} block_rewards: {} hash: {hash} signature_count: {} last_blockhash: {} \
              capitalization: {}, accounts_lt_hash checksum: {accounts_lt_hash_checksum}, stats: \
              {bank_hash_stats:?}",
+            self.collector_fee_details.read().unwrap().total_block_rewards(self.fee_rate_governor.clone()),
             self.signature_count(),
             self.last_blockhash(),
             self.capitalization(),

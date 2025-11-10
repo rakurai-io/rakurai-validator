@@ -23,7 +23,8 @@ use {
         },
         repair::repair_service,
         validator::{
-            BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
+            BlockProductionMethod, ClientMode, SchedulerPacing, TransactionStructure,
+            ValidatorStartProgress,
         },
     },
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
@@ -45,7 +46,7 @@ use {
         str::FromStr,
         sync::{
             atomic::{AtomicBool, Ordering},
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
         },
         thread::{self, Builder},
         time::{Duration, SystemTime},
@@ -67,6 +68,8 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub packet_delay: Arc<RwLock<u64>>,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -297,6 +300,12 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "setClientMode")]
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()>;
+
+    #[rpc(meta, name = "setPacketDelay")]
+    fn set_packet_delay(&self, meta: Self::Metadata, packet_delay_ms: u64) -> Result<()>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -602,6 +611,65 @@ impl AdminRpc for AdminRpcImpl {
         }
 
         meta.bam_url.store(Arc::new(bam_url));
+        Ok(())
+    }
+
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()> {
+        let old_client_mode = meta.client_mode.lock().unwrap().clone();
+        info!(
+            "set_client_mode old= {}, new={}",
+            old_client_mode, client_mode
+        );
+
+        let new_client_mode = ClientMode::from_str(&client_mode).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}. Valid options: {:?}",
+                client_mode,
+                e,
+                ClientMode::cli_names()
+            ))
+        })?;
+
+        if new_client_mode == ClientMode::RakuraiBAM {
+            return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}",
+                client_mode, "RakuraiBAM is not allowed for now",
+            )));
+        }
+
+        if new_client_mode != ClientMode::RakuraiJito {
+            if meta.bam_url.load().is_some() {
+                *meta.client_mode.lock().unwrap() = new_client_mode;
+            } else {
+                *meta.client_mode.lock().unwrap() = ClientMode::RakuraiJito;
+                info!(
+                    "BAM URL not specified, Please set bam-url first before switching client mode"
+                );
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "BAM URL not specified, Please set bam-url first before switching client mode",
+                ));
+            }
+        } else {
+            *meta.client_mode.lock().unwrap() = new_client_mode;
+        }
+        Ok(())
+    }
+
+    fn set_packet_delay(&self, meta: Self::Metadata, packet_delay_ms: u64) -> Result<()> {
+        let old_packet_delay = *meta.packet_delay.read().unwrap();
+        info!(
+            "set_packet_delay old= {}ms, new={}ms",
+            old_packet_delay, packet_delay_ms
+        );
+
+        if packet_delay_ms > 10000 {
+            return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid packet delay '{}ms': packet delay must be between 0ms and 10000ms",
+                packet_delay_ms
+            )));
+        }
+
+        *meta.packet_delay.write().unwrap() = packet_delay_ms;
         Ok(())
     }
 
@@ -1263,6 +1331,8 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                packet_delay: Arc::new(RwLock::new(200)), // Default 200ms
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1684,6 +1754,8 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                packet_delay: Arc::new(RwLock::new(200)), // Default 200ms
             };
 
             let _validator = Validator::new(

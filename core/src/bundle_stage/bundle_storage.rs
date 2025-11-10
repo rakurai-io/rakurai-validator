@@ -14,6 +14,7 @@ use {
     },
     ahash::HashSet,
     arrayvec::ArrayVec,
+    min_max_heap::MinMaxHeap,
     solana_clock::Slot,
     solana_pubkey::Pubkey,
     solana_runtime::bank::Bank,
@@ -32,11 +33,65 @@ pub enum BundleStorageError {
 }
 
 struct BundleTransactionId {
-    container_ids: Vec<usize>,
+    container_ids: Vec<(usize, u64, u64)>,
+    bundle_priority: u64,
 }
 
+impl Ord for BundleTransactionId {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.bundle_priority.cmp(&other.bundle_priority)
+    }
+}
+
+impl PartialOrd for BundleTransactionId {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for BundleTransactionId {
+    fn eq(&self, other: &Self) -> bool {
+        self.bundle_priority == other.bundle_priority
+    }
+}
+
+impl Eq for BundleTransactionId {}
+
+const JITO_TIP_ACCOUNTS: [&str; 8] = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+];
+
+fn get_tip_amount(runtime_tx_view: &RuntimeTransactionView) -> u64 {
+    let account_keys = runtime_tx_view.static_account_keys();
+    let mut tip_amount: u64 = 0;
+    for (program_id, instruction) in runtime_tx_view.program_instructions_iter() {
+        if let Some(&_tip_account_index) = instruction.accounts.iter().find(|&&index| {
+            (index as usize) < account_keys.len()
+                && JITO_TIP_ACCOUNTS.contains(&account_keys[index as usize].to_string().as_str())
+        }) {
+            if *program_id == solana_sdk_ids::system_program::id() && instruction.data.len() >= 8 {
+                let mut amount_bytes = [0u8; 8];
+                amount_bytes[..4].copy_from_slice(&instruction.data[4..8]);
+                match amount_bytes.try_into().map(u64::from_le_bytes) {
+                    Ok(amount) => tip_amount += amount,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    tip_amount
+}
 pub struct BundleStorageEntry {
-    pub container_ids: Vec<usize>,
+    pub container_ids: Vec<(usize, u64 /*priority*/, u64 /*cost */)>,
+    pub bundle_priority: u64,
     pub transactions: Vec<RuntimeTransactionView>,
     pub max_ages: Vec<MaxAge>,
 }
@@ -47,7 +102,7 @@ pub struct BundleStorage {
     last_slot: Slot,
     transaction_capacity: usize,
     transaction_view_state_container: TransactionViewStateContainer,
-    unprocessed_bundles: VecDeque<BundleTransactionId>,
+    unprocessed_bundles: MinMaxHeap<BundleTransactionId>,
     // Storage for bundles that exceeded the cost model for the slot they were last attempted
     // execution on
     cost_model_buffered_bundles: VecDeque<BundleTransactionId>,
@@ -63,8 +118,9 @@ impl BundleStorage {
             transaction_capacity,
             transaction_view_state_container: TransactionViewStateContainer::with_capacity(
                 transaction_capacity,
+                true,
             ),
-            unprocessed_bundles: VecDeque::with_capacity(transaction_capacity),
+            unprocessed_bundles: MinMaxHeap::with_capacity(transaction_capacity),
             cost_model_buffered_bundles: VecDeque::with_capacity(transaction_capacity),
         }
     }
@@ -84,7 +140,7 @@ impl BundleStorage {
     /// Retries a bundle by inserting the transactions back into the transaction_view_state_container.
     /// The bundle is then pushed back to the cost_model_buffered_bundles queue.
     pub fn retry_bundle(&mut self, bundle: BundleStorageEntry) {
-        for (container_id, transaction) in bundle
+        for ((container_id, _, _), transaction) in bundle
             .container_ids
             .iter()
             .zip(bundle.transactions.into_iter())
@@ -97,6 +153,7 @@ impl BundleStorage {
         self.cost_model_buffered_bundles
             .push_back(BundleTransactionId {
                 container_ids: bundle.container_ids,
+                bundle_priority: bundle.bundle_priority,
             });
     }
 
@@ -104,7 +161,7 @@ impl BundleStorage {
     /// It's important that transactions in the BundleStorageEntry are not used after this call
     /// as it will lead to panic inside the TransactionViewStateContainer.
     pub fn destroy_bundle(&mut self, bundle: BundleStorageEntry) {
-        for container_id in bundle.container_ids.into_iter() {
+        for (container_id, _, _) in bundle.container_ids.into_iter() {
             self.transaction_view_state_container
                 .remove_by_id(container_id);
         }
@@ -118,20 +175,20 @@ impl BundleStorage {
             // we need to pop from the back of that queue and insert to the front of the unprocessed_bundles queue so by the time we reach the front,
             // the oldest bundle is at the front of the unprocessed_bundles queue
             while let Some(bundle) = self.cost_model_buffered_bundles.pop_back() {
-                self.unprocessed_bundles.push_front(bundle);
+                self.unprocessed_bundles.push(bundle);
             }
 
             self.last_slot = slot;
         }
 
         // only want to pop from the unprocessed bundles queue and wait for slot boundary to refresh from cost_model_buffered_bundles
-        let bundle = self.unprocessed_bundles.pop_front()?;
+        let bundle = self.unprocessed_bundles.pop_max()?;
 
         let (bundle_transactions, bundle_max_ages): (Vec<RuntimeTransactionView>, Vec<MaxAge>) =
             bundle
                 .container_ids
                 .iter()
-                .map(|id| {
+                .map(|(id, _, _)| {
                     self.transaction_view_state_container
                         .get_mut_transaction_state(*id)
                         .unwrap()
@@ -141,6 +198,7 @@ impl BundleStorage {
 
         Some(BundleStorageEntry {
             container_ids: bundle.container_ids,
+            bundle_priority: bundle.bundle_priority,
             transactions: bundle_transactions,
             max_ages: bundle_max_ages,
         })
@@ -180,12 +238,14 @@ impl BundleStorage {
             return Err(BundleStorageError::ContainerFull);
         }
 
-        let mut container_ids: Vec<usize> = Vec::with_capacity(batch.len());
+        let mut container_ids: Vec<(usize, u64, u64)> = Vec::with_capacity(batch.len());
         let mut maybe_error = Ok(());
         let enable_static_instruction_limit = working_bank
             .feature_set
             .is_active(&agave_feature_set::static_instruction_limit::id());
         let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
+
+        let mut total_bundle_tip_amount = 0;
 
         for (idx, packet) in batch.iter().enumerate() {
             // bundles shall contain all valid packets; checked above
@@ -211,10 +271,19 @@ impl BundleStorage {
                     }
                 })
             {
-                container_ids.push(container_id);
+                let transaction_state = self
+                    .transaction_view_state_container
+                    .get_mut_transaction_state(container_id)
+                    .unwrap();
+                let tip_amount = get_tip_amount(transaction_state.transaction());
+                let cus = transaction_state.cost();
+                let reward = transaction_state.priority() * cus;
+                total_bundle_tip_amount += tip_amount;
+
+                container_ids.push((container_id, reward as u64, cus as u64));
             } else {
                 // any error shall rollback any transactions added to the container
-                for container_id in container_ids.iter() {
+                for (container_id, _, _) in container_ids.iter() {
                     self.transaction_view_state_container
                         .remove_by_id(*container_id);
                 }
@@ -225,17 +294,37 @@ impl BundleStorage {
             }
         }
 
-        let is_duplicate_hashes = self.does_contain_duplicate_hashes(&container_ids);
+        let is_duplicate_hashes = self.does_contain_duplicate_hashes(
+            &container_ids
+                .iter()
+                .map(|(id, _, _)| *id)
+                .collect::<Vec<usize>>(),
+        );
         if is_duplicate_hashes {
-            for container_id in container_ids.iter() {
+            for (container_id, _, _) in container_ids.iter() {
                 self.transaction_view_state_container
                     .remove_by_id(*container_id);
             }
             return Err(BundleStorageError::DuplicateTransaction);
         }
+        total_bundle_tip_amount = total_bundle_tip_amount.saturating_mul(1_000_000);
 
-        self.unprocessed_bundles
-            .push_back(BundleTransactionId { container_ids });
+        let mut total_rewards = 0;
+        let mut total_cus = 0;
+
+        for (_, reward, cus) in container_ids.iter() {
+            total_rewards += reward;
+            total_cus += cus;
+        }
+
+        total_rewards = total_rewards + total_bundle_tip_amount;
+
+        let bundle_priority = total_rewards.saturating_div(total_cus.saturating_add(1));
+
+        self.unprocessed_bundles.push(BundleTransactionId {
+            container_ids,
+            bundle_priority,
+        });
 
         Ok(())
     }
@@ -257,13 +346,13 @@ impl BundleStorage {
     }
 
     pub fn clear(&mut self) {
-        for bundle in self.unprocessed_bundles.drain(..) {
-            for id in bundle.container_ids.iter() {
+        while let Some(bundle) = self.unprocessed_bundles.pop_max() {
+            for (id, _, _) in bundle.container_ids.iter() {
                 self.transaction_view_state_container.remove_by_id(*id);
             }
         }
         for bundle in self.cost_model_buffered_bundles.drain(..) {
-            for id in bundle.container_ids.iter() {
+            for (id, _, _) in bundle.container_ids.iter() {
                 self.transaction_view_state_container.remove_by_id(*id);
             }
         }

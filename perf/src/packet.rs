@@ -31,6 +31,7 @@ pub const NUM_RCVMMSGS: usize = 64;
 /// Representation of a packet used in TPU.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct BytesPacket {
     buffer: Bytes,
     meta: Meta,
@@ -150,6 +151,7 @@ impl BytesPacket {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, AbiEnumVisitor))]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub enum PacketBatch {
     Pinned(PinnedPacketBatch),
     Bytes(BytesPacketBatch),
@@ -623,8 +625,9 @@ impl IndexedParallelIterator for PacketBatchParIterMut<'_> {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct PinnedPacketBatch {
-    packets: PinnedVec<Packet>,
+    pub packets: PinnedVec<Packet>,
 }
 
 pub type PacketBatchRecycler = Recycler<PinnedVec<Packet>>;
@@ -808,6 +811,7 @@ fn to_packet_batches_for_tests<T: Serialize>(items: &[T]) -> Vec<PacketBatch> {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct BytesPacketBatch {
     packets: Vec<BytesPacket>,
 }

@@ -1,0 +1,15 @@
+[package]
+name = "seccomp-enforcer"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+edition.workspace = true
+
+[dependencies]
+libseccomp = "0.3"
+nix = "0.28"
+
+[lints]
+workspace = true

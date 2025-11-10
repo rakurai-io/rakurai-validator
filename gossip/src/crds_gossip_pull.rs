@@ -223,6 +223,7 @@ pub struct ProcessPullStats {
     pub failed_timeout: usize,
 }
 
+#[repr(C)]
 pub struct CrdsGossipPull {
     // Hash value and record time (ms) of the pull responses which failed to be
     // inserted in crds table; Preserved to stop the sender to send back the

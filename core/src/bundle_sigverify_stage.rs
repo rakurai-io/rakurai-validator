@@ -1,5 +1,8 @@
 use {
-    crate::packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    crate::{
+        banking_trace::TracedSender,
+        packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     solana_perf::sigverify::ed25519_verify_cpu,
     std::{
@@ -21,8 +24,10 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
     ) -> Self {
-        let thread = spawn(move || Self::sigverify_service(receiver, sender, exit));
+        let thread =
+            spawn(move || Self::sigverify_service(receiver, sender, exit, non_vote_sender));
         Self { thread }
     }
 
@@ -34,6 +39,7 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
     ) {
         let mut workspace = Vec::with_capacity(100);
 
@@ -100,7 +106,9 @@ impl BundleSigverifyStage {
                 // all the transactions in the bundle need to be verified to be valid
                 let len = bundle.len();
                 if num_packets_failed_sigverify_in_bundle == 0
-                    && sender.send(VerifiedPacketBundle::new(bundle)).is_err()
+                    && sender
+                        .send(VerifiedPacketBundle::new(bundle.clone()))
+                        .is_err()
                 {
                     warn!("failed to send verified packet bundle");
                     num_bundles_failed_send += 1;
@@ -109,6 +117,9 @@ impl BundleSigverifyStage {
                 } else if num_packets_failed_sigverify_in_bundle > 0 {
                     num_bundles_failed_sigverify += 1;
                     num_packets_failed_sigverify += num_packets_failed_sigverify_in_bundle;
+                }
+                else {
+                    let _ = non_vote_sender.send_bundle(Arc::new(bundle));
                 }
             }
 
