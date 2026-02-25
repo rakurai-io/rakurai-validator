@@ -67,8 +67,9 @@ jobs:
         - name: Generating SBOM for Scheduler repository
           uses: anchore/sbom-action@v0
           with:
-            path: core/src/banking_stage/rakurai_scheduler
+            path: target/release/librakurai_scheduler_1_0.so
             artifact-name: rakurai-scheduler-sbom.spdx
+            output-file: rakurai-scheduler-sbom.spdx
 
         - name: Generate SBOM attestation
           uses: actions/attest-sbom@v2
