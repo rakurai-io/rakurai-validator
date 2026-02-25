@@ -44,10 +44,15 @@ jobs:
           run: |
             git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
             cargo build --release -p rakurai-scheduler
+            VERSION="$(grep ^version Cargo.toml | head -n1 | sed 's/version *= *"\([^"]*\)"/\1/')"
+            VERSION_SAFE="${VERSION//./_}"
+            SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
+            VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
+            RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
+            mv target/release/librakurai_scheduler_1_0.so "target/release/${RENAMED_LIB}"
 
         - name: Running tx in/out test
           run: |
             export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
-            cargo build --release --workspace --exclude rakurai-scheduler --features "build_validator,local_build"
             ./tx_io_integrity_test.sh
           
