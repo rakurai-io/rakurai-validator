@@ -16,7 +16,6 @@ permissions:
 jobs:
     build:
         runs-on:
-          group: rakurai-validator-testing
           labels: big_github_runner_1
 
         steps:
