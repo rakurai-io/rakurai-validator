@@ -64,6 +64,18 @@ jobs:
           with:
             subject-path: 'target/release/librakurai_scheduler_1_0.so'
 
+        - name: Generating SBOM for Scheduler repository
+          uses: anchore/sbom-action@v0
+          with:
+            path: core/src/banking_stage/rakurai_scheduler
+            artifact-name: rakurai-scheduler-sbom.spdx
+
+        - name: Generate SBOM attestation
+          uses: actions/attest-sbom@v2
+          with:
+            subject-path: target/release/librakurai_scheduler_1_0.so
+            sbom-path: rakurai-scheduler-sbom.spdx
+
         - name: Running scheduler test with disabled file and network I/O using libseccomp
           run: |
             export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
