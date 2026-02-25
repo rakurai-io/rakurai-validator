@@ -67,15 +67,15 @@ jobs:
         - name: Generating SBOM for Scheduler repository
           uses: anchore/sbom-action@v0
           with:
-            file: target/release/librakurai_scheduler_1_0.so
-            artifact-name: rakurai-scheduler-sbom.spdx
-            output-file: rakurai-scheduler-sbom.spdx
+            path: target/release/
+            artifact-name: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
+            output-file: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
 
         - name: Generate SBOM attestation
           uses: actions/attest-sbom@v2
           with:
             subject-path: target/release/librakurai_scheduler_1_0.so
-            sbom-path: rakurai-scheduler-sbom.spdx
+            sbom-path: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
 
         - name: Running scheduler test with disabled file and network I/O using libseccomp
           run: |
