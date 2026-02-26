@@ -66,6 +66,7 @@ jobs:
 
         - name: Generating SBOM for Scheduler repository
           run: |
+            cargo install cargo-sbom --locked
             cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom-${{ matrix.os }}.json
 
         - name: Generate SBOM attestation
