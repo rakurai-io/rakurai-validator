@@ -67,13 +67,13 @@ jobs:
         - name: Generating SBOM for Scheduler repository
           run: |
             cargo install cargo-sbom --locked
-            cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom-${{ matrix.os }}.json
+            cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom.json
 
         - name: Generate SBOM attestation
           uses: actions/attest-sbom@v2
           with:
             subject-path: target/release/librakurai_scheduler_1_0.so
-            sbom-path: rakurai-scheduler-sbom-${{ matrix.os }}.json
+            sbom-path: rakurai-scheduler-sbom.json
 
         - name: Running scheduler test with disabled file and network I/O using libseccomp
           run: |
@@ -81,6 +81,17 @@ jobs:
             cargo build --release -p scheduler-test-setup --features "build_validator,local_build"
             ./target/release/scheduler-test-setup || echo "Test failed: scheduler test setup exited with non-zero code"
 
+        - name: Generate SHA512 checksum and GPG detached signature for scheduler binary
+          env:
+            GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
+            GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+          run: |
+            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+
+            sha512sum target/release/librakurai_scheduler_1_0.so | awk '{ print $1 }' > rakurai_scheduler.sha512
+
+            gpg --batch --yes --detach-sign --armor --local-user "$GPG_KEY_ID" rakurai_scheduler.sha512
+          
         - name: Compressing scheduler binary for deployment
           run: |
             TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
@@ -89,10 +100,12 @@ jobs:
             SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
             VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
             RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
-            mv target/release/librakurai_scheduler_1_0.so "target/release/${RENAMED_LIB}"
-            mkdir -p release
-            cp "rakurai-scheduler-sbom-${{ matrix.os }}.json" target/release/
-            tar -cvzf "$TAR_NAME" -C target/release "$RENAMED_LIB" "rakurai-scheduler-sbom-${{ matrix.os }}.json"
+            mv target/release/librakurai_scheduler_1_0.so "${RENAMED_LIB}"
+            mkdir attestations
+            cp "rakurai-scheduler-sbom.json" attestations/
+            cp "rakurai_scheduler.sha512" attestations/
+            cp "rakurai_scheduler.sha512.asc" attestations/
+            tar -cvzf "$TAR_NAME" "$RENAMED_LIB" "attestations/"
             
         - name: Deploying scheduler binary to backend server
           env:
