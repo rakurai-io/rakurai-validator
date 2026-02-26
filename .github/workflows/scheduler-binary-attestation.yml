@@ -75,12 +75,6 @@ jobs:
             subject-path: target/release/librakurai_scheduler_1_0.so
             sbom-path: rakurai-scheduler-sbom.json
 
-        - name: Running scheduler test with disabled file and network I/O using libseccomp
-          run: |
-            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
-            cargo build --release -p scheduler-test-setup --features "build_validator,local_build"
-            ./target/release/scheduler-test-setup || echo "Test failed: scheduler test setup exited with non-zero code"
-
         - name: Generate SHA512 checksum and GPG detached signature for scheduler binary
           run: |
             gpg --batch --import <<< ${{ secrets.GPG_PRIVATE_KEY }}
@@ -88,7 +82,13 @@ jobs:
             sha512sum target/release/librakurai_scheduler_1_0.so | awk '{ print $1 }' > rakurai_scheduler.sha512
 
             gpg --batch --yes --detach-sign --armor --local-user ${{ secrets.GPG_KEY_ID }} rakurai_scheduler.sha512
-          
+        
+        - name: Running scheduler test with disabled file and network I/O using libseccomp
+          run: |
+            export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:./target/release
+            cargo build --release -p scheduler-test-setup --features "build_validator,local_build"
+            ./target/release/scheduler-test-setup || echo "Test failed: scheduler test setup exited with non-zero code"
+
         - name: Compressing scheduler binary for deployment
           run: |
             TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
