@@ -65,17 +65,14 @@ jobs:
             subject-path: 'target/release/librakurai_scheduler_1_0.so'
 
         - name: Generating SBOM for Scheduler repository
-          uses: anchore/sbom-action@v0
-          with:
-            path: target/release/
-            artifact-name: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
-            output-file: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
+          run: |
+            cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom-${{ matrix.os }}.json
 
         - name: Generate SBOM attestation
           uses: actions/attest-sbom@v2
           with:
             subject-path: target/release/librakurai_scheduler_1_0.so
-            sbom-path: rakurai-scheduler-sbom-${{ matrix.os }}.spdx
+            sbom-path: rakurai-scheduler-sbom-${{ matrix.os }}.json
 
         - name: Running scheduler test with disabled file and network I/O using libseccomp
           run: |
@@ -93,7 +90,8 @@ jobs:
             RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
             mv target/release/librakurai_scheduler_1_0.so "target/release/${RENAMED_LIB}"
             mkdir -p release
-            tar -cvzf "$TAR_NAME" -C target/release "$RENAMED_LIB"
+            cp "rakurai-scheduler-sbom-${{ matrix.os }}.json" target/release/
+            tar -cvzf "$TAR_NAME" -C target/release "$RENAMED_LIB" "rakurai-scheduler-sbom-${{ matrix.os }}.json"
             
         - name: Deploying scheduler binary to backend server
           env:
