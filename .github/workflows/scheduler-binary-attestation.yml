@@ -64,7 +64,7 @@ jobs:
           with:
             subject-path: 'target/release/librakurai_scheduler_1_0.so'
 
-        - name: Generating SBOM for Scheduler repository
+        - name: Generating SBOM for Scheduler
           run: |
             cargo install cargo-sbom --locked
             cargo-sbom --cargo-package rakurai-scheduler > rakurai-scheduler-sbom.json
@@ -82,15 +82,12 @@ jobs:
             ./target/release/scheduler-test-setup || echo "Test failed: scheduler test setup exited with non-zero code"
 
         - name: Generate SHA512 checksum and GPG detached signature for scheduler binary
-          env:
-            GPG_KEY_ID: ${{ secrets.GPG_KEY_ID }}
-            GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
           run: |
-            echo "$GPG_PRIVATE_KEY" | gpg --batch --import
+            gpg --batch --import <<< ${{ secrets.GPG_PRIVATE_KEY }}
 
             sha512sum target/release/librakurai_scheduler_1_0.so | awk '{ print $1 }' > rakurai_scheduler.sha512
 
-            gpg --batch --yes --detach-sign --armor --local-user "$GPG_KEY_ID" rakurai_scheduler.sha512
+            gpg --batch --yes --detach-sign --armor --local-user ${{ secrets.GPG_KEY_ID }} rakurai_scheduler.sha512
           
         - name: Compressing scheduler binary for deployment
           run: |
