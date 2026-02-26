@@ -77,11 +77,11 @@ jobs:
 
         - name: Generate SHA512 checksum and GPG detached signature for scheduler binary
           run: |
-            gpg --batch --import <<< ${{ secrets.GPG_PRIVATE_KEY }}
+            gpg --batch --import <<< "${{ secrets.GPG_PRIVATE_KEY }}"
 
             sha512sum target/release/librakurai_scheduler_1_0.so | awk '{ print $1 }' > rakurai_scheduler.sha512
 
-            gpg --batch --yes --detach-sign --armor --local-user ${{ secrets.GPG_KEY_ID }} rakurai_scheduler.sha512
+            gpg --batch --yes --detach-sign --armor --local-user "${{ secrets.GPG_KEY_ID }}" rakurai_scheduler.sha512
         
         - name: Running scheduler test with disabled file and network I/O using libseccomp
           run: |
