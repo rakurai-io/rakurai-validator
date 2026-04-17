@@ -172,6 +172,8 @@ impl StandardBroadcastRun {
             &mut ProcessShredsStats::default(),
         )?;
         // Data and coding shreds are sent in a single batch.
+        let shred_receiver_socket =
+            solana_net_utils::bind_to_unspecified().expect("bind test shred_receiver_socket");
         let _ = self.transmit(
             &srecv,
             cluster_info,
@@ -180,6 +182,7 @@ impl StandardBroadcastRun {
             quic_endpoint_sender,
             &ArcSwap::default(),
             &ArcSwap::default(),
+            &shred_receiver_socket,
         );
         let _ = self.record(&brecv, blockstore);
         Ok(())
@@ -372,9 +375,11 @@ impl StandardBroadcastRun {
         insert_shreds_stats.update(new_insertion_shreds_stats, broadcast_shred_batch_info);
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn broadcast(
         &mut self,
         sock: BroadcastSocket,
+        shred_receiver_socket: &UdpSocket,
         cluster_info: &ClusterInfo,
         shreds: Arc<Vec<Shred>>,
         broadcast_shred_batch_info: Option<BroadcastShredBatchInfo>,
@@ -395,6 +400,7 @@ impl StandardBroadcastRun {
 
         broadcast_shreds(
             sock,
+            shred_receiver_socket,
             &shreds,
             &self.cluster_nodes_cache,
             &self.last_datapoint_submit,
@@ -474,10 +480,12 @@ impl BroadcastRun for StandardBroadcastRun {
         quic_endpoint_sender: &AsyncSender<(SocketAddr, Bytes)>,
         shredstream_receiver_address: &ArcSwap<Option<SocketAddr>>,
         shred_receiver_addresses: &ArcSwap<ShredReceiverAddresses>,
+        shred_receiver_socket: &UdpSocket,
     ) -> Result<()> {
         let (shreds, batch_info) = receiver.recv()?;
         self.broadcast(
             sock,
+            shred_receiver_socket,
             cluster_info,
             shreds,
             batch_info,
