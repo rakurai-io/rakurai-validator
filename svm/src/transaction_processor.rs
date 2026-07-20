@@ -57,7 +57,7 @@ use {
     solana_svm_feature_set::SVMFeatureSet,
     solana_svm_log_collector::LogCollector,
     solana_svm_measure::{measure::Measure, measure_us},
-    solana_svm_timings::{ExecuteTimingType, ExecuteTimings},
+    solana_svm_timings::{wallclock_timestamp_nanos, ExecuteGuiTimestamps, ExecuteTimingType, ExecuteTimings},
     solana_svm_transaction::{svm_message::SVMMessage, svm_transaction::SVMTransaction},
     solana_svm_type_overrides::sync::{Arc, RwLock, RwLockReadGuard},
     solana_transaction_context::transaction::{ExecutionRecord, TransactionContext},
@@ -145,6 +145,11 @@ pub struct TransactionProcessingConfig<'a> {
     ///
     /// This is a leader-side filtering policy. It must not be enabled for replay.
     pub strict_nonce_size_check: bool,
+    /// Capture per-transaction wallclock timestamps for the validator GUI.
+    pub capture_gui_timestamps: bool,
+    /// Tip payment accounts used to compute per-tx tip deltas for the GUI.
+    /// When `None`, tip tracking is skipped.
+    pub tip_accounts: Option<&'a HashSet<Pubkey>>,
 }
 
 /// Runtime environment for transaction batch processing.
@@ -499,6 +504,15 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // in the same batch may modify the same accounts. Transaction order is
         // preserved within entries written to the ledger.
         for (tx, check_result) in sanitized_txs.iter().zip(check_results) {
+            let mut tx_gui_timestamps = if config.capture_gui_timestamps {
+                ExecuteGuiTimestamps {
+                    timestamp_preload_end_nanos: wallclock_timestamp_nanos(),
+                    ..ExecuteGuiTimestamps::default()
+                }
+            } else {
+                ExecuteGuiTimestamps::default()
+            };
+
             let (validate_result, validate_fees_us) =
                 measure_us!(check_result.and_then(|tx_details| {
                     Self::validate_transaction_nonce_and_fee_payer(
@@ -515,6 +529,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 }));
             execute_timings
                 .saturating_add_in_place(ExecuteTimingType::ValidateFeesUs, validate_fees_us);
+            if config.capture_gui_timestamps {
+                tx_gui_timestamps.timestamp_start_nanos = wallclock_timestamp_nanos();
+            }
 
             let (load_result, single_load_us) = measure_us!(load_transaction(
                 &mut account_loader,
@@ -529,6 +546,9 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 measure_us!(balance_collector.collect_pre_balances(&mut account_loader, tx));
             execute_timings
                 .saturating_add_in_place(ExecuteTimingType::CollectBalancesUs, collect_balances_us);
+            if config.capture_gui_timestamps {
+                tx_gui_timestamps.timestamp_load_end_nanos = wallclock_timestamp_nanos();
+            }
 
             let (processing_result, single_execution_us) = measure_us!(match load_result {
                 TransactionLoadResult::NotLoaded(err) => Err(err),
@@ -589,6 +609,12 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     );
 
                     if program_cache_for_tx_batch.hit_max_limit {
+                        if config.capture_gui_timestamps {
+                            tx_gui_timestamps.timestamp_end_nanos = wallclock_timestamp_nanos();
+                            execute_timings
+                                .gui_timestamps_per_tx
+                                .push(tx_gui_timestamps);
+                        }
                         return LoadAndExecuteSanitizedTransactionsOutput {
                             error_metrics,
                             execute_timings,
@@ -662,6 +688,13 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                     *res = Err(TransactionError::CommitCancelled);
                 }
 
+                if config.capture_gui_timestamps {
+                    tx_gui_timestamps.timestamp_end_nanos = wallclock_timestamp_nanos();
+                    execute_timings
+                        .gui_timestamps_per_tx
+                        .push(tx_gui_timestamps);
+                }
+
                 // Preserve the failure that triggered the batch to abort.
                 processing_results.push(processing_result);
 
@@ -682,6 +715,12 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
             }
 
             processing_results.push(processing_result);
+            if config.capture_gui_timestamps {
+                tx_gui_timestamps.timestamp_end_nanos = wallclock_timestamp_nanos();
+                execute_timings
+                    .gui_timestamps_per_tx
+                    .push(tx_gui_timestamps);
+            }
         }
 
         // Skip eviction when there's no chance this particular tx batch has increased the size of
@@ -1082,6 +1121,18 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         // since this has been done before. See discussion in PR #4497 for details
         debug_assert!(transaction_accounts.len() == tx.account_keys().len());
 
+        fn tip_accounts_sum(
+            accounts: &[(Pubkey, AccountSharedData)],
+            tip_accounts: &HashSet<Pubkey>,
+        ) -> u64 {
+            accounts
+                .iter()
+                .filter(|(address, _)| tip_accounts.contains(address))
+                .fold(0u64, |sum, (_, account)| {
+                    sum.saturating_add(account.lamports())
+                })
+        }
+
         fn transaction_accounts_lamports_sum(
             accounts: &[(Pubkey, AccountSharedData)],
         ) -> Option<u128> {
@@ -1089,6 +1140,11 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 sum.checked_add(u128::from(account.lamports()))
             })
         }
+
+        let tip_accounts_before_tx = config
+            .tip_accounts
+            .map(|tip_accounts| tip_accounts_sum(&transaction_accounts, tip_accounts))
+            .unwrap_or(0);
 
         let lamports_before_tx =
             transaction_accounts_lamports_sum(&transaction_accounts).unwrap_or(0);
@@ -1246,6 +1302,14 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
         execute_timings.details.total_account_count += loaded_transaction.accounts.len() as u64;
         execute_timings.details.changed_account_count += touched_account_count as u64;
 
+        let tips = config
+            .tip_accounts
+            .map(|tip_accounts| {
+                tip_accounts_sum(&loaded_transaction.accounts, tip_accounts)
+                    .saturating_sub(tip_accounts_before_tx)
+            })
+            .unwrap_or(0);
+
         let return_data = if config.recording_config.enable_return_data_recording
             && !return_data.data.is_empty()
         {
@@ -1262,6 +1326,7 @@ impl<FG: ForkGraph> TransactionBatchProcessor<FG> {
                 return_data,
                 executed_units,
                 accounts_deltas,
+                tips,
             },
             loaded_transaction,
             programs_modified_by_tx: program_cache_for_tx_batch.drain_modified_entries(),

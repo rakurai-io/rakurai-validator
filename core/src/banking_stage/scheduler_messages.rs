@@ -1,5 +1,5 @@
 use {
-    crate::banking_stage::consumer::RetryableIndex,
+    crate::{banking_stage::consumer::RetryableIndex, gui::GuiTxnScheduleInfo},
     jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_clock::{Epoch, Slot},
     solana_transaction_error::TransactionError,
@@ -55,6 +55,7 @@ pub struct ConsumeWork<Tx> {
     pub revert_on_error: bool,
     pub respond_with_extra_info: bool,
     pub max_schedule_slot: Option<Slot>,
+    pub gui_schedule_info: Vec<GuiTxnScheduleInfo>,
 }
 
 /// Message: [Worker -> Scheduler]

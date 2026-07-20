@@ -19,6 +19,14 @@ use {
             bundle_consumer::BundleConsumer,
             bundle_storage::{BundleStorage, BundleStorageEntry, BundleStorageError},
         },
+        gui::{
+            metrics::GuiTxnTpuSource,
+            slot_txn::{
+                capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
+                GuiTxnEvent,
+            },
+            GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_BUNDLE,
+        },
         packet_bundle::VerifiedPacketBundle,
         proxy::block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig},
         tip_manager::TipManager,
@@ -40,10 +48,13 @@ use {
         bank::Bank, bank_forks::BankForks, prioritization_fee_cache::PrioritizationFeeCache,
         vote_sender_types::ReplayVoteSender,
     },
+    solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_signature::Signature,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_transaction::TransactionError,
     std::{
         collections::{HashMap, VecDeque},
+        net::Ipv4Addr,
         num::{NonZeroUsize, Saturating},
         sync::{
             Arc, RwLock,
@@ -85,6 +96,7 @@ const MAX_BUNDLE_RETRY_DURATION: Duration = Duration::from_millis(5);
 const SLOT_BOUNDARY_CHECK_PERIOD: Duration = Duration::from_millis(10);
 
 // Stats emitted periodically
+#[derive(Clone)]
 pub struct BundleStageLoopMetrics {
     last_report: Instant,
     id: u32,
@@ -104,7 +116,7 @@ pub struct BundleStageLoopMetrics {
     cost_model_buffered_bundles_count: Saturating<u64>,
 
     // number of bundles dropped during insertion
-    num_bundles_dropped: Saturating<u64>,
+    pub num_bundles_dropped: Saturating<u64>,
 
     // timings
     receive_and_buffer_bundles_elapsed_us: Saturating<u64>,
@@ -115,14 +127,14 @@ pub struct BundleStageLoopMetrics {
     num_bundles_dropped_packet_marked_discard: Saturating<u64>,
     num_bundles_dropped_packet_filter_error: Saturating<u64>,
     num_bundles_dropped_bundle_too_large: Saturating<u64>,
-    num_bundles_dropped_duplicate_transaction: Saturating<u64>,
+    pub num_bundles_dropped_duplicate_transaction: Saturating<u64>,
     num_bundles_dropped_duplicate_nonce: Saturating<u64>,
     num_bundles_dropped_zero_tip_amount: Saturating<u64>,
     num_bundles_dropped_block_hash_not_found: Saturating<u64>,
     num_bundles_dropped_already_processed: Saturating<u64>,
     num_bundles_dropped_transaction_check_failed: Saturating<u64>,
 
-    tip_programs_error: Saturating<u64>,
+    pub tip_programs_error: Saturating<u64>,
     bundle_lock_errors: Saturating<u64>,
     bundles_processed: Saturating<u64>,
 
@@ -257,8 +269,13 @@ impl BundleStageLoopMetrics {
         self.process_buffered_bundles_elapsed_us += count;
     }
 
-    fn maybe_report(&mut self, report_interval_ms: u64) {
+    fn maybe_report(&mut self, report_interval_ms: u64, gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>) {
         if self.last_report.elapsed().as_millis() >= report_interval_ms as u128 && self.has_data() {
+            if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleStage(self.clone())) {
+                    warn!("failed to send BundleStage gui metrics: {err}");
+                }
+            }
             datapoint_info!(
                 "bundle_stage-loop_stats",
                 ("id", self.id, i64),
@@ -708,6 +725,8 @@ impl BundleStage {
         scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
         bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self::start_bundle_thread(
             cluster_info,
@@ -729,6 +748,8 @@ impl BundleStage {
             scheduler_postpack_conf_signatures,
             block_engine_config,
             bundle_lifecycle_dump_enabled,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         )
     }
 
@@ -757,6 +778,8 @@ impl BundleStage {
         scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
         bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         let committer = Committer::new(
             transaction_status_sender,
@@ -767,8 +790,12 @@ impl BundleStage {
 
         let decision_maker = DecisionMaker::from(&poh_recorder.clone());
 
-        let consumer =
-            BundleConsumer::new(committer, transaction_recorder, log_message_bytes_limit);
+        let consumer = BundleConsumer::new(
+            committer,
+            transaction_recorder,
+            log_message_bytes_limit,
+            gui_txn_event_sender.is_some(),
+        );
 
         let block_builder_fee_info = block_builder_fee_info.clone();
         let cluster_info = cluster_info.clone();
@@ -791,6 +818,8 @@ impl BundleStage {
                     scheduler_postpack_conf_signatures,
                     block_engine_config,
                     bundle_lifecycle_dump_enabled,
+                    gui_core_metrics_sender,
+                    gui_txn_event_sender,
                 );
             })
             .unwrap();
@@ -815,6 +844,8 @@ impl BundleStage {
         scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
         bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) {
         let mut last_metrics_update = Instant::now();
         let mut bundle_storage = BundleStorage::with_capacity(100_000);
@@ -849,6 +880,8 @@ impl BundleStage {
                         &mut prev_decision,
                         &mut turn_started,
                         &bundle_lifecycle_dump_enabled,
+                        &gui_core_metrics_sender,
+                        &gui_txn_event_sender,
                     ));
                 bundle_stage_metrics.increment_process_buffered_bundles_elapsed_us(
                     process_buffered_packets_time_us,
@@ -888,7 +921,7 @@ impl BundleStage {
                 bundle_storage.cost_model_buffered_bundles_len() as u64,
             );
 
-            bundle_stage_metrics.maybe_report(20);
+            bundle_stage_metrics.maybe_report(20, gui_core_metrics_sender.as_ref());
         }
     }
 
@@ -1009,6 +1042,8 @@ impl BundleStage {
         prev_decision: &mut BufferedPacketsDecision,
         turn_started: &mut bool,
         bundle_lifecycle_dump_enabled: &AtomicBool,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
     ) {
         let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
 
@@ -1049,6 +1084,8 @@ impl BundleStage {
                     consume_worker_metrics,
                     scheduler_postpack_conf_signatures,
                     bundle_id_to_stats,
+                    gui_core_metrics_sender,
+                    gui_txn_event_sender,
                 );
             }
             // BufferedPacketsDecision::Forward means the leader is slot is far away.
@@ -1078,6 +1115,8 @@ impl BundleStage {
         consume_worker_metrics: &ConsumeWorkerMetrics,
         _scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
         bundle_id_to_stats: &mut HashMap<String, BundleExecutionStats>,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
     ) {
         // Changing this to 1 to avoid locking a larger batch of bundles
         const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
@@ -1093,6 +1132,7 @@ impl BundleStage {
                 cluster_info,
                 block_builder_fee_info,
                 consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
             )
             .is_err()
             {
@@ -1147,7 +1187,13 @@ impl BundleStage {
             let Some(bundle) = bundles.pop_front() else {
                 break;
             };
-            let result = Self::process_bundle(bank, &bundle, consumer, consume_worker_metrics);
+            let result = Self::process_bundle(
+                bank,
+                &bundle,
+                consumer,
+                consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
+            );
             let _ = bundle_account_locker.unlock_bundle(&bundle.transactions, bank);
             match result {
                 Ok(output) => {
@@ -1185,7 +1231,7 @@ impl BundleStage {
                     );
                 }
             }
-            consume_worker_metrics.maybe_report_and_reset(false);
+            consume_worker_metrics.maybe_report_and_reset(false, gui_core_metrics_sender.as_ref());
         }
 
         debug_assert!(
@@ -1219,6 +1265,8 @@ impl BundleStage {
         consume_worker_metrics: &ConsumeWorkerMetrics,
         scheduler_postpack_conf_signatures: &PostPackConfirmationSignatures,
         bundle_id_to_stats: &mut HashMap<String, BundleExecutionStats>,
+        gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
     ) {
         // Changing this to 1 to avoid locking a larger batch of bundles
         const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(32).unwrap();
@@ -1234,6 +1282,7 @@ impl BundleStage {
                 cluster_info,
                 block_builder_fee_info,
                 consume_worker_metrics,
+                gui_txn_event_sender.as_ref(),
             )
             .is_err()
             {
@@ -1415,7 +1464,7 @@ impl BundleStage {
                     }
                 }
             };
-            consume_worker_metrics.maybe_report_and_reset(false);
+            consume_worker_metrics.maybe_report_and_reset(false, gui_core_metrics_sender.as_ref());
         }
 
         debug_assert!(
@@ -1442,6 +1491,7 @@ impl BundleStage {
         cluster_info: &Arc<ClusterInfo>,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let keypair = cluster_info.keypair();
 
@@ -1452,6 +1502,7 @@ impl BundleStage {
             tip_manager,
             consume_worker_metrics,
             &keypair,
+            gui_txn_event_sender,
         )?;
 
         Self::handle_crank_tip_programs(
@@ -1462,6 +1513,7 @@ impl BundleStage {
             block_builder_fee_info,
             consume_worker_metrics,
             &keypair,
+            gui_txn_event_sender,
         )?;
 
         Ok(())
@@ -1474,6 +1526,7 @@ impl BundleStage {
         tip_manager: &TipManager,
         consume_worker_metrics: &ConsumeWorkerMetrics,
         keypair: &Keypair,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let initialize_tip_program_transactions = tip_manager
             .get_initialize_tip_programs_bundle(bank, keypair)
@@ -1493,13 +1546,26 @@ impl BundleStage {
         let max_ages: SmallVec<[MaxAge; 2]> =
             SmallVec::from_elem(max_age, initialize_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&initialize_tip_program_transactions, bank);
-        let output = consumer.process_and_record_aged_transactions(
+        let arrival_timestamp_nanos = gui_txn_event_sender
+        .is_some()
+        .then(wallclock_timestamp_nanos)
+        .unwrap_or(0);
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &initialize_tip_program_transactions,
             &max_ages,
             MAX_BUNDLE_RETRY_DURATION,
         );
         let _ = bundle_account_locker.unlock_bundle(&initialize_tip_program_transactions, bank);
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &initialize_tip_program_transactions,
+            &mut output,
+            arrival_timestamp_nanos,
+            u32::from(Ipv4Addr::LOCALHOST),
+            gui_txn_event_sender,
+        );
 
         consume_worker_metrics.update_for_consume(&output);
         consume_worker_metrics.set_has_data(true);
@@ -1525,6 +1591,7 @@ impl BundleStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         consume_worker_metrics: &ConsumeWorkerMetrics,
         keypair: &Keypair,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<()> {
         let block_builder_fee_info = block_builder_fee_info.load();
         let crank_tip_program_transactions = tip_manager
@@ -1546,13 +1613,26 @@ impl BundleStage {
         let max_ages: SmallVec<[MaxAge; 2]> =
             SmallVec::from_elem(max_age, crank_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&crank_tip_program_transactions, bank);
-        let output = consumer.process_and_record_aged_transactions(
+        let arrival_timestamp_nanos = gui_txn_event_sender
+        .is_some()
+        .then(wallclock_timestamp_nanos)
+        .unwrap_or(0);
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &crank_tip_program_transactions,
             &max_ages,
             MAX_BUNDLE_RETRY_DURATION,
         );
         let _ = bundle_account_locker.unlock_bundle(&crank_tip_program_transactions, bank);
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &crank_tip_program_transactions,
+            &mut output,
+            arrival_timestamp_nanos,
+            u32::from(Ipv4Addr::LOCALHOST),
+            gui_txn_event_sender,
+        );
 
         consume_worker_metrics.update_for_consume(&output);
         consume_worker_metrics.set_has_data(true);
@@ -1607,21 +1687,81 @@ impl BundleStage {
         Err(BundleExecutionError::ErrorNonRetryable)
     }
 
+    fn emit_gui_txn_batch(
+        bank: &Bank,
+        txs: &[impl TransactionWithMeta],
+        output: &mut ProcessTransactionBatchOutput,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
+    ) {
+        let Some(sender) = gui_txn_event_sender else {
+            return;
+        };
+        if txs.is_empty() {
+            return;
+        }
+
+        let microblock_end_timestamp_nanos = wallclock_timestamp_nanos();
+        let execute_output = &output.execute_and_commit_transactions_output;
+        let mb_starts = &output.microblock_start_timestamps_nanos;
+        let schedule_info: Vec<GuiTxnScheduleInfo> = (0..txs.len())
+            .map(|i| GuiTxnScheduleInfo {
+                bank_idx: GUI_TXN_BANK_IDX_BUNDLE,
+                microblock_start_timestamp_nanos: mb_starts.get(i).copied().unwrap_or(0),
+                timestamp_arrival_nanos: arrival_timestamp_nanos,
+                source_ipv4,
+                source_tpu: GuiTxnTpuSource::Bundle,
+                ..GuiTxnScheduleInfo::default()
+            })
+            .collect();
+        let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(txs);
+        if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+            slot: bank.slot(),
+            gui_timestamps_per_tx: execute_output
+                .execute_and_commit_timings
+                .execute_timings
+                .gui_timestamps_per_tx
+                .clone(),
+            microblock_end_timestamp_nanos,
+            gui_schedule_info: schedule_info,
+            compute_units_requested: std::mem::take(&mut output.compute_units_requested),
+            commit_details: gui_commit_details_for_batch(
+                &execute_output.commit_transactions_result,
+                txs.len(),
+            ),
+            signatures,
+            is_simple_vote,
+        })) {
+            warn!("failed to send TxnBatch gui event: {err}");
+        }
+    }
+
     fn process_bundle(
         bank: &Arc<Bank>,
         bundle: &BundleStorageEntry,
         consumer: &mut BundleConsumer,
         consume_worker_metrics: &ConsumeWorkerMetrics,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
     ) -> BundleExecutionResult<ProcessTransactionBatchOutput> {
         if bank.is_complete() {
             return Err(BundleExecutionError::ErrorRetryable);
         }
 
-        let output = consumer.process_and_record_aged_transactions(
+        let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &bundle.transactions,
             &bundle.max_ages,
             MAX_BUNDLE_RETRY_DURATION,
+        );
+
+        Self::emit_gui_txn_batch(
+            bank,
+            &bundle.transactions,
+            &mut output,
+            bundle.timestamp_arrival_nanos,
+            bundle.source_ipv4,
+            gui_txn_event_sender,
         );
 
         consume_worker_metrics.update_for_consume(&output);

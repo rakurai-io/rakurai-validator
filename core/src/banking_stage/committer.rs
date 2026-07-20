@@ -4,6 +4,7 @@ use {
     crossbeam_channel::Sender,
     itertools::Itertools,
     solana_cost_model::cost_model::CostModel,
+    solana_fee_structure::FeeDetails,
     solana_ledger::{
         blockstore_processor::TransactionStatusSender,
         transaction_balances::compile_collected_balances,
@@ -33,6 +34,9 @@ pub enum CommitTransactionDetails {
         loaded_accounts_data_size: u32,
         fee_payer_post_balance: u64,
         result: Result<(), TransactionError>,
+        fee_details: FeeDetails,
+        /// Tip-account balance increase (raw, before commission).
+        tips: u64,
     },
     NotCommitted(TransactionError),
 }
@@ -97,6 +101,8 @@ impl Committer {
                         .loaded_accounts_data_size,
                     result: committed_tx.status.clone(),
                     fee_payer_post_balance: committed_tx.fee_payer_post_balance,
+                    fee_details: committed_tx.fee_details,
+                    tips: committed_tx.tips,
                 },
                 Err(err) => CommitTransactionDetails::NotCommitted(err.clone()),
             })

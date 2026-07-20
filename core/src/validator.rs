@@ -1,6 +1,8 @@
 //! The `validator` module hosts all the validator microservices.
 
-use crate::banking_stage::{RakuraiConfig, reward_distributor::RewardDistributionConfig};
+use crate::banking_stage::{
+    RakuraiConfig, reward_distributor::RewardDistributionConfig,
+};
 pub use solana_perf::report_target_features;
 use {crate::tip_manager::TipManagerConfig, solana_turbine::ShredReceiverAddresses};
 
@@ -19,6 +21,7 @@ use {
             tower_storage::{NullTowerStorage, TowerStorage},
         },
         forwarding_stage::ForwardingClientConfig,
+        gui::{Gui, GuiContext, gui_bank_tile_count},
         multicast_shred_check_service::{
             MulticastShredCheckService, multicast_shred_addresses_for_cluster,
         },
@@ -164,7 +167,7 @@ use {
         borrow::Cow,
         cmp,
         collections::{HashMap, HashSet},
-        net::{Ipv4Addr, SocketAddr, SocketAddrV4},
+        net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4},
         num::{NonZeroU64, NonZeroUsize},
         path::{Path, PathBuf},
         str::FromStr,
@@ -465,6 +468,10 @@ pub struct ValidatorConfig {
         crate::banking_stage::PostPackConfirmationActiveEntries,
     pub post_pack_confirmation_uuid_blocklist:
         crate::banking_stage::PostPackConfirmationUuidBlocklist,
+    pub enable_gui: bool,
+    pub gui_listen_addr: String,
+    pub gui_max_websocket_connections: usize,
+    pub gui_ip_whitelist: Arc<RwLock<HashSet<IpAddr>>>,
 }
 
 impl ValidatorConfig {
@@ -595,6 +602,12 @@ impl ValidatorConfig {
             post_pack_confirmation_uuid_blocklist: Arc::new(arc_swap::ArcSwap::from_pointee(
                 Vec::new(),
             )),
+            enable_gui: false,
+            gui_listen_addr: "127.0.0.1:8765".to_string(),
+            gui_max_websocket_connections: 5,
+            gui_ip_whitelist: Arc::new(RwLock::new(HashSet::from([IpAddr::from(
+                [127, 0, 0, 1],
+            )]))),
         }
     }
 
@@ -799,6 +812,7 @@ pub struct Validator {
     // We don't wait for its JoinHandle here because ownership and shutdown
     // are managed elsewhere. This variable is intentionally unused.
     _tpu_client_next_runtime: Option<TokioRuntime>,
+    gui_service: Gui,
 }
 
 impl Validator {
@@ -1600,6 +1614,47 @@ impl Validator {
             (None, None, None, None, None)
         };
 
+        let (gui_core_metrics_sender,
+            gui_core_metrics_receiver,
+            gui_streamer_metrics_sender,
+            gui_streamer_metrics_receiver,
+            gui_txn_event_sender,
+            gui_txn_event_receiver,
+        ) = if config.enable_gui {
+            let (gui_core_metrics_sender, gui_core_metrics_receiver) = bounded(4096);
+            let (gui_streamer_metrics_sender, gui_streamer_metrics_receiver) = bounded(4096);
+            let (gui_txn_event_sender, gui_txn_event_receiver) = bounded(65_536);
+            (
+                Some(gui_core_metrics_sender),
+                Some(gui_core_metrics_receiver),
+                Some(gui_streamer_metrics_sender),
+                Some(gui_streamer_metrics_receiver),
+                Some(gui_txn_event_sender),
+                Some(gui_txn_event_receiver),
+            )
+        } else {
+            (None, None, None, None, None, None)
+        };
+
+        let shared_leader_state = poh_recorder.read().unwrap().shared_leader_state();
+        let gui_context = GuiContext {
+            identity: Arc::new(arc_swap::ArcSwap::from_pointee(cluster_info.id())),
+            bank_forks: bank_forks.clone(),
+            bank_tile_count: gui_bank_tile_count(config.block_production_num_workers.get()),
+        };
+        let gui_service = Gui::new(
+            gui_core_metrics_receiver,
+            gui_streamer_metrics_receiver,
+            gui_txn_event_receiver,
+            shared_leader_state,
+            gui_context,
+            exit.clone(),
+            &config.gui_listen_addr,
+            config.gui_max_websocket_connections,
+            config.gui_ip_whitelist.clone(),
+            Some(key_notifiers.clone()),
+        );
+
         let gossip_service = GossipService::new(
             &cluster_info,
             Some(epoch_specs),
@@ -1928,6 +1983,9 @@ impl Validator {
             config.postpack_confirmation_config.clone(),
             config.postpack_confirmation_active_entries.clone(),
             config.post_pack_confirmation_uuid_blocklist.clone(),
+            gui_core_metrics_sender.clone(),
+            gui_streamer_metrics_sender.clone(),
+            gui_txn_event_sender.clone(),
         );
 
         datapoint_info!(
@@ -1968,6 +2026,7 @@ impl Validator {
             relayer_config: config.relayer_config.clone(),
             shred_receiver_addresses: config.shred_receiver_addresses.clone(),
             shred_retransmit_receiver_addresses: config.shred_retransmit_receiver_addresses.clone(),
+            gui_ip_whitelist: config.gui_ip_whitelist.clone(),
         });
 
         let multicast_shred_addresses = (!config.disable_multicast_shred_check)
@@ -2023,6 +2082,7 @@ impl Validator {
             accounts_background_service,
             xdp_transmitter,
             _tpu_client_next_runtime: tpu_client_next_runtime,
+            gui_service,
         })
     }
 
@@ -2187,6 +2247,7 @@ impl Validator {
             .expect("snapshot_packager_service");
 
         self.gossip_service.join().expect("gossip_service");
+        self.gui_service.join().expect("gui_service");
         self.serve_repair_service
             .join()
             .expect("serve_repair_service");

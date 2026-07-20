@@ -12,6 +12,7 @@ use {
     solana_measure::{measure::Measure, measure_us},
     solana_pubkey::Pubkey,
     solana_runtime_transaction::sanitize_config::sanitize_config,
+    solana_svm_timings::wallclock_timestamp_nanos,
     std::{
         collections::HashSet,
         num::Saturating,
@@ -23,16 +24,19 @@ use {
 pub struct VotePacketReceiver {
     banking_packet_receiver: BankingPacketReceiver,
     filter_keys: Arc<HashSet<Pubkey>>,
+    capture_gui_timestamps: bool,
 }
 
 impl VotePacketReceiver {
     pub fn new(
         banking_packet_receiver: BankingPacketReceiver,
         filter_keys: Arc<HashSet<Pubkey>>,
+        capture_gui_timestamps: bool,
     ) -> Self {
         Self {
             banking_packet_receiver,
             filter_keys,
+            capture_gui_timestamps,
         }
     }
 
@@ -79,7 +83,7 @@ impl VotePacketReceiver {
         packet_count_upperbound: usize,
     ) -> Result<
         (
-            Vec<SanitizedTransactionView<SharedBytes>>,
+            Vec<(SanitizedTransactionView<SharedBytes>, u32)>,
             PacketReceiverStats,
         ),
         RecvTimeoutError,
@@ -113,6 +117,14 @@ impl VotePacketReceiver {
             .flat_map(|batches| batches.iter())
             .flat_map(|batch| batch.iter())
             .filter_map(|pkt| {
+                let source_ipv4 = if self.capture_gui_timestamps {
+                    match pkt.meta().addr {
+                        std::net::IpAddr::V4(v4) => u32::from(v4),
+                        std::net::IpAddr::V6(_) => 0,
+                    }
+                } else {
+                    0
+                };
                 match SanitizedTransactionView::try_new_sanitized(
                     Arc::new(pkt.data(..)?.to_vec()),
                     // Vote instructions are created in the validator code, and they are not
@@ -125,7 +137,7 @@ impl VotePacketReceiver {
                             packet_stats.filtered_account_key_count += 1;
                             None
                         } else {
-                            Some(pkt)
+                            Some((pkt, source_ipv4))
                         }
                     }
                     Err(err) => {
@@ -182,7 +194,7 @@ impl VotePacketReceiver {
 
     fn buffer_packets(
         &self,
-        deserialized_packets: Vec<SanitizedTransactionView<SharedBytes>>,
+        deserialized_packets: Vec<(SanitizedTransactionView<SharedBytes>, u32)>,
         packet_stats: PacketReceiverStats,
         vote_storage: &mut VoteStorage,
         vote_source: VoteSource,
@@ -199,6 +211,7 @@ impl VotePacketReceiver {
         Self::push_unprocessed(
             vote_storage,
             vote_source,
+            self.capture_gui_timestamps,
             deserialized_packets,
             &mut dropped_packets_count,
             &mut newly_buffered_packets_count,
@@ -232,7 +245,8 @@ impl VotePacketReceiver {
     fn push_unprocessed(
         vote_storage: &mut VoteStorage,
         vote_source: VoteSource,
-        deserialized_packets: Vec<SanitizedTransactionView<SharedBytes>>,
+        capture_gui_timestamps: bool,
+        deserialized_packets: Vec<(SanitizedTransactionView<SharedBytes>, u32)>,
         dropped_packets_count: &mut Saturating<usize>,
         newly_buffered_packets_count: &mut usize,
         banking_stage_stats: &mut BankingStageStats,
@@ -247,8 +261,15 @@ impl VotePacketReceiver {
             slot_metrics_tracker
                 .increment_newly_buffered_packets_count(deserialized_packets.len() as u64);
 
-            let vote_batch_insertion_metrics =
-                vote_storage.insert_batch(vote_source, deserialized_packets.into_iter());
+            // One syscall per received batch: when these votes entered the vote worker buffer.
+            let batch_arrival_timestamp_nanos = capture_gui_timestamps
+                .then(wallclock_timestamp_nanos)
+                .unwrap_or(0);
+            let vote_batch_insertion_metrics = vote_storage.insert_batch(
+                vote_source,
+                batch_arrival_timestamp_nanos,
+                deserialized_packets.into_iter(),
+            );
             slot_metrics_tracker
                 .accumulate_vote_batch_insertion_metrics(&vote_batch_insertion_metrics);
             *dropped_packets_count += vote_batch_insertion_metrics.total_dropped_packets();
@@ -301,7 +322,7 @@ mod tests {
             .send(Arc::new(vec![PacketBatch::from(vec![vote_packet])]))
             .unwrap();
 
-        let mut receiver = VotePacketReceiver::new(receiver, filter_keys);
+        let mut receiver = VotePacketReceiver::new(receiver, filter_keys, false);
         let genesis_config =
             genesis_utils::create_genesis_config_with_vote_accounts(100, &[keypairs], vec![200])
                 .genesis_config;

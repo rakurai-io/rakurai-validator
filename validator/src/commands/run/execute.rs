@@ -989,6 +989,26 @@ pub fn execute(
     let oms_connector = matches.is_present("oms_connector");
     info!("oms_connector set to {oms_connector}");
 
+    let enable_gui = matches.is_present("enable_gui");
+    info!("enable_gui set to {enable_gui}");
+
+    let gui_listen_addr = value_t_or_exit!(matches, "gui_listen_address", String);
+    info!("gui_listen_address set to {gui_listen_addr}");
+
+    let gui_max_websocket_connections =
+        value_t_or_exit!(matches, "gui_max_websocket_connections", usize);
+    info!("gui_max_websocket_connections set to {gui_max_websocket_connections}");
+
+    let mut gui_ip_whitelist = HashSet::default();
+    if enable_gui {
+        if let Ok(addr) = gui_listen_addr.parse::<SocketAddr>() {
+            if addr.ip().is_loopback() {
+                gui_ip_whitelist.insert(addr.ip());
+            }
+        }
+    }
+    let gui_ip_whitelist = Arc::new(RwLock::new(gui_ip_whitelist));
+
     let mut validator_config = ValidatorConfig {
         log_config,
         require_tower: matches.is_present("require_tower"),
@@ -1135,6 +1155,10 @@ pub fn execute(
         postpack_confirmation_config: postpack_confirmation_config.clone(),
         postpack_confirmation_active_entries: postpack_confirmation_active_entries.clone(),
         post_pack_confirmation_uuid_blocklist: post_pack_confirmation_uuid_blocklist.clone(),
+        enable_gui,
+        gui_listen_addr,
+        gui_max_websocket_connections,
+        gui_ip_whitelist,
     };
     validator_config
         .block_production_method

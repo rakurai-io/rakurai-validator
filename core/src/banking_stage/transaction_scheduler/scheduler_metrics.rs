@@ -1,11 +1,13 @@
 use {
     super::scheduler::SchedulingSummary,
+    crate::gui::GuiCoreMetrics,
     solana_clock::Slot,
     solana_time_utils::AtomicInterval,
     std::{
         num::Saturating,
         time::{Duration, Instant},
     },
+    crossbeam_channel::Sender,
 };
 
 pub struct SchedulerCountMetrics {
@@ -42,9 +44,15 @@ impl SchedulerCountMetrics {
             .maybe_report_and_reset(slot, &self.id, bam_controller);
     }
 
-    pub fn maybe_report_and_reset_interval(&mut self, should_report: bool, bam_controller: bool) {
+    pub fn maybe_report_and_reset_interval(
+        &mut self,
+        should_report: bool,
+        bam_controller: bool,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+        report_interval_ms: u64,
+    ) -> bool {
         self.interval
-            .maybe_report_and_reset(should_report, &self.id, bam_controller);
+            .maybe_report_and_reset(should_report, &self.id, bam_controller, gui_core_metrics_sender, report_interval_ms)
     }
 
     pub fn interval_has_data(&self) -> bool {
@@ -64,7 +72,7 @@ pub struct SlotSchedulerCountMetrics {
     pub metrics: SchedulerCountMetricsInner,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct SchedulerCountMetricsInner {
     /// Number of packets received.
     pub num_received: Saturating<usize>,
@@ -112,18 +120,33 @@ pub struct SchedulerCountMetricsInner {
 }
 
 impl IntervalSchedulerCountMetrics {
-    fn maybe_report_and_reset(&mut self, should_report: bool, id: &str, bam_controller: bool) {
+    fn maybe_report_and_reset(
+        &mut self,
+        should_report: bool,
+        id: &str,
+        bam_controller: bool,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+        report_interval_ms: u64,
+    ) -> bool {
         let name = if bam_controller {
             "bam_banking_stage_scheduler_counts"
         } else {
             "banking_stage_scheduler_counts"
         };
-        const REPORT_INTERVAL_MS: u64 = 1000;
-        if self.interval.should_update(REPORT_INTERVAL_MS) {
+        if self.interval.should_update(report_interval_ms) {
+            let report_interval_passed = true;
             if should_report {
+                if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                    if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::StandardScheduler(self.metrics.clone())) {
+                        warn!("failed to send StandardScheduler gui metrics: {err}");
+                    }
+                }
                 self.metrics.report(name, None, id);
             }
             self.metrics.reset();
+            report_interval_passed
+        } else {
+            false
         }
     }
 }

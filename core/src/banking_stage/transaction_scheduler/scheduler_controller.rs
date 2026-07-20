@@ -26,8 +26,10 @@ use {
             },
         },
         validator::SchedulerPacing,
+        gui::GuiCoreMetrics,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
+    crossbeam_channel::Sender,
     solana_clock::DEFAULT_MS_PER_SLOT,
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
@@ -180,6 +182,7 @@ where
     bam_enabled: Arc<AtomicU8>,
     /// Client mode.
     client_mode: Arc<Mutex<ClientMode>>,
+    gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
 }
 
 impl<R, S> SchedulerController<R, S>
@@ -200,6 +203,7 @@ where
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
         client_mode: Arc<Mutex<ClientMode>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         Self::new_with_metrics_id(
             0,
@@ -214,6 +218,7 @@ where
             bam_controller,
             bam_enabled,
             client_mode,
+            gui_core_metrics_sender,
         )
     }
 
@@ -231,6 +236,7 @@ where
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
         client_mode: Arc<Mutex<ClientMode>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         SchedulerController::new_with_metrics(
             exit,
@@ -247,6 +253,7 @@ where
             bam_controller,
             bam_enabled,
             client_mode,
+            gui_core_metrics_sender,
         )
     }
 
@@ -266,6 +273,7 @@ where
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
         client_mode: Arc<Mutex<ClientMode>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         priority_floor.clear();
         let container_capacity = TOTAL_BUFFERED_PACKETS;
@@ -288,6 +296,7 @@ where
             bam_controller,
             bam_enabled,
             client_mode,
+            gui_core_metrics_sender,
         }
     }
 
@@ -305,6 +314,12 @@ where
         }
         #[cfg(feature = "build_validator")]
         let mut decision_state: DecisionState;
+
+        let report_interval_ms = if self.gui_core_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
 
         while !self.exit.load(Ordering::Relaxed) {
             let now = Instant::now();
@@ -410,11 +425,20 @@ where
                 count_metrics.update_priority_stats(priority_min_max);
             });
             self.update_scheduler_priority_floor(receiving_stats.num_dropped_on_capacity);
-            self.count_metrics
-                .maybe_report_and_reset_interval(should_report, self.bam_controller);
+            let report_interval_passed = self
+                .count_metrics
+                .maybe_report_and_reset_interval(should_report, self.bam_controller, self.gui_core_metrics_sender.as_ref(), report_interval_ms);
+            if report_interval_passed {
+                if let Some(gui_core_metrics_sender) = self.gui_core_metrics_sender.as_ref() {
+                    let pack_retained = self.container.len() as u64;
+                    if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::PackRetained(pack_retained)) {
+                        warn!("failed to send PackRetained gui metrics: {err}");
+                    }
+                }
+            }
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset(self.bam_controller));
+                .for_each(|metrics| metrics.maybe_report_and_reset(self.bam_controller, self.gui_core_metrics_sender.as_ref()));
             self.scheduling_details.maybe_report(self.bam_controller);
         }
 
@@ -775,6 +799,7 @@ mod tests {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             filter_keys: Arc::new(blacklisted_accounts),
+            capture_gui_timestamps: false,
         }
     }
 
@@ -828,6 +853,7 @@ mod tests {
             finished_consume_work_receiver,
             GreedySchedulerConfig::default(),
             bundle_account_locker,
+            false,
         );
         let exit = Arc::new(AtomicBool::new(false));
         let scheduler_controller = SchedulerController::new(
@@ -948,6 +974,7 @@ mod tests {
                     revert_on_error: false,
                     respond_with_extra_info: false,
                     max_schedule_slot: None,
+                    gui_schedule_info: Vec::new(),
                 },
                 retryable_indexes: vec![],
                 extra_info: None,

@@ -330,6 +330,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             }
         })
     }
@@ -339,6 +340,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         work.ids.clear();
         work.transactions.clear();
         work.max_ages.clear();
+        work.gui_schedule_info.clear();
         self.reusable_consume_work.push(work);
     }
 

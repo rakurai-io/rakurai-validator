@@ -28,6 +28,10 @@ pub struct LatestValidatorVote {
     slot: Slot,
     hash: Hash,
     timestamp: Option<UnixTimestamp>,
+    /// Wall-clock nanos when this vote entered `VoteStorage` (0 if unset).
+    arrival_timestamp_nanos: i64,
+    /// Source IPv4 of the packet as a big-endian `u32` (0 if unset/non-IPv4).
+    source_ipv4: u32,
 }
 
 impl LatestValidatorVote {
@@ -35,6 +39,8 @@ impl LatestValidatorVote {
         vote: SanitizedTransactionView<SharedBytes>,
         vote_source: VoteSource,
         deprecate_legacy_vote_ixs: bool,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
     ) -> Result<Self, DeserializedPacketError> {
         let (_, instruction) = vote
             .program_instructions_iter()
@@ -90,6 +96,8 @@ impl LatestValidatorVote {
                     authorized_voter_pubkey,
                     vote_source,
                     timestamp,
+                    arrival_timestamp_nanos,
+                    source_ipv4,
                 })
             }
             _ => Err(DeserializedPacketError::VoteTransaction),
@@ -112,7 +120,7 @@ impl LatestValidatorVote {
         )
         .unwrap();
 
-        Self::new_from_view(vote, vote_source, deprecate_legacy_vote_ixs)
+        Self::new_from_view(vote, vote_source, deprecate_legacy_vote_ixs, 0, 0)
     }
 
     pub fn vote_pubkey(&self) -> Pubkey {
@@ -129,6 +137,14 @@ impl LatestValidatorVote {
 
     pub fn source(&self) -> VoteSource {
         self.vote_source
+    }
+
+    pub fn arrival_timestamp_nanos(&self) -> i64 {
+        self.arrival_timestamp_nanos
+    }
+
+    pub fn source_ipv4(&self) -> u32 {
+        self.source_ipv4
     }
 
     pub(crate) fn hash(&self) -> Hash {

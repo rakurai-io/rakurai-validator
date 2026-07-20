@@ -34,10 +34,11 @@ use {
     solana_signature::Signature,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
     solana_transaction::TransactionError,
+    solana_svm_timings::wallclock_timestamp_nanos,
     std::{
         collections::{HashMap, VecDeque},
         str::FromStr,
-        sync::{Arc, RwLock},
+        sync::{Arc, OnceLock, RwLock},
     },
 };
 
@@ -64,6 +65,9 @@ struct BundleTransactionId {
     first_packet_remote_pubkey: Pubkey,
     is_primary: bool,
     bundle_id: String,
+    timestamp_arrival_nanos: i64,
+    /// Source IPv4 of the bundle's lead packet as a big-endian `u32` (0 if unset/non-IPv4).
+    source_ipv4: u32,
 }
 
 impl Ord for BundleTransactionId {
@@ -97,6 +101,17 @@ const JITO_TIP_ACCOUNTS: [&str; 8] = [
     "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 ];
 
+/// Tip payment accounts used for GUI tip-balance deltas.
+pub fn jito_tip_accounts() -> &'static std::collections::HashSet<Pubkey> {
+    static JITO_TIP_ACCOUNTS_SET: OnceLock<std::collections::HashSet<Pubkey>> = OnceLock::new();
+    JITO_TIP_ACCOUNTS_SET.get_or_init(|| {
+        JITO_TIP_ACCOUNTS
+            .iter()
+            .filter_map(|account| Pubkey::from_str(account).ok())
+            .collect()
+    })
+}
+
 #[allow(dead_code)]
 pub fn jito_tip_accounts_map() -> HashMap<Pubkey, f64> {
     JITO_TIP_ACCOUNTS
@@ -122,6 +137,10 @@ pub struct BundleStorageEntry {
     pub max_ages: Vec<MaxAge>,
     pub is_primary: bool,
     pub bundle_id: String,
+    /// Wall-clock nanos when the bundle entered `BundleStorage`.
+    pub timestamp_arrival_nanos: i64,
+    /// Source IPv4 of the bundle's lead packet as a big-endian `u32` (0 if unset/non-IPv4).
+    pub source_ipv4: u32,
 }
 
 /// Result of attempting to strip a secondary backrun lead transaction.
@@ -240,6 +259,8 @@ impl BundleStorage {
                 first_packet_remote_pubkey: bundle.first_packet_remote_pubkey,
                 is_primary: bundle.is_primary,
                 bundle_id: bundle.bundle_id,
+                timestamp_arrival_nanos: bundle.timestamp_arrival_nanos,
+                source_ipv4: bundle.source_ipv4,
             });
     }
 
@@ -287,6 +308,8 @@ impl BundleStorage {
             max_ages: bundle_max_ages,
             is_primary: bundle.is_primary,
             bundle_id: bundle.bundle_id,
+            timestamp_arrival_nanos: bundle.timestamp_arrival_nanos,
+            source_ipv4: bundle.source_ipv4,
         })
     }
 
@@ -312,6 +335,8 @@ impl BundleStorage {
                 first_packet_remote_pubkey: bundle.first_packet_remote_pubkey,
                 is_primary: bundle.is_primary,
                 bundle_id: bundle.bundle_id,
+                timestamp_arrival_nanos: bundle.timestamp_arrival_nanos,
+                source_ipv4: bundle.source_ipv4,
             });
         } else {
             self.unprocessed_bundles_secondary
@@ -323,6 +348,8 @@ impl BundleStorage {
                     first_packet_remote_pubkey: bundle.first_packet_remote_pubkey,
                     is_primary: bundle.is_primary,
                     bundle_id: bundle.bundle_id,
+                    timestamp_arrival_nanos: bundle.timestamp_arrival_nanos,
+                    source_ipv4: bundle.source_ipv4,
                 });
         }
     }
@@ -476,6 +503,7 @@ impl BundleStorage {
         if batch.is_empty() {
             return mark_drop(bundle_id_to_stats, BundleStorageError::EmptyBatch);
         }
+        let batch_arrival_timestamp_nanos = wallclock_timestamp_nanos();
         if batch.len() > Self::MAX_PACKETS_PER_BUNDLE {
             return mark_drop(bundle_id_to_stats, BundleStorageError::BundleTooLarge);
         }
@@ -500,7 +528,12 @@ impl BundleStorage {
             return mark_drop(bundle_id_to_stats, BundleStorageError::ContainerFull);
         }
 
-        let first_packet_remote_pubkey = batch.get(0).unwrap().meta().remote_pubkey;
+        let first_packet = batch.get(0).unwrap();
+        let first_packet_remote_pubkey = first_packet.meta().remote_pubkey;
+        let source_ipv4 = match first_packet.meta().addr {
+            std::net::IpAddr::V4(v4) => u32::from(v4),
+            std::net::IpAddr::V6(_) => 0,
+        };
 
         let mut container_ids: Vec<(usize, u64, u64)> = Vec::with_capacity(batch.len());
         let mut maybe_error = Ok(());
@@ -695,6 +728,8 @@ impl BundleStorage {
                 first_packet_remote_pubkey,
                 is_primary,
                 bundle_id,
+                timestamp_arrival_nanos: batch_arrival_timestamp_nanos,
+                source_ipv4,
             });
         } else {
             self.unprocessed_bundles_secondary
@@ -706,6 +741,8 @@ impl BundleStorage {
                     first_packet_remote_pubkey,
                     is_primary,
                     bundle_id,
+                    timestamp_arrival_nanos: batch_arrival_timestamp_nanos,
+                    source_ipv4,
                 });
         }
 

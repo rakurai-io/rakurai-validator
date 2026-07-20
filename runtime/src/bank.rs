@@ -3865,6 +3865,8 @@ impl Bank {
                 drop_on_failure: false,
                 all_or_nothing: false,
                 strict_nonce_size_check: false,
+                capture_gui_timestamps: false,
+                tip_accounts: None,
             },
         );
 
@@ -4039,6 +4041,8 @@ impl Bank {
                     },
                     drop_on_failure: true,
                     all_or_nothing: true,
+                    capture_gui_timestamps: false,
+                    tip_accounts: None,
                 },
                 &mut program_cache_for_tx_batch,
                 false,
@@ -4764,6 +4768,7 @@ impl Bank {
                                 loaded_accounts_data_size,
                             },
                             fee_payer_post_balance,
+                            tips: execution_details.tips,
                         })
                     }
                     ProcessedTransaction::FeesOnly(fees_only_tx) => Ok(CommittedTransaction {
@@ -4782,6 +4787,7 @@ impl Bank {
                             .fee_payer()
                             .1
                             .lamports(),
+                        tips: 0,
                     }),
                 }
             })
@@ -4883,6 +4889,8 @@ impl Bank {
                 drop_on_failure: false,
                 all_or_nothing: false,
                 strict_nonce_size_check: false,
+                capture_gui_timestamps: false,
+                tip_accounts: None,
             },
         );
 

@@ -108,6 +108,10 @@ pub fn safe_clone_config(config: &ValidatorConfig) -> ValidatorConfig {
         postpack_confirmation_config: config.postpack_confirmation_config.clone(),
         postpack_confirmation_active_entries: config.postpack_confirmation_active_entries.clone(),
         post_pack_confirmation_uuid_blocklist: config.post_pack_confirmation_uuid_blocklist.clone(),
+        enable_gui: config.enable_gui,
+        gui_listen_addr: config.gui_listen_addr.clone(),
+        gui_max_websocket_connections: config.gui_max_websocket_connections,
+        gui_ip_whitelist: config.gui_ip_whitelist.clone(),
     }
 }
 

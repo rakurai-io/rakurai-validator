@@ -40,6 +40,7 @@ use {
         transaction_meta::TransactionMeta, transaction_with_meta::TransactionWithMeta,
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::svm_message::SVMMessage,
     solana_transaction::sanitized::MessageHash,
     solana_transaction_error::TransactionError,
@@ -130,6 +131,7 @@ pub(crate) struct TransactionViewReceiveAndBuffer {
     pub receiver: BankingPacketReceiver,
     pub sharable_banks: SharableBanks,
     pub filter_keys: Arc<HashSet<Pubkey>>,
+    pub capture_gui_timestamps: bool,
 }
 
 pub(crate) fn contains_blacklisted_account<'a>(
@@ -304,6 +306,14 @@ pub enum PacketHandlingError {
     FilterKey,
 }
 
+/// Source IPv4 of a packet as a big-endian `u32` (0 for unset/non-IPv4).
+fn source_ipv4_from_packet(packet: solana_perf::packet::PacketRef<'_>) -> u32 {
+    match packet.meta().addr {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    }
+}
+
 impl TransactionViewReceiveAndBuffer {
     /// Return number of received packets.
     fn handle_packet_batch_message(
@@ -406,7 +416,12 @@ impl TransactionViewReceiveAndBuffer {
         let mut num_dropped_on_lock_validation = 0;
         let mut num_dropped_on_compute_budget = 0;
 
+        let capture_gui_timestamps = self.capture_gui_timestamps;
         for packet_batch in packet_batch_message.iter() {
+            // One syscall per received batch: when these packets entered the buffer.
+            let packet_batch_arrival_timestamp_nanos = capture_gui_timestamps
+                .then(wallclock_timestamp_nanos)
+                .unwrap_or(0);
             for packet in packet_batch.iter() {
                 let Some(packet_data) = packet.data(..) else {
                     continue;
@@ -452,6 +467,14 @@ impl TransactionViewReceiveAndBuffer {
                         }
                     })
                 {
+                    if capture_gui_timestamps {
+                        if let Some(state) = container.get_mut_transaction_state(transaction_id) {
+                            state.set_ingress_metadata(
+                                packet_batch_arrival_timestamp_nanos,
+                                source_ipv4_from_packet(packet),
+                            );
+                        }
+                    }
                     let priority = container
                         .get_mut_transaction_state(transaction_id)
                         .expect("transaction must exist")
@@ -681,6 +704,7 @@ mod tests {
             receiver,
             sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             filter_keys,
+            capture_gui_timestamps: false,
         };
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)

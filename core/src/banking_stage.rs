@@ -36,6 +36,7 @@ use {
             },
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
+        gui::{GuiCoreMetrics, GuiBankingStageStats, GuiTxnEvent},
         validator::BlockProductionMethod,
         validator::ClientMode,
     },
@@ -325,6 +326,7 @@ unsafe extern "C" {
         post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
         scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
         bundle_account_locker: BundleAccountLocker,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> JoinHandle<()>;
 }
 
@@ -382,6 +384,8 @@ pub struct BankingStageStats {
     current_buffered_packets_count: AtomicUsize,
     rebuffered_packets_count: AtomicUsize,
     consumed_buffered_packets_count: AtomicUsize,
+    dropped_forward_gossip_packets_count: AtomicUsize,
+    dropped_forward_tpu_packets_count: AtomicUsize,
     batch_packet_indexes_len: Histogram,
 
     // Timing
@@ -434,6 +438,8 @@ impl BankingStageStats {
                 + self.current_buffered_packets_count.load(Ordering::Relaxed) as u64
                 + self.rebuffered_packets_count.load(Ordering::Relaxed) as u64
                 + self.consumed_buffered_packets_count.load(Ordering::Relaxed) as u64
+                + self.dropped_forward_gossip_packets_count.load(Ordering::Relaxed) as u64
+                + self.dropped_forward_tpu_packets_count.load(Ordering::Relaxed) as u64
                 + self
                     .consume_buffered_packets_elapsed
                     .load(Ordering::Relaxed)
@@ -446,12 +452,24 @@ impl BankingStageStats {
                 + self.batch_packet_indexes_len.entries()
     }
 
-    fn report(&mut self, report_interval_ms: u64) {
+    fn report(&mut self, report_interval_ms: u64, gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>) {
         // skip reporting metrics if stats is empty
         if self.is_empty() {
             return;
         }
         if self.last_report.should_update(report_interval_ms) {
+            if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BankingStageVote(GuiBankingStageStats {
+                    tpu_receive_and_buffer_packets_count: self.tpu_counts.receive_and_buffer_packets_count.load(Ordering::Relaxed) as u64,
+                    tpu_dropped_packets_count: self.tpu_counts.dropped_packets_count.load(Ordering::Relaxed) as u64,
+                    gossip_receive_and_buffer_packets_count: self.gossip_counts.receive_and_buffer_packets_count.load(Ordering::Relaxed) as u64,
+                    gossip_dropped_packets_count: self.gossip_counts.dropped_packets_count.load(Ordering::Relaxed) as u64,
+                    dropped_forward_gossip_packets_count: self.dropped_forward_gossip_packets_count.load(Ordering::Relaxed) as u64,
+                    dropped_forward_tpu_packets_count: self.dropped_forward_tpu_packets_count.load(Ordering::Relaxed) as u64,
+                })) {
+                    warn!("failed to send BankingStageVote gui metrics: {err}");
+                }
+            }
             datapoint_info!(
                 "banking_stage-vote_loop_stats",
                 (
@@ -536,6 +554,18 @@ impl BankingStageStats {
                 (
                     "consumed_buffered_packets_count",
                     self.consumed_buffered_packets_count
+                        .swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "dropped_forward_gossip_packets_count",
+                    self.dropped_forward_gossip_packets_count
+                        .swap(0, Ordering::Relaxed),
+                    i64
+                ),
+                (
+                    "dropped_forward_tpu_packets_count",
+                    self.dropped_forward_tpu_packets_count
                         .swap(0, Ordering::Relaxed),
                     i64
                 ),
@@ -658,6 +688,8 @@ pub struct BankingStage {
     postpack_confirmation_active_entries: PostPackConfirmationActiveEntries,
     post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
     scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+    gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+    gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
 }
 
 impl BankingStage {
@@ -699,6 +731,8 @@ impl BankingStage {
         postpack_confirmation_active_entries: PostPackConfirmationActiveEntries,
         post_pack_confirmation_uuid_blocklist: PostPackConfirmationUuidBlocklist,
         scheduler_postpack_conf_signatures: PostPackConfirmationSignatures,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> BankingStageHandle {
         let committer = Committer::new(
             transaction_status_sender,
@@ -749,6 +783,8 @@ impl BankingStage {
             postpack_confirmation_active_entries,
             post_pack_confirmation_uuid_blocklist,
             scheduler_postpack_conf_signatures,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         };
         install_panic_warning_hook_once();
 
@@ -883,6 +919,7 @@ impl BankingStage {
             receiver: self.non_vote_receiver.clone(),
             sharable_banks: sharable_banks.clone(),
             filter_keys: jito_filter_keys.clone(),
+            capture_gui_timestamps: self.gui_txn_event_sender.is_some(),
         };
 
         // Spawn vote worker.
@@ -914,9 +951,11 @@ impl BankingStage {
                     self.committer.clone(),
                     self.transaction_recorder.clone(),
                     self.log_messages_bytes_limit,
+                    self.gui_txn_event_sender.is_some(),
                 ),
                 finished_work_sender.clone(),
                 self.poh_recorder.read().unwrap().shared_leader_state(),
+                self.gui_txn_event_sender.clone(),
             );
 
             worker_metrics.push(consume_worker.metrics_handle());
@@ -1035,6 +1074,7 @@ impl BankingStage {
                     self.post_pack_confirmation_uuid_blocklist.clone(),
                     self.scheduler_postpack_conf_signatures.clone(),
                     bundle_account_locker.clone(),
+                    self.gui_core_metrics_sender.clone(),
                 );
                 threads.push(
                     Builder::new()
@@ -1120,6 +1160,7 @@ impl BankingStage {
                 let bam_enabled = bam_enabled.clone();
                 let config_cloned = scheduler_config.clone();
                 let priority_floor = self.priority_floor.clone();
+                let gui_core_metrics_sender = self.gui_core_metrics_sender.clone();
                 threads.push(
                     Builder::new()
                         .name("solBnkTxSched".to_string())
@@ -1136,6 +1177,7 @@ impl BankingStage {
                                 false,
                                 bam_enabled,
                                 Arc::new(Mutex::new(ClientMode::default())),
+                                gui_core_metrics_sender,
                             );
 
                             match scheduler_controller.run() {
@@ -1168,6 +1210,7 @@ impl BankingStage {
             finished_work_receiver,
             GreedySchedulerConfig::default(),
             bundle_account_locker.clone(),
+            self.gui_txn_event_sender.is_some(),
         );
         spawn_scheduler!(scheduler);
 
@@ -1191,9 +1234,11 @@ impl BankingStage {
                         self.committer.clone(),
                         self.transaction_recorder.clone(),
                         self.log_messages_bytes_limit,
+                        self.gui_txn_event_sender.is_some(),
                     ),
                     finished_work_sender.clone(),
                     self.poh_recorder.read().unwrap().shared_leader_state(),
+                    self.gui_txn_event_sender.clone(),
                     tip_processing_dependencies.clone(),
                 );
 
@@ -1212,6 +1257,7 @@ impl BankingStage {
             let bam_scheduler_exit = exit.clone();
             let bam_scheduler_bank_forks = self.bank_forks.clone();
             let bam_shared_leader_state = self.poh_recorder.read().unwrap().shared_leader_state();
+            let gui_core_metrics_sender = self.gui_core_metrics_sender.clone();
             threads.push(
                 Builder::new()
                     .name("solBamSched".to_string())
@@ -1247,6 +1293,7 @@ impl BankingStage {
                             true,
                             bam_enabled,
                             Arc::new(Mutex::new(ClientMode::default())),
+                            gui_core_metrics_sender,
                         );
 
                         match scheduler_controller.run() {
@@ -1269,10 +1316,17 @@ impl BankingStage {
 
     fn spawn_vote_worker(&self, bundle_account_locker: BundleAccountLocker) -> JoinHandle<()> {
         let vote_storage = VoteStorage::new(&self.bank_forks.read().unwrap().working_bank());
-        let tpu_receiver =
-            VotePacketReceiver::new(self.tpu_vote_receiver.clone(), self.filter_keys.clone());
-        let gossip_receiver =
-            VotePacketReceiver::new(self.gossip_vote_receiver.clone(), self.filter_keys.clone());
+        let capture_gui_timestamps = self.gui_txn_event_sender.is_some();
+        let tpu_receiver = VotePacketReceiver::new(
+            self.tpu_vote_receiver.clone(),
+            self.filter_keys.clone(),
+            capture_gui_timestamps,
+        );
+        let gossip_receiver = VotePacketReceiver::new(
+            self.gossip_vote_receiver.clone(),
+            self.filter_keys.clone(),
+            capture_gui_timestamps,
+        );
         let committer = Committer {
             transaction_status_sender: self.committer.transaction_status_sender.clone(),
             replay_vote_sender: self.committer.replay_vote_sender.clone(),
@@ -1284,12 +1338,15 @@ impl BankingStage {
             committer,
             self.transaction_recorder.clone(),
             self.log_messages_bytes_limit,
+            self.gui_txn_event_sender.is_some(),
         );
         let decision_maker = DecisionMaker::from(&self.poh_recorder);
 
         let worker_exit_signal = self.worker_exit_signal.clone();
         let shutdown_signal = self.banking_shutdown_signal.clone();
         let bank_forks = self.bank_forks.clone();
+        let gui_core_metrics_sender = self.gui_core_metrics_sender.clone();
+        let gui_txn_event_sender = self.gui_txn_event_sender.clone();
         Builder::new()
             .name("solBanknStgVote".to_string())
             .spawn(move || {
@@ -1303,6 +1360,8 @@ impl BankingStage {
                     bank_forks,
                     consumer,
                     bundle_account_locker,
+                    gui_core_metrics_sender,
+                    gui_txn_event_sender,
                 )
                 .run()
             })
@@ -1371,6 +1430,7 @@ mod external {
                         self.committer.clone(),
                         self.transaction_recorder.clone(),
                         self.log_messages_bytes_limit,
+                        false,
                     ),
                     worker_to_pack,
                     allocator,

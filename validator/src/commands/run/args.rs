@@ -1448,6 +1448,30 @@ pub fn add_args<'a>(app: App<'a, 'a>, default_args: &'a DefaultArgs) -> App<'a, 
             .help(ClientMode::cli_message()),
     )
     .arg(
+        Arg::with_name("enable_gui")
+            .long("enable-gui")
+            .help("Enable the GUI")
+            .takes_value(false),
+    )
+    .arg(
+        Arg::with_name("gui_listen_address")
+            .long("gui-listen-address")
+            .value_name("HOST:PORT")
+            .takes_value(true)
+            .default_value("127.0.0.1:8765")
+            .validator(solana_net_utils::is_host_port)
+            .help("Address for the GUI websocket server [default: 127.0.0.1:8765]"),
+    )
+    .arg(
+        Arg::with_name("gui_max_websocket_connections")
+            .long("gui-max-websocket-connections")
+            .value_name("COUNT")
+            .takes_value(true)
+            .default_value("5")
+            .validator(is_parsable::<usize>)
+            .help("Maximum concurrent GUI websocket connections [default: 3]"),
+    )
+    .arg(
         Arg::with_name("shred_receiver_address")
             .long("shred-receiver-address")
             .value_name("SHRED_RECEIVER_ADDRESS")

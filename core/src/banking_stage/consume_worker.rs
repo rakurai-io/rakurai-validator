@@ -9,6 +9,14 @@ use {
         },
     },
     crate::banking_stage::consumer::{ExecutionFlags, RetryableIndex, TipProcessingDependencies},
+    crate::gui::{
+        metrics::GuiTxnTpuSource,
+        slot_txn::{
+            capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
+            GuiTxnEvent,
+        },
+        GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_BUNDLE,
+    },
     crossbeam_channel::{Receiver, SendError, Sender, TryRecvError},
     jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_poh::poh_recorder::{LeaderState, SharedLeaderState},
@@ -16,8 +24,10 @@ use {
     solana_runtime::bank::Bank,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm_timings::{wallclock_timestamp_nanos, ExecuteGuiTimestamps},
     solana_time_utils::AtomicInterval,
     std::{
+        net::Ipv4Addr,
         sync::{
             Arc,
             atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -49,6 +59,7 @@ pub(crate) struct ConsumeWorker<Tx> {
 
     shared_leader_state: SharedLeaderState,
     metrics: Arc<ConsumeWorkerMetrics>,
+    gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
 
     tip_processing_dependencies: Option<TipProcessingDependencies>,
 }
@@ -61,6 +72,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         consumer: Consumer,
         consumed_sender: Sender<FinishedConsumeWork<Tx>>,
         shared_leader_state: SharedLeaderState,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self {
             exit,
@@ -69,6 +81,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             consumed_sender,
             shared_leader_state,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            gui_txn_event_sender,
             tip_processing_dependencies: None,
         }
     }
@@ -80,6 +93,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         consumer: Consumer,
         consumed_sender: Sender<FinishedConsumeWork<Tx>>,
         shared_leader_state: SharedLeaderState,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
         tip_processing_dependencies: Option<TipProcessingDependencies>,
     ) -> Self {
         Self {
@@ -89,6 +103,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             consumed_sender,
             shared_leader_state,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            gui_txn_event_sender,
             tip_processing_dependencies,
         }
     }
@@ -137,7 +152,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
     #[allow(clippy::result_large_err)]
     fn consume(
         &self,
-        work: ConsumeWork<Tx>,
+        mut work: ConsumeWork<Tx>,
     ) -> Result<ProcessingStatus<Tx>, ConsumeWorkerError<Tx>> {
         let Some(leader_state) = active_leader_state(&self.shared_leader_state) else {
             return Ok(ProcessingStatus::CouldNotProcess(work));
@@ -169,7 +184,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             .num_messages_processed
             .fetch_add(1, Ordering::Relaxed);
 
-        let (output, cu_err_indexes) = self.consumer.process_and_record_aged_transactions(
+        let (mut output, cu_err_indexes) = self.consumer.process_and_record_aged_transactions(
             bank,
             &work.transactions,
             &work.max_ages,
@@ -180,8 +195,54 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             None, // bundle account locker checked in scheduler
             work.revert_on_error,
         );
+        let microblock_end_timestamp_nanos = self
+            .gui_txn_event_sender
+            .is_some()
+            .then(wallclock_timestamp_nanos);
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+
+        if let Some(sender) = self.gui_txn_event_sender.as_ref() {
+            if !work.gui_schedule_info.is_empty() {
+                let microblock_end_timestamp_nanos =
+                    microblock_end_timestamp_nanos.expect("gui sender enabled");
+                for (info, ts) in work
+                    .gui_schedule_info
+                    .iter_mut()
+                    .zip(output.microblock_start_timestamps_nanos.iter().copied())
+                {
+                    info.microblock_start_timestamp_nanos = ts;
+                }
+                let mut gui_timestamps_per_tx = output
+                    .execute_and_commit_transactions_output
+                    .execute_and_commit_timings
+                    .execute_timings
+                    .gui_timestamps_per_tx
+                    .clone();
+                gui_timestamps_per_tx.resize(work.gui_schedule_info.len(), ExecuteGuiTimestamps::default());
+                let commit_details = gui_commit_details_for_batch(
+                    &output
+                        .execute_and_commit_transactions_output
+                        .commit_transactions_result,
+                    work.gui_schedule_info.len(),
+                );
+                let (signatures, is_simple_vote) =
+                    capture_gui_txn_tx_metadata(&work.transactions);
+                if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+                    slot: bank.slot(),
+                    gui_timestamps_per_tx,
+                    microblock_end_timestamp_nanos,
+                    // Clone so FinishedConsumeWork still has ingress metadata for retry
+                    gui_schedule_info: work.gui_schedule_info.clone(),
+                    compute_units_requested: std::mem::take(&mut output.compute_units_requested),
+                    commit_details,
+                    signatures,
+                    is_simple_vote,
+                })) {
+                    warn!("failed to send TxnBatch gui event: {err}");
+                }
+            }
+        }
 
         let extra_info = work
             .respond_with_extra_info
@@ -238,11 +299,21 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         let initialize_tip_programs_bundle =
             tip_manager.get_initialize_tip_programs_bundle(bank, &keypair);
         if let Ok(init_bundle) = initialize_tip_programs_bundle {
-            let result = self.consumer.process_and_record_transactions(
+            let arrival_timestamp_nanos = self.gui_txn_event_sender.is_some()
+                .then(wallclock_timestamp_nanos)
+                .unwrap_or(0);
+            let mut result = self.consumer.process_and_record_transactions(
                 bank,
                 &init_bundle,
                 bundle_account_locker,
                 true,
+            );
+            Self::emit_gui_tip_program_batch(
+                bank,
+                &init_bundle,
+                &mut result,
+                arrival_timestamp_nanos,
+                self.gui_txn_event_sender.as_ref(),
             );
             if result
                 .execute_and_commit_transactions_output
@@ -263,11 +334,21 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         }
         match tip_manager.get_tip_programs_crank_bundle(bank, &keypair, &block_builder_fee_info) {
             Ok(tip_crank_bundle) => {
-                let result = self.consumer.process_and_record_transactions(
+                let arrival_timestamp_nanos = self.gui_txn_event_sender.is_some()
+                    .then(wallclock_timestamp_nanos)
+                    .unwrap_or(0);
+                let mut result = self.consumer.process_and_record_transactions(
                     bank,
                     &tip_crank_bundle,
                     bundle_account_locker,
                     true,
+                );
+                Self::emit_gui_tip_program_batch(
+                    bank,
+                    &tip_crank_bundle,
+                    &mut result,
+                    arrival_timestamp_nanos,
+                    self.gui_txn_event_sender.as_ref(),
                 );
                 if result
                     .execute_and_commit_transactions_output
@@ -289,6 +370,57 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
 
         *last_tip_updated_slot_guard = bank.slot();
         true
+    }
+
+    /// Emit GUI events for in-process tip init/crank txs (localhost ingress).
+    fn emit_gui_tip_program_batch(
+        bank: &Bank,
+        txs: &[impl TransactionWithMeta],
+        output: &mut ProcessTransactionBatchOutput,
+        arrival_timestamp_nanos: i64,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
+    ) {
+        let Some(sender) = gui_txn_event_sender else {
+            return;
+        };
+        if txs.is_empty() {
+            return;
+        }
+
+        let microblock_end_timestamp_nanos = wallclock_timestamp_nanos();
+        let execute_output = &output.execute_and_commit_transactions_output;
+        let mb_starts = &output.microblock_start_timestamps_nanos;
+        let source_ipv4 = u32::from(Ipv4Addr::LOCALHOST);
+        let schedule_info: Vec<GuiTxnScheduleInfo> = (0..txs.len())
+            .map(|i| GuiTxnScheduleInfo {
+                bank_idx: GUI_TXN_BANK_IDX_BUNDLE,
+                microblock_start_timestamp_nanos: mb_starts.get(i).copied().unwrap_or(0),
+                timestamp_arrival_nanos: arrival_timestamp_nanos,
+                source_ipv4,
+                source_tpu: GuiTxnTpuSource::Bundle,
+                ..GuiTxnScheduleInfo::default()
+            })
+            .collect();
+        let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(txs);
+        if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+            slot: bank.slot(),
+            gui_timestamps_per_tx: execute_output
+                .execute_and_commit_timings
+                .execute_timings
+                .gui_timestamps_per_tx
+                .clone(),
+            microblock_end_timestamp_nanos,
+            gui_schedule_info: schedule_info,
+            compute_units_requested: std::mem::take(&mut output.compute_units_requested),
+            commit_details: gui_commit_details_for_batch(
+                &execute_output.commit_transactions_result,
+                txs.len(),
+            ),
+            signatures,
+            is_simple_vote,
+        })) {
+            warn!("failed to send TxnBatch gui event: {err}");
+        }
     }
 
     /// Builds `FinishedConsumeWorkExtraInfo` from consume output for BAM responses.
@@ -324,6 +456,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     loaded_accounts_data_size,
                     fee_payer_post_balance,
                     result,
+                    ..
                 } => {
                     processed_results.push(TransactionResult::Committed(
                         TransactionCommittedResult {
@@ -1593,7 +1726,7 @@ pub(crate) mod external {
             let recorder = TransactionRecorder::new(record_sender);
             let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
             let committer = Committer::new(None, replay_vote_sender, None);
-            let consumer = Consumer::new(committer, recorder, None);
+            let consumer = Consumer::new(committer, recorder, None, false);
             let shared_leader_state = SharedLeaderState::new(0, None, None);
             let exit = Arc::new(AtomicBool::new(false));
 
@@ -1726,12 +1859,16 @@ pub(crate) mod external {
                             0,
                             solana_transaction::InstructionError::Custom(0),
                         )),
+                        fee_details: FeeDetails::default(),
+                        tips: 0,
                     },
                     CommitTransactionDetails::Committed {
                         compute_units: 10,
                         loaded_accounts_data_size: 2048,
                         fee_payer_post_balance: 2_000_000,
                         result: Ok(()),
+                        fee_details: FeeDetails::default(),
+                        tips: 0,
                     },
                     CommitTransactionDetails::NotCommitted(
                         TransactionError::InsufficientFundsForFee,
@@ -2670,11 +2807,16 @@ pub struct ConsumeWorkerMetrics {
 
 impl ConsumeWorkerMetrics {
     /// Report and reset metrics iff the interval has elapsed and the worker did some work.
-    pub fn maybe_report_and_reset(&self, bam_controller: bool) {
+    pub fn maybe_report_and_reset(&self, bam_controller: bool, gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>) {
         const REPORT_INTERVAL_MS: u64 = 20;
         if self.interval.should_update(REPORT_INTERVAL_MS)
             && self.has_data.swap(false, Ordering::Relaxed)
         {
+            if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::ConsumeWorker(self.count_metrics.clone())) {
+                    warn!("failed to send ConsumeWorker gui metrics: {err}");
+                }
+            }
             self.count_metrics
                 .report_and_reset(&self.id, bam_controller);
             self.timing_metrics
@@ -2705,6 +2847,7 @@ impl ConsumeWorkerMetrics {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+            ..
         }: &ProcessTransactionBatchOutput,
     ) {
         self.count_metrics
@@ -2898,17 +3041,72 @@ impl ConsumeWorkerMetrics {
     }
 }
 
-#[derive(Default)]
 #[repr(C)]
-struct ConsumeWorkerCountMetrics {
+pub struct ConsumeWorkerCountMetrics {
     max_queue_len: AtomicU64,
     num_messages_processed: AtomicU64,
-    transactions_attempted_processing_count: AtomicU64,
-    processed_transactions_count: AtomicU64,
-    processed_with_successful_result_count: AtomicU64,
+    pub transactions_attempted_processing_count: AtomicU64,
+    pub processed_transactions_count: AtomicU64,
+    pub processed_with_successful_result_count: AtomicU64,
     retryable_transaction_count: AtomicUsize,
     retryable_expired_bank_count: AtomicUsize,
     cost_model_throttled_transactions_count: AtomicU64,
+    min_prioritization_fees: AtomicU64,
+    max_prioritization_fees: AtomicU64,
+}
+
+impl Clone for ConsumeWorkerCountMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            max_queue_len: AtomicU64::new(
+                self.max_queue_len.load(Ordering::Relaxed)
+            ),
+            num_messages_processed: AtomicU64::new(
+                self.num_messages_processed.load(Ordering::Relaxed)
+            ),
+            transactions_attempted_processing_count: AtomicU64::new(
+                self.transactions_attempted_processing_count.load(Ordering::Relaxed)
+            ),
+            processed_transactions_count: AtomicU64::new(
+                self.processed_transactions_count.load(Ordering::Relaxed)
+            ),
+            processed_with_successful_result_count: AtomicU64::new(
+                self.processed_with_successful_result_count.load(Ordering::Relaxed)
+            ),
+            retryable_transaction_count: AtomicUsize::new(
+                self.retryable_transaction_count.load(Ordering::Relaxed)
+            ),
+            retryable_expired_bank_count: AtomicUsize::new(
+                self.retryable_expired_bank_count.load(Ordering::Relaxed)
+            ),
+            cost_model_throttled_transactions_count: AtomicU64::new(
+                self.cost_model_throttled_transactions_count.load(Ordering::Relaxed)
+            ),
+            min_prioritization_fees: AtomicU64::new(
+                self.min_prioritization_fees.load(Ordering::Relaxed)
+            ),
+            max_prioritization_fees: AtomicU64::new(
+                self.max_prioritization_fees.load(Ordering::Relaxed)
+            ),
+        }
+    }
+}
+
+impl Default for ConsumeWorkerCountMetrics {
+    fn default() -> Self {
+        Self {
+            max_queue_len: AtomicU64::default(),
+            num_messages_processed: AtomicU64::default(),
+            transactions_attempted_processing_count: AtomicU64::default(),
+            processed_transactions_count: AtomicU64::default(),
+            processed_with_successful_result_count: AtomicU64::default(),
+            retryable_transaction_count: AtomicUsize::default(),
+            retryable_expired_bank_count: AtomicUsize::default(),
+            cost_model_throttled_transactions_count: AtomicU64::default(),
+            min_prioritization_fees: AtomicU64::new(u64::MAX),
+            max_prioritization_fees: AtomicU64::default(),
+        }
+    }
 }
 
 impl ConsumeWorkerCountMetrics {
@@ -3297,7 +3495,7 @@ mod tests {
 
         let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(None, replay_vote_sender, None, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 
         let cluster_info = {
@@ -3318,6 +3516,7 @@ mod tests {
             consumer,
             consumed_sender,
             shared_leader_state.clone(),
+            None,
             Some(TipProcessingDependencies {
                 tip_manager: TipManager::new(TipManagerConfig {
                     tip_payment_program_id: Pubkey::new_from_array(
@@ -3393,6 +3592,7 @@ mod tests {
             revert_on_error: false,
             respond_with_extra_info: false,
             max_schedule_slot: None,
+            gui_schedule_info: Vec::new(),
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3507,6 +3707,7 @@ mod tests {
             revert_on_error: false,
             respond_with_extra_info: false,
             max_schedule_slot: None,
+            gui_schedule_info: Vec::new(),
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3565,6 +3766,7 @@ mod tests {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 
@@ -3634,6 +3836,7 @@ mod tests {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 
@@ -3646,6 +3849,7 @@ mod tests {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3792,6 +3996,7 @@ mod tests {
                 revert_on_error: false,
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 
@@ -3894,6 +4099,7 @@ mod tests {
                 revert_on_error: false,
                 respond_with_extra_info: true,
                 max_schedule_slot: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 

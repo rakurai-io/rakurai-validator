@@ -67,6 +67,7 @@ agave-votor-messages = { workspace = true }
 agave-xdp = { workspace = true }
 ahash = { workspace = true }
 anyhow = { workspace = true }
+axum = { workspace = true, features = ["ws"] }
 arc-swap = { workspace = true }
 arrayvec = { workspace = true }
 assert_matches = { workspace = true }

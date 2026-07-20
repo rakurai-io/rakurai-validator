@@ -21,17 +21,51 @@ pub struct TransactionState<Tx> {
     priority: u64,
     /// Estimated cost of the transaction.
     cost: u64,
+    /// Wall-clock nanos when the packet was first received (0 if unset).
+    arrival_timestamp_nanos: i64,
+    /// Source IPv4 of the packet as a big-endian `u32` (0 if unset/non-IPv4).
+    source_ipv4: u32,
 }
 
 impl<Tx> TransactionState<Tx> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
     pub fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
+        Self::new_with_ingress(transaction, max_age, priority, cost, 0, 0)
+    }
+
+    pub fn new_with_ingress(
+        transaction: Tx,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+    ) -> Self {
         Self {
             transaction: Some(transaction),
             max_age,
             priority,
             cost,
+            arrival_timestamp_nanos,
+            source_ipv4,
         }
+    }
+
+    pub fn arrival_timestamp_nanos(&self) -> i64 {
+        self.arrival_timestamp_nanos
+    }
+
+    pub fn source_ipv4(&self) -> u32 {
+        self.source_ipv4
+    }
+
+    pub(crate) fn set_ingress_metadata(
+        &mut self,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+    ) {
+        self.arrival_timestamp_nanos = arrival_timestamp_nanos;
+        self.source_ipv4 = source_ipv4;
     }
 
     /// Return the priority of the transaction.

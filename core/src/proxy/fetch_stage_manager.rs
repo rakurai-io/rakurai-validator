@@ -12,6 +12,7 @@ use {
         contact_info::{self, Protocol},
     },
     solana_perf::packet::PacketBatch,
+    crate::gui::GuiCoreMetrics,
     std::{
         collections::HashSet,
         env, fmt,
@@ -62,6 +63,7 @@ impl FetchStageManager {
         bam_enabled: Arc<AtomicU8>,
         my_fallback_contact_info: contact_info::ContactInfo,
         bam_tpu_info: Arc<ArcSwap<Option<(SocketAddr, SocketAddr)>>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         let t_hdl = Self::start(
             cluster_info,
@@ -72,6 +74,7 @@ impl FetchStageManager {
             bam_enabled,
             my_fallback_contact_info,
             bam_tpu_info,
+            gui_core_metrics_sender,
         );
 
         Self { t_hdl }
@@ -86,6 +89,7 @@ impl FetchStageManager {
         bam_enabled: Arc<AtomicU8>,
         my_fallback_contact_info: contact_info::ContactInfo,
         bam_tpu_info: Arc<ArcSwap<Option<(SocketAddr, SocketAddr)>>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> JoinHandle<()> {
         Builder::new()
             .name("fetch-stage-manager".into())
@@ -128,7 +132,7 @@ impl FetchStageManager {
                 // Run the semi-eternal loop
                 while !exit.load(Ordering::Relaxed) {
                     let all_good = select! {
-                        recv(packet_intercept_rx) -> pkt => tpu_state_machine.handle_packet_batch(pkt, Some(quic_config.clone())),
+                        recv(packet_intercept_rx) -> pkt => tpu_state_machine.handle_packet_batch(pkt, Some(quic_config.clone()), gui_core_metrics_sender.as_ref()),
                         recv(state_machine_tick) -> _ => {
                             tpu_state_machine.state_machine_tick();
                             true
@@ -511,6 +515,7 @@ impl FetchStageTpuStateMachine {
         &mut self,
         pkt: Result<PacketBatch, RecvError>,
         quic_config: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
     ) -> bool {
         match pkt {
             Ok(mut pkt) => {
@@ -533,6 +538,13 @@ impl FetchStageTpuStateMachine {
                         return false;
                     }
                     self.metrics.packets_forwarded += 1;
+                }
+                else {
+                    if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                        if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::FetchStageManagerForwardDropped(1)) {
+                            warn!("failed to send FetchStageManagerForwardDropped gui metrics: {err}");
+                        }
+                    }
                 }
                 true
             }

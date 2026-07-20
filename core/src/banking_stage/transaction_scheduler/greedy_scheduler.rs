@@ -67,6 +67,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         config: GreedySchedulerConfig,
         bundle_account_locker: BundleAccountLocker,
+        capture_gui_timestamps: bool,
     ) -> Self {
         assert!(
             config.target_entry_bytes_per_batch > ENTRY_OVERHEAD_BYTES,
@@ -78,6 +79,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
                 consume_work_senders,
                 finished_consume_work_receiver,
                 config.target_transactions_per_batch,
+                capture_gui_timestamps,
             ),
             config,
             bundle_account_locker,
@@ -207,7 +209,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                         || self.common.batches.entry_bytes()[thread_id]
                             >= self.config.target_entry_bytes_per_batch
                     {
-                        num_sent += self.common.send_batches()?;
+                        num_sent += self.common.send_batches(container)?;
                     }
 
                     // if the thread is at target_cu_per_thread, remove it from the schedulable threads
@@ -226,7 +228,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             }
         }
 
-        num_sent += self.common.send_batches()?;
+        num_sent += self.common.send_batches(container)?;
         let Saturating(num_scheduled) = num_scheduled;
         assert_eq!(
             num_scheduled, num_sent,
@@ -367,6 +369,7 @@ mod test {
             finished_consume_work_receiver,
             config,
             bundle_account_locker,
+            false,
         );
         (
             scheduler,

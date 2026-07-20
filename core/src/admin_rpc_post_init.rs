@@ -18,7 +18,7 @@ use {
     solana_turbine::ShredReceiverAddresses,
     std::{
         collections::{HashMap, HashSet},
-        net::UdpSocket,
+        net::{IpAddr, UdpSocket},
         sync::{Arc, RwLock},
     },
     tokio::sync::mpsc,
@@ -43,6 +43,8 @@ pub enum KeyUpdaterType {
     BlsConnectionCache,
     /// For the BAM connection
     BamConnection,
+    /// GUI dashboard identity / peer broadcast
+    Gui,
 }
 
 /// Responsible for managing the updaters for identity key change
@@ -105,4 +107,5 @@ pub struct AdminRpcRequestMetadataPostInit {
     pub relayer_config: Arc<ArcSwap<RelayerConfig>>,
     pub shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
     pub shred_retransmit_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
+    pub gui_ip_whitelist: Arc<RwLock<HashSet<IpAddr>>>,
 }

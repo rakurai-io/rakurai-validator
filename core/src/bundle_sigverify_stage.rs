@@ -2,6 +2,7 @@ use {
     crate::{
         banking_trace::TracedSender,
         packet_bundle::{PacketBundle, VerifiedPacketBundle},
+        gui::GuiCoreMetrics,
     },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::ThreadPool,
@@ -16,6 +17,15 @@ use {
     },
 };
 
+pub struct BundleSigverifyStageStats {
+    pub num_bundles_received: usize,
+    pub num_packets_received: usize,
+    pub num_bundles_failed_sigverify: usize,
+    pub num_packets_failed_sigverify: usize,
+    pub num_bundles_failed_send: usize,
+    pub num_packets_failed_send: usize,
+}
+
 pub struct BundleSigverifyStage {
     thread: JoinHandle<()>,
 }
@@ -27,9 +37,10 @@ impl BundleSigverifyStage {
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
         non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         let thread = spawn(move || {
-            Self::sigverify_service(thread_pool, receiver, sender, exit, non_vote_sender)
+            Self::sigverify_service(thread_pool, receiver, sender, exit, non_vote_sender, gui_core_metrics_sender)
         });
         Self { thread }
     }
@@ -44,6 +55,7 @@ impl BundleSigverifyStage {
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
         non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) {
         let mut workspace = Vec::with_capacity(100);
 
@@ -62,6 +74,18 @@ impl BundleSigverifyStage {
                     if (num_bundles_received > 0 || num_packets_received > 0)
                         && last_update.elapsed().as_millis() > 20
                     {
+                        if let Some(gui_core_metrics_sender) = &gui_core_metrics_sender {
+                            if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleSigverify(BundleSigverifyStageStats {
+                                num_bundles_received,
+                                num_packets_received,
+                                num_bundles_failed_sigverify,
+                                num_packets_failed_sigverify,
+                                num_bundles_failed_send,
+                                num_packets_failed_send,
+                            })) {
+                                warn!("failed to send BundleSigverify gui metrics: {err}");
+                            }
+                        }
                         datapoint_info!(
                             "bundle_sigverify_stage",
                             ("num_bundles_received", num_bundles_received, i64),

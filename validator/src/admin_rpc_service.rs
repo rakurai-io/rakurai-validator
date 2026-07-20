@@ -146,6 +146,11 @@ pub struct AdminRpcRepairWhitelist {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct AdminRpcGuiWhitelist {
+    pub whitelist: Vec<IpAddr>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AdminRpcValidatorAdmissionTicketStatus {
     pub vote_account: Pubkey,
     pub voting_enabled: bool,
@@ -209,6 +214,14 @@ impl Display for AdminRpcRepairWhitelist {
 }
 impl solana_cli_output::VerboseDisplay for AdminRpcRepairWhitelist {}
 impl solana_cli_output::QuietDisplay for AdminRpcRepairWhitelist {}
+
+impl Display for AdminRpcGuiWhitelist {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "GUI whitelist: {:?}", &self.whitelist)
+    }
+}
+impl solana_cli_output::VerboseDisplay for AdminRpcGuiWhitelist {}
+impl solana_cli_output::QuietDisplay for AdminRpcGuiWhitelist {}
 
 #[rpc]
 pub trait AdminRpc {
@@ -306,6 +319,12 @@ pub trait AdminRpc {
 
     #[rpc(meta, name = "setRepairWhitelist")]
     fn set_repair_whitelist(&self, meta: Self::Metadata, whitelist: Vec<Pubkey>) -> Result<()>;
+
+    #[rpc(meta, name = "guiWhitelist")]
+    fn gui_whitelist(&self, meta: Self::Metadata) -> Result<AdminRpcGuiWhitelist>;
+
+    #[rpc(meta, name = "setGuiWhitelist")]
+    fn set_gui_whitelist(&self, meta: Self::Metadata, whitelist: Vec<IpAddr>) -> Result<()>;
 
     #[rpc(meta, name = "setPublicTpuAddress")]
     fn set_public_tpu_address(
@@ -1169,6 +1188,35 @@ impl AdminRpc for AdminRpcImpl {
         })
     }
 
+    fn gui_whitelist(&self, meta: Self::Metadata) -> Result<AdminRpcGuiWhitelist> {
+        info!("gui_whitelist request received");
+
+        meta.with_post_init(|post_init| {
+            let whitelist: Vec<_> = post_init
+                .gui_ip_whitelist
+                .read()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect();
+            Ok(AdminRpcGuiWhitelist { whitelist })
+        })
+    }
+
+    fn set_gui_whitelist(&self, meta: Self::Metadata, whitelist: Vec<IpAddr>) -> Result<()> {
+        debug!("set_gui_whitelist request received");
+
+        let whitelist: HashSet<IpAddr> = whitelist.into_iter().collect();
+        meta.with_post_init(|post_init| {
+            *post_init.gui_ip_whitelist.write().unwrap() = whitelist;
+            info!(
+                "GUI IP whitelist set to {:?}",
+                &post_init.gui_ip_whitelist.read().unwrap()
+            );
+            Ok(())
+        })
+    }
+
     fn set_public_tpu_address(
         &self,
         meta: Self::Metadata,
@@ -1702,6 +1750,9 @@ mod tests {
                     relayer_config,
                     shred_receiver_addresses,
                     shred_retransmit_receiver_addresses,
+                    gui_ip_whitelist: Arc::new(RwLock::new(HashSet::from([
+                        IpAddr::from([127, 0, 0, 1]),
+                    ]))),
                 }))),
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,

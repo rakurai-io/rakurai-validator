@@ -87,6 +87,7 @@ use {
     solana_sdk_ids::system_program,
     solana_signature::Signature,
     solana_signer::Signer,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::{svm_message::SVMStaticMessage, svm_transaction::SVMTransaction},
     solana_transaction::{Transaction, sanitized::MessageHash, versioned::VersionedTransaction},
     solana_transaction_status::RewardType,
@@ -909,7 +910,14 @@ impl RewardDistributor {
             ));
             return;
         }
-        let transaction_state = TransactionState::new(runtime_tx, MaxAge::MAX, u64::MAX, 150);
+        let transaction_state = TransactionState::new_with_ingress(
+            runtime_tx,
+            MaxAge::MAX,
+            u64::MAX,
+            150,
+            wallclock_timestamp_nanos(),
+            u32::from(std::net::Ipv4Addr::LOCALHOST),
+        );
         if let Some(sender) = &self.high_priority_transaction_sender {
             // -----------------------------------------------------------------------------
             // TX Input Signature Reporting

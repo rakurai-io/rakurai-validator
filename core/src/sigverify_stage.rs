@@ -7,6 +7,7 @@
 use {
     crate::{
         banking_trace::BankingPacketSender,
+        gui::{GuiCoreMetrics, GuiSigVerifierStats},
         sigverify::{
             GossipSigVerifier, GossipVerifiedVoteBatch, SigVerifyWorkerPool,
             SigVerifyWorkerSenders, SigVerifyWorkerState, SigVerifyWorkerStats,
@@ -78,10 +79,25 @@ struct ServicerState {
 impl SigVerifierStats {
     const REPORT_INTERVAL: Duration = Duration::from_secs(2);
 
-    fn maybe_report_and_reset(&mut self, name: &'static str) {
+    fn maybe_report_and_reset(
+        &mut self,
+        name: &'static str,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) {
         // No need to report a datapoint if no batches/packets received
         if self.total_batches.load(Ordering::Relaxed) == 0 {
             return;
+        }
+
+        if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+            if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::SigVerify(GuiSigVerifierStats {
+                total_packets: self.total_packets.load(Ordering::Relaxed) as u64,
+                total_dedup: self.total_dedup.load(Ordering::Relaxed) as u64,
+                total_valid_packets: self.total_valid_packets.load(Ordering::Relaxed) as u64,
+                eviction_drops: self.eviction_drops.load(Ordering::Relaxed) as u64,
+            })) {
+                warn!("failed to send SigVerify gui metrics: {err}");
+            }
         }
 
         datapoint_info!(
@@ -158,6 +174,7 @@ impl SigVerifyStage {
         sharable_banks: SharableBanks,
         scheduler_priority_floor: Option<Arc<SchedulerPriorityFloor>>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> (Self, GossipSigVerifyHandle) {
         let (gossip_verified_vote_sender, verified_vote_receiver) = unbounded();
         let non_vote_stats = SigVerifierStats::default();
@@ -232,6 +249,7 @@ impl SigVerifyStage {
                 metrics_name: "tpu-vote-verifier",
                 stats: tpu_vote_stats,
             },
+            gui_core_metrics_sender.clone(),
         );
         let gossip_sigverify_handle = GossipSigVerifyHandle {
             verifier: worker_pool.gossip_verifier(),
@@ -265,8 +283,14 @@ impl SigVerifyStage {
         exit: Arc<AtomicBool>,
         mut non_vote_state: ServicerState,
         mut tpu_vote_state: ServicerState,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> JoinHandle<()> {
         let mut last_print = Instant::now();
+        let report_interval = if gui_core_metrics_sender.is_some() {
+            Duration::from_millis(50)
+        } else {
+            SigVerifierStats::REPORT_INTERVAL
+        };
         Builder::new()
             .name("solSigVerSvc".to_string())
             .spawn(move || {
@@ -281,13 +305,13 @@ impl SigVerifyStage {
                             state.stats.num_deduper_saturations += 1;
                         }
                     }
-                    if last_print.elapsed() > SigVerifierStats::REPORT_INTERVAL {
+                    if last_print.elapsed() > report_interval {
                         non_vote_state
                             .stats
-                            .maybe_report_and_reset(non_vote_state.metrics_name);
+                            .maybe_report_and_reset(non_vote_state.metrics_name, gui_core_metrics_sender.as_ref());
                         tpu_vote_state
                             .stats
-                            .maybe_report_and_reset(tpu_vote_state.metrics_name);
+                            .maybe_report_and_reset(tpu_vote_state.metrics_name, gui_core_metrics_sender.as_ref());
                         last_print = Instant::now();
                     }
                     thread::sleep(Duration::from_millis(10));

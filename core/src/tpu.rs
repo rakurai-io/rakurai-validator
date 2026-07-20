@@ -29,6 +29,7 @@ use {
             ForwardAddressGetter, ForwardingClientConfig, SpawnForwardingStageResult,
             spawn_forwarding_stage,
         },
+        gui::{GuiCoreMetrics, GuiTxnEvent},
         proxy::{
             block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig, BlockEngineStage},
             fetch_stage_manager::FetchStageManager,
@@ -46,7 +47,7 @@ use {
     agave_xdp::transmitter::XdpSender,
     ahash::HashSet as AHashSet,
     arc_swap::ArcSwap,
-    crossbeam_channel::{Receiver, bounded, unbounded},
+    crossbeam_channel::{Receiver, Sender, bounded, unbounded},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -73,7 +74,7 @@ use {
         evicting_sender::EvictingSender,
         quic::{
             SimpleQosQuicStreamerConfig, SpawnServerResult, SwQosQuicStreamerConfig,
-            spawn_simple_qos_server, spawn_stake_weighted_qos_server,
+            spawn_simple_qos_server, spawn_stake_weighted_qos_server, GuiStreamerMetrics,
         },
         quic_socket::QuicSocket,
         streamer::StakedNodes,
@@ -218,6 +219,9 @@ impl Tpu {
         postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
         postpack_confirmation_active_entries: crate::banking_stage::PostPackConfirmationActiveEntries,
         post_pack_confirmation_uuid_blocklist: crate::banking_stage::PostPackConfirmationUuidBlocklist,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         let TpuSockets {
             vote: tpu_vote_sockets,
@@ -256,6 +260,8 @@ impl Tpu {
             forwarded_packet_receiver,
             poh_recorder,
             None, // coalesce
+            gui_core_metrics_sender.clone(),
+            gui_streamer_metrics_sender.clone(),
         );
 
         let staked_nodes_updater_service = StakedNodesUpdaterService::new(
@@ -294,6 +300,7 @@ impl Tpu {
             vote_quic_server_config.quic_streamer_config,
             vote_quic_server_config.qos_config,
             cancel.clone(),
+            gui_streamer_metrics_sender.clone(),
         )
         .unwrap();
 
@@ -318,6 +325,7 @@ impl Tpu {
             tpu_quic_server_config.quic_streamer_config,
             tpu_quic_server_config.qos_config,
             cancel.clone(),
+            gui_streamer_metrics_sender.clone(),
         )
         .unwrap();
 
@@ -338,6 +346,7 @@ impl Tpu {
             tpu_fwd_quic_server_config.quic_streamer_config,
             tpu_fwd_quic_server_config.qos_config,
             cancel,
+            gui_streamer_metrics_sender,
         )
         .unwrap();
 
@@ -368,6 +377,7 @@ impl Tpu {
             bank_forks.read().unwrap().sharable_banks(),
             Some(scheduler_priority_floor.clone()),
             input_tx_signature_sender.clone(),
+            gui_core_metrics_sender.clone(),
         );
 
         let (output_tx_signature_sender, output_tx_signature_receiver) =
@@ -412,6 +422,7 @@ impl Tpu {
             shredstream_receiver_address.clone(),
             bam_enabled.clone(),
             input_tx_signature_sender.clone(),
+            gui_core_metrics_sender.clone(),
         );
         let (verified_bundle_sender, verified_bundle_receiver) = bounded(16_384);
         let bundle_sigverify_stage = BundleSigverifyStage::new(
@@ -420,6 +431,7 @@ impl Tpu {
             verified_bundle_sender,
             exit.clone(),
             banking_stage_sender.clone(),
+            gui_core_metrics_sender.clone(),
         );
 
         let bam_tpu_info = Arc::new(ArcSwap::new(Arc::new(None)));
@@ -433,6 +445,7 @@ impl Tpu {
             bam_enabled.clone(),
             cluster_info.my_contact_info().clone(),
             bam_tpu_info.clone(),
+            gui_core_metrics_sender.clone(),
         );
 
         let relayer_stage = RelayerStage::new(
@@ -533,6 +546,8 @@ impl Tpu {
             postpack_confirmation_active_entries,
             post_pack_confirmation_uuid_blocklist,
             scheduler_postpack_conf_signatures.clone(),
+            gui_core_metrics_sender.clone(),
+            gui_txn_event_sender.clone(),
         );
 
         // House keeper
@@ -583,6 +598,8 @@ impl Tpu {
             scheduler_postpack_conf_signatures,
             block_engine_config,
             bundle_lifecycle_dump_enabled,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         );
 
         let bam_manager = BamManager::new(

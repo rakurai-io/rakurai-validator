@@ -968,6 +968,8 @@ impl BankingSimulator {
             )),
             Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
             scheduler_postpack_conf_signatures,
+            None,
+            None,
         );
 
         // House keeper

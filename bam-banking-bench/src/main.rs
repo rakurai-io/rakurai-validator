@@ -270,6 +270,8 @@ fn main() {
         )),
         Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<String>::new())),
         Arc::new(RwLock::new(HashMap::new())),
+        None,
+        None,
     );
 
     let bank_setting_thread = {

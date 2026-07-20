@@ -8,12 +8,12 @@ use {
     crate::{
         bam_dependencies::BamConnectionState,
         banking_trace::BankingPacketSender,
+        gui::GuiCoreMetrics,
         packet_bundle::PacketBundle,
         proto_packet_to_packet,
         proxy::{
-            ProxyError,
             auth::{AuthInterceptor, auth_client_from_endpoint, maybe_refresh_auth_tokens},
-            endpoint_from_url, sanitize_status_message_for_influx,
+            endpoint_from_url, sanitize_status_message_for_influx, ProxyError,
         },
     },
     ahash::HashMapExt,
@@ -24,8 +24,8 @@ use {
     jito_protos::proto::{
         auth::{Token, auth_service_client::AuthServiceClient},
         block_engine::{
-            self, BlockBuilderFeeInfoRequest, BlockEngineEndpoint, GetBlockEngineEndpointRequest,
-            block_engine_validator_client::BlockEngineValidatorClient,
+            self, block_engine_validator_client::BlockEngineValidatorClient,
+            BlockBuilderFeeInfoRequest, BlockEngineEndpoint, GetBlockEngineEndpointRequest,
         },
     },
     serde::{Deserialize, Serialize},
@@ -37,13 +37,13 @@ use {
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_signer::Signer,
     std::{
-        collections::{HashMap, HashSet, hash_map::Entry},
-        net::{SocketAddr, ToSocketAddrs},
+        collections::{hash_map::Entry, HashMap, HashSet},
+        net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
         ops::AddAssign,
         str::FromStr,
         sync::{
-            Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU8, Ordering},
+            Arc, Mutex, RwLock,
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -54,9 +54,9 @@ use {
         time::{interval, sleep, timeout},
     },
     tonic::{
-        Streaming,
         codegen::InterceptedService,
         transport::{Channel, Endpoint},
+        Streaming,
     },
 };
 
@@ -202,12 +202,12 @@ pub fn collect_block_engine_url_status(
     }
 }
 
-#[derive(Default)]
-struct BlockEngineStageStats {
-    num_bundles: u64,
-    num_bundle_packets: u64,
-    num_packets: u64,
-    num_empty_packets: u64,
+#[derive(Default, Clone)]
+pub struct BlockEngineStageStats {
+    pub num_bundles: u64,
+    pub num_bundle_packets: u64,
+    pub num_packets: u64,
+    pub num_empty_packets: u64,
 }
 
 impl BlockEngineStageStats {
@@ -287,6 +287,7 @@ impl BlockEngineStage {
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         let secondary_task_exits = Arc::new(Mutex::new(HashMap::new()));
 
@@ -313,6 +314,7 @@ impl BlockEngineStage {
                 shredstream_receiver_address.clone(),
                 bam_enabled.clone(),
                 input_tx_signature_sender.clone(),
+                gui_metrics_sender.clone(),
             ));
 
             // Start secondary URL manager task
@@ -330,6 +332,7 @@ impl BlockEngineStage {
                 shredstream_receiver_address.clone(),
                 bam_enabled.clone(),
                 input_tx_signature_sender.clone(),
+                gui_metrics_sender.clone(),
             ));
 
             tasks
@@ -377,6 +380,7 @@ impl BlockEngineStage {
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) {
         const CHECK_INTERVAL: Duration = Duration::from_secs(5);
         let mut check_interval = interval(CHECK_INTERVAL);
@@ -452,6 +456,7 @@ impl BlockEngineStage {
                                 shredstream_receiver_address.clone(),
                                 bam_enabled.clone(),
                                 input_tx_signature_sender.clone(),
+                                gui_metrics_sender.clone(),
                             ));
                         }
 
@@ -489,6 +494,7 @@ impl BlockEngineStage {
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) {
         let mut error_count: u64 = 0;
 
@@ -525,6 +531,7 @@ impl BlockEngineStage {
                 &local_block_engine_config,
                 &bam_enabled,
                 &input_tx_signature_sender,
+                &gui_metrics_sender,
             )
             .await
             {
@@ -569,6 +576,7 @@ impl BlockEngineStage {
         local_block_engine_config: &BlockEngineConfig,
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
     ) -> crate::proxy::Result<()> {
         if BamConnectionState::from_u8(bam_enabled.load(Ordering::Relaxed))
             == BamConnectionState::Connected
@@ -597,6 +605,7 @@ impl BlockEngineStage {
                 shredstream_receiver_address,
                 bam_enabled,
                 input_tx_signature_sender,
+                gui_metrics_sender,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err));
@@ -645,6 +654,7 @@ impl BlockEngineStage {
             &Self::CONNECTION_TIMEOUT,
             bam_enabled,
             input_tx_signature_sender,
+            gui_metrics_sender,
         )
         .await
         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -672,6 +682,7 @@ impl BlockEngineStage {
         shredstream_receiver_address: &Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
     ) -> crate::proxy::Result<()> {
         let endpoints = Self::get_block_engine_endpoints(&endpoint)
             .await
@@ -742,6 +753,7 @@ impl BlockEngineStage {
                 &Self::CONNECTION_TIMEOUT,
                 bam_enabled,
                 input_tx_signature_sender,
+                gui_metrics_sender,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -816,6 +828,7 @@ impl BlockEngineStage {
         connection_timeout: &Duration,
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
     ) -> crate::proxy::Result<()> {
         // Get a copy of configs here in case they have changed at runtime
         let keypair = cluster_info.keypair().clone();
@@ -872,6 +885,7 @@ impl BlockEngineStage {
             cluster_info,
             bam_enabled,
             input_tx_signature_sender,
+            gui_metrics_sender,
         )
         .await
     }
@@ -1074,6 +1088,7 @@ impl BlockEngineStage {
         cluster_info: &Arc<ClusterInfo>,
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
     ) -> crate::proxy::Result<()> {
         let subscribe_packets_stream = timeout(
             *connection_timeout,
@@ -1141,6 +1156,7 @@ impl BlockEngineStage {
             connection_timeout,
             bam_enabled,
             input_tx_signature_sender,
+            gui_metrics_sender,
         )
         .await
     }
@@ -1167,15 +1183,22 @@ impl BlockEngineStage {
         connection_timeout: &Duration,
         #[allow(unused_variables)] bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
     ) -> crate::proxy::Result<()> {
         const METRICS_TICK: Duration = Duration::from_secs(1);
         const MAINTENANCE_TICK: Duration = Duration::from_secs(10 * 60);
         let refresh_within_s: u64 = METRICS_TICK.as_secs().saturating_mul(3).saturating_div(2);
 
+        let metrics_report_tick = if gui_metrics_sender.is_some() {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_millis(1000)
+        };
+
         let mut num_full_refreshes: u64 = 1;
         let mut num_refresh_access_token: u64 = 0;
         let mut block_engine_stats = BlockEngineStageStats::default();
-        let mut metrics_and_auth_tick = interval(METRICS_TICK);
+        let mut metrics_and_auth_tick = interval(metrics_report_tick);
         let mut maintenance_tick = interval(MAINTENANCE_TICK);
 
         info!(
@@ -1183,6 +1206,22 @@ impl BlockEngineStage {
             local_config.block_engine_url,
             global_config.is_left()
         );
+
+        // Per-connection BE peer IPv4 (primary and each secondary resolve independently).
+        // Used as FD-style fallback when bundle packet meta.addr is not a usable IPv4.
+        let block_engine_ipv4 =
+            Self::resolve_block_engine_ipv4(&local_config.block_engine_url);
+        if let Some(ip) = block_engine_ipv4 {
+            info!(
+                "block engine source ipv4 fallback for {}: {ip}",
+                local_config.block_engine_url
+            );
+        } else {
+            warn!(
+                "failed to resolve block engine ipv4 for {}; bundle txn ips may be 0.0.0.0",
+                local_config.block_engine_url
+            );
+        }
 
         while !exit.load(Ordering::Relaxed) {
             if BamConnectionState::from_u8(bam_enabled.load(Ordering::Relaxed))
@@ -1209,10 +1248,16 @@ impl BlockEngineStage {
                         resp,
                         bundle_tx,
                         &local_config.block_engine_uuid,
+                        block_engine_ipv4,
                         &mut block_engine_stats,
                     )?;
                 }
                 _ = metrics_and_auth_tick.tick() => {
+                    if let Some(gui_metrics_sender) = gui_metrics_sender {
+                        if let Err(err) = gui_metrics_sender.try_send(GuiCoreMetrics::BlockEngine(block_engine_stats.clone())) {
+                            warn!("failed to send BlockEngine gui metrics: {err}");
+                        }
+                    }
                     block_engine_stats.report_with_url(&local_config.block_engine_url, global_config.is_left());
                     block_engine_stats = BlockEngineStageStats::default();
 
@@ -1280,6 +1325,7 @@ impl BlockEngineStage {
         bundles_response: block_engine::SubscribeBundlesResponse,
         bundle_sender: &Sender<Vec<PacketBundle>>,
         block_engine_uuid: &str,
+        block_engine_ipv4: Option<Ipv4Addr>,
         block_engine_stats: &mut BlockEngineStageStats,
     ) -> crate::proxy::Result<()> {
         let mut bundle_packets = 0u64;
@@ -1293,7 +1339,14 @@ impl BlockEngineStage {
                         .bundle?
                         .packets
                         .into_iter()
-                        .map(proto_packet_to_packet)
+                        .map(|proto| {
+                            let mut packet = proto_packet_to_packet(proto);
+                            Self::apply_bundle_source_ipv4_fallback(
+                                &mut packet,
+                                block_engine_ipv4,
+                            );
+                            packet
+                        })
                         .collect::<Vec<BytesPacket>>(),
                 );
                 bundle_packets += packet_batch.len() as u64;
@@ -1315,6 +1368,52 @@ impl BlockEngineStage {
         bundle_sender
             .send(bundles)
             .map_err(|_| ProxyError::PacketForwardError)
+    }
+
+    /// FD-style: keep a usable packet IPv4; otherwise stamp this connection's BE peer IP.
+    fn apply_bundle_source_ipv4_fallback(
+        packet: &mut BytesPacket,
+        block_engine_ipv4: Option<Ipv4Addr>,
+    ) {
+        let Some(fallback) = block_engine_ipv4 else {
+            return;
+        };
+        let needs_fallback = match packet.meta().addr {
+            IpAddr::V4(v4) => v4.is_unspecified(),
+            IpAddr::V6(_) => true,
+        };
+        if needs_fallback {
+            packet.meta_mut().addr = IpAddr::V4(fallback);
+        }
+    }
+
+    /// Resolve this connection's block-engine host to an IPv4 once (no per-bundle DNS).
+    fn resolve_block_engine_ipv4(block_engine_url: &str) -> Option<Ipv4Addr> {
+        let without_scheme = block_engine_url
+            .split_once("://")
+            .map(|(_, rest)| rest)
+            .unwrap_or(block_engine_url);
+        let host_port = without_scheme.split('/').next().unwrap_or(without_scheme);
+        if host_port.starts_with('[') {
+            // IPv6 authority — GUI source field is IPv4-only.
+            return None;
+        }
+        let (host, port) = match host_port.rsplit_once(':') {
+            Some((host, port_str)) if !host.is_empty() && port_str.parse::<u16>().is_ok() => {
+                (host, port_str.parse::<u16>().ok()?)
+            }
+            _ => (host_port, 443),
+        };
+        if let Ok(IpAddr::V4(v4)) = host.parse() {
+            return Some(v4);
+        }
+        (host, port)
+            .to_socket_addrs()
+            .ok()?
+            .find_map(|addr| match addr.ip() {
+                IpAddr::V4(v4) => Some(v4),
+                IpAddr::V6(_) => None,
+            })
     }
 
     fn handle_block_engine_packets(
@@ -1556,5 +1655,32 @@ mod tests {
             entry("http://example.com:15001", "uuid-123")
         );
         assert!(parse_block_engine_entry("missing-uuid").is_err());
+    }
+
+    #[test]
+    fn test_resolve_block_engine_ipv4_literal() {
+        assert_eq!(
+            BlockEngineStage::resolve_block_engine_ipv4("https://1.2.3.4:443"),
+            Some(Ipv4Addr::new(1, 2, 3, 4))
+        );
+        assert_eq!(
+            BlockEngineStage::resolve_block_engine_ipv4("http://10.0.0.9"),
+            Some(Ipv4Addr::new(10, 0, 0, 9))
+        );
+    }
+
+    #[test]
+    fn test_apply_bundle_source_ipv4_fallback() {
+        let be_ip = Ipv4Addr::new(9, 9, 9, 9);
+        let mut unspecified = BytesPacket::new(bytes::Bytes::new(), solana_packet::Meta::default());
+        unspecified.meta_mut().addr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+        BlockEngineStage::apply_bundle_source_ipv4_fallback(&mut unspecified, Some(be_ip));
+        assert_eq!(unspecified.meta().addr, IpAddr::V4(be_ip));
+
+        let valid = Ipv4Addr::new(8, 8, 8, 8);
+        let mut kept = BytesPacket::new(bytes::Bytes::new(), solana_packet::Meta::default());
+        kept.meta_mut().addr = IpAddr::V4(valid);
+        BlockEngineStage::apply_bundle_source_ipv4_fallback(&mut kept, Some(be_ip));
+        assert_eq!(kept.meta().addr, IpAddr::V4(valid));
     }
 }
