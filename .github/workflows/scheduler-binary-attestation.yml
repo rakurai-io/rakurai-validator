@@ -80,7 +80,7 @@ jobs:
             VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
             RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
             mv target/release/librakurai_scheduler.so "target/release/${RENAMED_LIB}"
-            mkdir -p release
+            mkdir -p "$(dirname "$TAR_NAME")"
             tar -cvzf "$TAR_NAME" -C target/release "$RENAMED_LIB"
             
         - name: Deploying scheduler binary to backend server
