@@ -51,11 +51,18 @@ fn main() {
             let version =
                 env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION should be set by Cargo");
 
-            // Parse version components
+            // Parse version components. Flatten pre-release/build marks in patch
+            // so the link name is underscore-only (e.g. "0-rc.1" -> "0_rc_1").
             let version_parts: Vec<&str> = version.split('.').collect();
-            let major = version_parts.get(0).unwrap_or(&"0");
-            let minor = version_parts.get(1).unwrap_or(&"0");
-            let patch = version_parts.get(2).unwrap_or(&"0");
+            let major = version_parts.first().copied().unwrap_or("0");
+            let minor = version_parts.get(1).copied().unwrap_or("0");
+            let patch = if version_parts.len() > 2 {
+                version_parts[2..]
+                    .join(".")
+                    .replace(['.', '-'], "_")
+            } else {
+                "0".to_string()
+            };
 
             // Read scheduler_version from root Cargo.toml
             let manifest_dir =

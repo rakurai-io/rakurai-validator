@@ -75,7 +75,9 @@ jobs:
           run: |
             TAR_NAME="${{ github.ref_name }}_${{ matrix.os }}.tar.gz"
             VERSION="$(grep ^version Cargo.toml | head -n1 | sed 's/version *= *"\([^"]*\)"/\1/')"
+            # Flatten . and - to _ to match core/build.rs link name
             VERSION_SAFE="${VERSION//./_}"
+            VERSION_SAFE="${VERSION_SAFE//-/_}"
             SCHEDULER_VERSION="$(grep ^scheduler_version Cargo.toml | head -n1 | sed 's/scheduler_version *= *"\([^"]*\)"/\1/')"
             VERSION_TAG="${VERSION_SAFE}_${SCHEDULER_VERSION}"
             RENAMED_LIB="librak_scheduler_${VERSION_TAG}.so"
