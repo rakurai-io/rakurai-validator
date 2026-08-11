@@ -3,10 +3,12 @@ use {
         in_flight_tracker::InFlightTracker, scheduler_error::SchedulerError,
         transaction_state_container::StateContainer,
     },
-    crate::banking_stage::{
-        consumer::ENTRY_OVERHEAD_BYTES,
-        scheduler_messages::{
-            ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
+    crate::{
+        banking_stage::{
+            consumer::ENTRY_OVERHEAD_BYTES,
+            scheduler_messages::{
+                ConsumeWork, FinishedConsumeWork, MaxAge, TransactionBatchId, TransactionId,
+            },
         },
         gui::{gui_txn_bank_idx_for_worker, GuiTxnScheduleInfo},
     },
