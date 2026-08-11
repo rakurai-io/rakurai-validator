@@ -274,30 +274,30 @@ impl VoteWorker {
         // 0 stake are ignored.
         let mut all_vote_packets = self.storage.drain_unprocessed(bank).into_iter();
         let mut error_counters: TransactionErrorMetrics = TransactionErrorMetrics::default();
-        // `(VoteSource, arrival_nanos, source_ipv4, mb_start_nanos)`.
-        let mut resolved_sources = (VoteSource, i64, u32, i64);
         let capture_gui = self.gui_txn_event_sender.is_some();
         // Process one vote at a time to avoid over-reserving block CUs during packing.
         // This also keeps each recorded vote batch small, which favors entry/FEC-set packing.
-        while let Some(packet, source, arrival_nanos, source_ipv4) = all_vote_packets.next() {
+        while let Some((packet, source, arrival_nanos, source_ipv4)) = all_vote_packets.next() {
             let Some(sanitized_transaction) =
                 consume_scan_should_process_packet(bank, packet, &mut error_counters)
             else {
                 continue;
             };
 
+            // Parallel GUI metadata for this single vote:
+            // `(VoteSource, arrival_nanos, source_ipv4, mb_start_nanos)`.
             let mb_start = if capture_gui {
                 wallclock_timestamp_nanos()
             } else {
                 0
             };
-            resolved_sources.push((source, arrival_nanos, source_ipv4, mb_start));
+            let vote_sources = [(source, arrival_nanos, source_ipv4, mb_start)];
 
             let (process_transactions_summary, process_packets_transactions_us) =
                 measure_us!(self.process_packets_transactions(
                     bank,
                     std::slice::from_ref(&sanitized_transaction),
-                    resolved_sources,
+                    &vote_sources,
                     banking_stage_stats,
                     slot_metrics_tracker,
                 ));
@@ -320,18 +320,18 @@ impl VoteWorker {
                 // vote is processed one at a time, so the only valid retryable index is 0
                 assert_eq!(retryable_vote_indices.as_slice(), &[0]);
 
-                self.storage.reinsert_packets(std::iter::once(
-                    sanitized_transaction.into_inner_transaction().into_view(), source, arrival, ip,
-                ));
+                self.storage.reinsert_packets(std::iter::once((
+                    sanitized_transaction.into_inner_transaction().into_view(),
+                    source,
+                    arrival_nanos,
+                    source_ipv4,
+                )));
             }
 
             if has_reached_end_of_slot(reached_max_poh_height, bank) {
-                self.storage.reinsert_packets(all_vote_packets.map(
-                    |(packet, source, arrival, ip)| (packet, source, arrival, ip),
-                ));
+                self.storage.reinsert_packets(all_vote_packets);
                 return true;
             }
-            resolved_sources.clear();
         }
 
         false

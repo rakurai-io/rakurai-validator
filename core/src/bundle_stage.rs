@@ -1424,7 +1424,13 @@ impl BundleStage {
             }
 
             if let Some(bundle) = bundles.pop_front() {
-                let result = Self::process_bundle(bank, &bundle, consumer, consume_worker_metrics);
+                let result = Self::process_bundle(
+                    bank,
+                    &bundle,
+                    consumer,
+                    consume_worker_metrics,
+                    gui_txn_event_sender.as_ref(),
+                );
                 let _ = bundle_account_locker.unlock_bundle(&bundle.transactions, bank);
                 match result {
                     Ok(output) => {
