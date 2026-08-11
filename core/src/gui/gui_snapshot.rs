@@ -2,8 +2,9 @@ use {
     crate::gui::slot_store::{SlotRankingsTotals, SlotTxnStore},
     arc_swap::ArcSwap,
     serde::Serialize,
-    solana_clock::{Epoch, Slot, NUM_CONSECUTIVE_LEADER_SLOTS},
+    solana_clock::{Epoch, Slot},
     solana_keypair::Keypair,
+    solana_leader_schedule::NUM_CONSECUTIVE_LEADER_SLOTS,
     solana_pubkey::Pubkey,
     solana_runtime::{bank::Bank, bank_forks::BankForks, leader_schedule_utils::leader_schedule},
     solana_signer::Signer,
@@ -491,10 +492,10 @@ fn epoch_wire_from_bank(bank: &Bank, epoch: Epoch) -> Option<EpochWire> {
         .collect();
 
     let slots_in_epoch = bank.get_slots_in_epoch(epoch) as usize;
-    let num_groups = slots_in_epoch / NUM_CONSECUTIVE_LEADER_SLOTS as usize;
+    let num_groups = slots_in_epoch / NUM_CONSECUTIVE_LEADER_SLOTS.get();
     let mut leader_slots = Vec::with_capacity(num_groups);
     for group in 0..num_groups {
-        let slot_index = group as u64 * NUM_CONSECUTIVE_LEADER_SLOTS;
+        let slot_index = group as u64 * NUM_CONSECUTIVE_LEADER_SLOTS.get() as u64;
         let leader_id = schedule[slot_index].id;
         let leader_idx = id_to_index.get(&leader_id).copied().unwrap_or(0) as u64;
         leader_slots.push(leader_idx);
