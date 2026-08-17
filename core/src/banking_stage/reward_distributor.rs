@@ -45,7 +45,7 @@ use {
     reward_distribution::{
         sdk::{
             derive_config_account_address, derive_mev_share_collection_account_address,
-            derive_mev_share_collection_account_v1_address,
+            derive_mev_share_collection_account_v1_address, derive_p2c_subscription_address,
             derive_reward_collection_account_address, derive_tip_collection_account_address,
             derive_tip_collection_account_v1_address, derive_tips_and_mev_share_config_address,
             instruction::{
@@ -55,14 +55,20 @@ use {
                 TransferClientCommissionOnMevCommissionAccounts,
                 TransferClientCommissionOnMevCommissionArgs, TransferStakerRewardsAccounts,
                 TransferStakerRewardsArgs, UpdateEpochConvertedToBlockRewardAccounts,
-                UpdateEpochConvertedToBlockRewardArgs, initialize_revenue_share_account_v1_ix,
+                UpdateEpochConvertedToBlockRewardArgs,
+                UpdateP2CEpochConvertedToBlockRewardAccounts,
+                UpdateP2CEpochConvertedToBlockRewardArgs, initialize_revenue_share_account_v1_ix,
                 initialize_reward_collection_account_v1_ix, record_revenue_v1_ix,
                 transfer_client_commission_on_mev_commission_ix, transfer_staker_rewards_ix,
                 update_epoch_converted_to_block_reward_ix,
                 update_epoch_converted_to_block_reward_v1_ix,
+                update_p2c_epoch_converted_to_block_reward_ix,
             },
         },
-        state::{RevenueShareAccount, RevenueShareAccountV1, RewardCollectionAccount},
+        state::{
+            P2CSubscriptionAccount, RevenueShareAccount, RevenueShareAccountV1,
+            RewardCollectionAccount,
+        },
     },
     solana_account::ReadableAccount,
     solana_clock::Slot,
@@ -1310,6 +1316,199 @@ impl RewardDistributor {
     }
 
     /// Mirrors the legacy scan for TCAV1/MCAV1 revenue-share accounts (`REVENUE_SHARE_V1`).
+    fn process_p2c_escrow_block_reward_conversions_from_chain(&mut self, bank: &Bank) {
+        let current_epoch = bank.epoch();
+        let reward_distribution_program_id = AnchorPubkey::from(
+            self.distribution_config
+                .reward_distribution_program_id
+                .as_array()
+                .clone(),
+        );
+        let reward_distribution_program_pubkey =
+            self.distribution_config.reward_distribution_program_id;
+        let vote_account =
+            AnchorPubkey::from(self.distribution_config.vote_account.as_array().clone());
+        let identity = AnchorPubkey::from(self.cluster_info.id().as_array().clone());
+
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+        let mut p2c_escrow_group_count = 0usize;
+
+        match load_cached_uuid_mev_share_groups(bank) {
+            Some(groups) => {
+                p2c_escrow_group_count = groups.len();
+                for group in groups {
+                    let (p2c_escrow_collection_account, _bump) = derive_p2c_subscription_address(
+                        &reward_distribution_program_id,
+                        &group.uuid_name,
+                        &vote_account,
+                    );
+                    let (s, w, a) = self.process_p2c_escrow_block_reward_conversions(
+                        bank,
+                        current_epoch,
+                        reward_distribution_program_id,
+                        reward_distribution_program_pubkey,
+                        vote_account,
+                        identity,
+                        &group.uuid,
+                        "p2c_escrow",
+                        p2c_escrow_collection_account,
+                    );
+                    sent += s;
+                    waiting_claim += w;
+                    already_converted += a;
+                }
+            }
+            None => {
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow scan skipped: \
+                     postpack confirmation config unavailable (current_epoch={current_epoch})"
+                );
+            }
+        }
+        info!(
+            "reward_distributor block_reward_conversion_p2c_escrow scan complete current_epoch={current_epoch} \
+             p2c_escrow_uuid_groups={p2c_escrow_group_count} \
+             txn_sent={sent} waiting_claim={waiting_claim} already_converted={already_converted}"
+        );
+    }
+
+    fn process_p2c_escrow_block_reward_conversions(
+        &mut self,
+        bank: &Bank,
+        current_epoch: u64,
+        reward_distribution_program_id: AnchorPubkey,
+        reward_distribution_program_pubkey: Pubkey,
+        vote_account: AnchorPubkey,
+        identity: AnchorPubkey,
+        uuid: &str,
+        share_kind: &str,
+        p2_escrow_pda: AnchorPubkey,
+    ) -> (usize, usize, usize) {
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+
+        let p2c_sub_pda = Pubkey::new_from_array(*p2_escrow_pda.as_array());
+        let Some(account) = bank.get_account(&p2c_sub_pda) else {
+            return (sent, waiting_claim, already_converted);
+        };
+        if account.owner() != &reward_distribution_program_pubkey {
+            return (sent, waiting_claim, already_converted);
+        }
+        let Ok(p2c_subscription_account) =
+            P2CSubscriptionAccount::try_deserialize(&mut account.data())
+        else {
+            warn!(
+                "reward_distributor block_reward_conversion_p2c_escrow scan: {share_kind} deserialize failed \
+                 uuid={uuid:?} pda={p2c_sub_pda}"
+            );
+            return (sent, waiting_claim, already_converted);
+        };
+
+        if !p2c_subscription_account.block_reward_conversion_enabled {
+            return (sent, waiting_claim, already_converted);
+        }
+
+        for entry in &p2c_subscription_account.ledger.entries {
+            if entry.epoch >= current_epoch {
+                continue;
+            }
+            if entry.block_reward_converted {
+                already_converted += 1;
+                continue;
+            }
+            if entry.amount_due == 0 {
+                continue;
+            }
+
+            if !entry.claimed {
+                waiting_claim += 1;
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow waiting: kind={share_kind} \
+                     uuid={uuid:?} epoch={} claimed=false amount_due={} amount_deducted={} \
+                     pda={p2c_sub_pda}",
+                    entry.epoch, entry.amount_due, entry.amount_deducted
+                );
+                continue;
+            }
+
+            let total_amount = entry.amount_deducted;
+            let commission_amount = if p2c_subscription_account.commission_bps == 0
+                || p2c_subscription_account.name == RAKURAI_REVENUE_NAME
+            {
+                0
+            } else {
+                ((total_amount as u128)
+                    .saturating_mul(p2c_subscription_account.commission_bps as u128)
+                    / 10_000u128) as u64
+            };
+            let amount = total_amount.saturating_sub(commission_amount);
+            if amount == 0 {
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow skip: zero validator amount \
+                     kind={share_kind} uuid={uuid:?} epoch={} transferred_amount={total_amount} \
+                     commission_bps={} pda={p2c_sub_pda}",
+                    entry.epoch, p2c_subscription_account.commission_bps
+                );
+                continue;
+            }
+
+            let convert_ix = Self::anchor_ix_to_solana(
+                reward_distribution_program_pubkey,
+                update_p2c_epoch_converted_to_block_reward_ix(
+                    reward_distribution_program_id,
+                    UpdateP2CEpochConvertedToBlockRewardArgs { epoch: entry.epoch },
+                    UpdateP2CEpochConvertedToBlockRewardAccounts {
+                        p2c_subscription_account: p2_escrow_pda,
+                        validator_vote_account: vote_account,
+                        signer: identity,
+                    },
+                ),
+            );
+
+            let instructions = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(BLOCK_REWARD_CONVERSION_CU_LIMIT),
+                ComputeBudgetInstruction::set_compute_unit_price(
+                    amount * AMOUNT_MULTIPLICATION_FACTOR,
+                ),
+                convert_ix,
+            ];
+
+            match self.create_runtime_transaction(bank, &instructions) {
+                Some(runtime_tx) => {
+                    let signature = runtime_tx.signature().clone();
+                    info!(
+                        "reward_distributor block_reward_conversion_p2c_escrow txn_sent kind={share_kind} \
+                         uuid={uuid:?} epoch={} transferred_amount={total_amount} commission_bps={} \
+                         priority_fee_lamports={amount} pda={p2c_sub_pda} sig={signature}",
+                        entry.epoch, p2c_subscription_account.commission_bps
+                    );
+                    self.send_transaction(
+                        format!(
+                            "block_reward_conversion=p2c_escrow,share_kind={},uuid={},revenue_pda={}",
+                            share_kind, uuid, p2c_sub_pda
+                        ),
+                        &bank,
+                        runtime_tx,
+                    );
+                    sent += 1;
+                }
+                None => {
+                    warn!(
+                        "reward_distributor block_reward_conversion_p2c_escrow failed to build txn \
+                         kind={share_kind} uuid={uuid:?} epoch={} pda={p2c_sub_pda}",
+                        entry.epoch
+                    );
+                }
+            }
+        }
+
+        (sent, waiting_claim, already_converted)
+    }
+
+    /// Mirrors the legacy scan for TCAV1/MCAV1 revenue-share accounts (`REVENUE_SHARE_V1`).
     fn process_block_reward_conversions_from_chain_v1(&mut self, bank: &Bank) {
         let current_epoch = bank.epoch();
         let reward_distribution_program_id = AnchorPubkey::from(
@@ -2110,6 +2309,7 @@ impl RewardDistributor {
             if let Some(working_bank) = conversions_to_process.take() {
                 self.process_block_reward_conversions_from_chain(&working_bank);
                 self.process_block_reward_conversions_from_chain_v1(&working_bank);
+                self.process_p2c_escrow_block_reward_conversions_from_chain(&working_bank);
             }
 
             match decision {
