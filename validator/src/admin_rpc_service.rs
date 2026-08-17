@@ -719,19 +719,21 @@ impl AdminRpc for AdminRpcImpl {
         trust_packets: bool,
     ) -> Result<()> {
         debug!("set_block_engine_config request received");
-        let config = BlockEngineConfig {
-            block_engine_url,
-            disable_block_engine_autoconfig,
-            trust_packets,
-            ..Default::default()
-        };
-        // Detailed log messages are printed inside validate function
-        if !BlockEngineStage::is_valid_block_engine_config(&config) {
-            return Err(jsonrpc_core::error::Error::invalid_params(
-                "failed to set block engine config. see logs for details.",
-            ));
-        }
         meta.with_post_init(|post_init| {
+            let previous = post_init.block_engine_config.load();
+            let config = BlockEngineConfig {
+                block_engine_url,
+                disable_block_engine_autoconfig,
+                trust_packets,
+                block_engine_uuid: previous.block_engine_uuid.clone(),
+                ..Default::default()
+            };
+            // Detailed log messages are printed inside validate function
+            if !BlockEngineStage::is_valid_block_engine_config(&config) {
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "failed to set block engine config. see logs for details.",
+                ));
+            }
             post_init.block_engine_config.store(Arc::new(config));
             Ok(())
         })
@@ -761,7 +763,10 @@ impl AdminRpc for AdminRpcImpl {
             let blocklisted_uuids = post_init.block_engine_uuid_blocklist.load();
             let onchain_secondary_entries =
                 post_init.bank_forks.read().ok().and_then(|bank_forks| {
-                    load_secondary_block_engine_entries_from_bank(&bank_forks.working_bank())
+                    load_secondary_block_engine_entries_from_bank(
+                        &bank_forks.working_bank(),
+                        &post_init.vote_account,
+                    )
                 });
 
             Ok(collect_block_engine_url_status(

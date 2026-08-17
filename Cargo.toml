@@ -266,6 +266,7 @@ futures-util = "0.3.29"
 gag = "1.0.0"
 gethostname = "1.1.0"
 goauth = "0.17.0"
+governor = "0.10.4"
 group = "0.13.0"
 hex = "0.4.3"
 hex-literal = "1.1.0"
@@ -340,6 +341,7 @@ quinn = "0.11.11"
 quinn-proto = "0.11.14"
 quote = "1.0"
 rakurai_activation = { path = "rakurai_programs/programs/rakurai_activation", features = ["no-entrypoint"] }
+rakurai_client_config = { path = "rakurai_programs/programs/rakurai_client_config", features = ["no-entrypoint"] }
 rand = "0.9.4"
 rand0-7 = { package = "rand", version = "0.7" }
 rand_chacha = "0.9.0"

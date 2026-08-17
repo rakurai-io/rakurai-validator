@@ -497,6 +497,7 @@ pub enum BundleDropReason {
     BundleLockError,
     SecondaryBackrunDropped,
     UnprocessedAtTurnEnd,
+    RateLimited,
 }
 
 impl BundleDropReason {
@@ -520,6 +521,7 @@ impl BundleDropReason {
             Self::BundleLockError => "bundle_lock_error",
             Self::SecondaryBackrunDropped => "secondary_backrun_dropped",
             Self::UnprocessedAtTurnEnd => "unprocessed_at_turn_end",
+            Self::RateLimited => "rate_limited",
         }
     }
 
@@ -626,6 +628,32 @@ impl BundleExecutionStats {
         time.duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as i64)
             .unwrap_or(0)
+    }
+
+    pub fn report_immediate_drop(
+        bundle_id: &str,
+        block_engine_uuid: String,
+        is_primary: bool,
+        reason: BundleDropReason,
+    ) {
+        let mut stats = Self::new_on_receive(
+            SystemTime::now(),
+            block_engine_uuid,
+            is_primary,
+            0, // never entered insert_bundle; no processing slot
+        );
+        stats.mark_dropped(reason);
+        stats.report_datapoint(bundle_id);
+    }
+
+    #[cfg(test)]
+    pub fn outcome(&self) -> BundleOutcome {
+        self.outcome
+    }
+
+    #[cfg(test)]
+    pub fn drop_reason(&self) -> Option<BundleDropReason> {
+        self.drop_reason
     }
 
     pub fn report_datapoint(&self, bundle_id: &str) {
@@ -2470,5 +2498,37 @@ mod tests {
         bundle_stage.join().unwrap();
         poh_service.join().unwrap();
         drop(verified_bundle_sender);
+    }
+
+    #[test]
+    fn test_rate_limited_drop_reason() {
+        assert_eq!(BundleDropReason::RateLimited.as_str(), "rate_limited");
+    }
+
+    #[test]
+    fn test_mark_dropped_does_not_overwrite_terminal() {
+        let mut dropped =
+            BundleExecutionStats::new_on_receive(SystemTime::now(), "be".into(), true, 1);
+        dropped.mark_dropped(BundleDropReason::RateLimited);
+        dropped.mark_dropped(BundleDropReason::EmptyBatch);
+        assert_eq!(dropped.outcome(), BundleOutcome::Dropped);
+        assert_eq!(dropped.drop_reason(), Some(BundleDropReason::RateLimited));
+
+        let mut executed =
+            BundleExecutionStats::new_on_receive(SystemTime::now(), "be".into(), true, 1);
+        executed.mark_executed();
+        executed.mark_dropped(BundleDropReason::EmptyBatch);
+        assert_eq!(executed.outcome(), BundleOutcome::Executed);
+        assert_eq!(executed.drop_reason(), None);
+    }
+
+    #[test]
+    fn test_report_immediate_drop_marks_rate_limited() {
+        BundleExecutionStats::report_immediate_drop(
+            "bundle-1",
+            "uuid".to_string(),
+            false,
+            BundleDropReason::RateLimited,
+        );
     }
 }

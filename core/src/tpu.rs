@@ -73,8 +73,8 @@ use {
     solana_streamer::{
         evicting_sender::EvictingSender,
         quic::{
-            SimpleQosQuicStreamerConfig, SpawnServerResult, SwQosQuicStreamerConfig,
-            spawn_simple_qos_server, spawn_stake_weighted_qos_server, GuiStreamerMetrics,
+            GuiStreamerMetrics, SimpleQosQuicStreamerConfig, SpawnServerResult,
+            SwQosQuicStreamerConfig, spawn_simple_qos_server, spawn_stake_weighted_qos_server,
         },
         quic_socket::QuicSocket,
         streamer::StakedNodes,
@@ -215,6 +215,7 @@ impl Tpu {
         client_mode: Arc<Mutex<ClientMode>>,
         reset_rakurai: Arc<AtomicBool>,
         bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        vote_account: Pubkey,
         scheduling_strategy: Option<crate::banking_stage::SchedlingStrategy>,
         postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
         postpack_confirmation_active_entries: crate::banking_stage::PostPackConfirmationActiveEntries,
@@ -423,6 +424,8 @@ impl Tpu {
             bam_enabled.clone(),
             input_tx_signature_sender.clone(),
             gui_core_metrics_sender.clone(),
+            bundle_lifecycle_dump_enabled.clone(),
+            vote_account,
         );
         let (verified_bundle_sender, verified_bundle_receiver) = bounded(16_384);
         let bundle_sigverify_stage = BundleSigverifyStage::new(

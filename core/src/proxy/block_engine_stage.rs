@@ -8,28 +8,29 @@ use {
     crate::{
         bam_dependencies::BamConnectionState,
         banking_trace::BankingPacketSender,
+        bundle_stage::{BundleDropReason, BundleExecutionStats},
         gui::GuiCoreMetrics,
         packet_bundle::PacketBundle,
         proto_packet_to_packet,
         proxy::{
+            ProxyError,
             auth::{AuthInterceptor, auth_client_from_endpoint, maybe_refresh_auth_tokens},
-            endpoint_from_url, sanitize_status_message_for_influx, ProxyError,
+            endpoint_from_url, sanitize_status_message_for_influx,
         },
     },
     ahash::HashMapExt,
     arc_swap::ArcSwap,
-    borsh::BorshDeserialize,
     crossbeam_channel::Sender,
+    governor::{DefaultDirectRateLimiter, Quota, RateLimiter},
     itertools::{Either, Itertools},
     jito_protos::proto::{
         auth::{Token, auth_service_client::AuthServiceClient},
         block_engine::{
-            self, block_engine_validator_client::BlockEngineValidatorClient,
-            BlockBuilderFeeInfoRequest, BlockEngineEndpoint, GetBlockEngineEndpointRequest,
+            self, BlockBuilderFeeInfoRequest, BlockEngineEndpoint, GetBlockEngineEndpointRequest,
+            block_engine_validator_client::BlockEngineValidatorClient,
         },
     },
     serde::{Deserialize, Serialize},
-    solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_perf::packet::{BytesPacket, PacketBatch},
@@ -37,13 +38,14 @@ use {
     solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_signer::Signer,
     std::{
-        collections::{hash_map::Entry, HashMap, HashSet},
+        collections::{HashMap, HashSet, hash_map::Entry},
         net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs},
+        num::NonZeroU32,
         ops::AddAssign,
         str::FromStr,
         sync::{
-            atomic::{AtomicBool, AtomicU8, Ordering},
             Arc, Mutex, RwLock,
+            atomic::{AtomicBool, AtomicU8, Ordering},
         },
         thread::{self, Builder, JoinHandle},
         time::{Duration, Instant},
@@ -54,36 +56,21 @@ use {
         time::{interval, sleep, timeout},
     },
     tonic::{
+        Streaming,
         codegen::InterceptedService,
         transport::{Channel, Endpoint},
-        Streaming,
     },
 };
 
 const CONNECTION_TIMEOUT_S: u64 = 10;
 const CONNECTION_BACKOFF_S: u64 = 5;
 
-/// On-chain block engine config PDA (`["block_engine_config"]` + activation program).
-pub const BLOCK_ENGINE_PROGRAM_ID: Pubkey =
-    Pubkey::from_str_const("L9D6MXnwqQeQhBJnJRXaNbqEnXu4WzubWRvmPhw4opt");
-const BLOCK_ENGINE_CONFIG_SEED: &[u8] = b"BLOCK_ENGINE_CONFIG_ACCOUNT";
-const ACCOUNT_HEADER_LEN: usize = 8 + 32 + 1 + 4;
-
-#[derive(BorshDeserialize, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockEngineEntry {
     pub url: String,
     pub uuid: String,
-}
-
-#[derive(BorshDeserialize, Clone, Debug, PartialEq)]
-struct BlockEngineUrl {
-    pub url: String,
-}
-
-#[derive(BorshDeserialize, Clone, Debug, PartialEq)]
-struct UuidBlockEngineGroup {
-    pub service_uuid: [u8; 32],
-    pub entries: Vec<BlockEngineUrl>,
+    #[serde(default)]
+    pub bundle_rate_limit: BlockEngineBundleRateLimit,
 }
 
 pub fn parse_block_engine_entry(value: &str) -> Result<BlockEngineEntry, String> {
@@ -96,59 +83,44 @@ pub fn parse_block_engine_entry(value: &str) -> Result<BlockEngineEntry, String>
     Ok(BlockEngineEntry {
         url: url.to_string(),
         uuid: uuid.to_string(),
+        ..Default::default()
     })
 }
 
-pub fn derive_block_engine_config_pda() -> Pubkey {
-    Pubkey::find_program_address(&[BLOCK_ENGINE_CONFIG_SEED], &BLOCK_ENGINE_PROGRAM_ID).0
+#[cfg(feature = "build_validator")]
+mod ffi {
+    use {super::BlockEngineEntry, solana_pubkey::Pubkey, solana_runtime::bank::Bank};
+
+    unsafe extern "C" {
+        #[allow(improper_ctypes)]
+        #[allow(improper_ctypes_definitions)]
+        pub fn load_secondary_block_engine_entries_from_bank(
+            bank: &Bank,
+            vote_account: &Pubkey,
+        ) -> Option<Vec<BlockEngineEntry>>;
+    }
 }
 
-pub fn uuid_to_string(uuid: &[u8; 32]) -> String {
-    let end = uuid
-        .iter()
-        .rposition(|b| *b != 0)
-        .map(|i| i + 1)
-        .unwrap_or(0);
-    if end == 0 {
-        return String::new();
+/// Secondary block-engine URLs from the on-chain client-config PDA.
+/// Implemented by rakurai_scheduler (same parser as tips / post-pack).
+pub fn load_secondary_block_engine_entries_from_bank(
+    bank: &Bank,
+    vote_account: &Pubkey,
+) -> Option<Vec<BlockEngineEntry>> {
+    #[cfg(feature = "build_validator")]
+    {
+        // SAFETY: exported by rakurai_scheduler entrypoint from the same revision.
+        return unsafe { ffi::load_secondary_block_engine_entries_from_bank(bank, vote_account) };
     }
-    String::from_utf8_lossy(&uuid[..end]).into_owned()
+    #[cfg(not(feature = "build_validator"))]
+    {
+        let _ = (bank, vote_account);
+        None
+    }
 }
 
-pub fn load_secondary_block_engine_entries_from_bank(bank: &Bank) -> Option<Vec<BlockEngineEntry>> {
-    let pda = derive_block_engine_config_pda();
-    let account = bank.get_account(&pda)?;
-    if account.owner() != &BLOCK_ENGINE_PROGRAM_ID {
-        return None;
-    }
-    let data = account.data();
-    if data.len() <= ACCOUNT_HEADER_LEN {
-        return None;
-    }
-
-    let mut slice = &data[ACCOUNT_HEADER_LEN..];
-
-    let groups = Vec::<UuidBlockEngineGroup>::deserialize(&mut slice)
-        .map_err(|err| {
-            warn!("failed to deserialize block engine entries from {pda}: {err}");
-            err
-        })
-        .ok()?;
-    Some(
-        groups
-            .into_iter()
-            .flat_map(|group| {
-                let uuid = uuid_to_string(&group.service_uuid);
-                group
-                    .entries
-                    .into_iter()
-                    .map(move |entry| BlockEngineEntry {
-                        uuid: uuid.clone(),
-                        url: entry.url,
-                    })
-            })
-            .collect::<Vec<BlockEngineEntry>>(),
-    )
+fn secondary_task_key(entry: &BlockEngineEntry) -> String {
+    format!("{}|{}", entry.uuid, entry.url)
 }
 
 pub fn merged_secondary_block_engine_entries(
@@ -162,10 +134,10 @@ pub fn merged_secondary_block_engine_entries(
         .filter(|entry| !blocklist.contains(entry.uuid.as_str()))
         .cloned()
         .collect::<Vec<_>>();
-    let mut merged_uuids: HashSet<String> = merged.iter().map(|entry| entry.uuid.clone()).collect();
+    let admin_uuids: HashSet<String> = merged.iter().map(|entry| entry.uuid.clone()).collect();
     if let Some(onchain_entries) = onchain_entries {
         for entry in onchain_entries {
-            if !blocklist.contains(entry.uuid.as_str()) && merged_uuids.insert(entry.uuid.clone()) {
+            if !blocklist.contains(entry.uuid.as_str()) && !admin_uuids.contains(&entry.uuid) {
                 merged.push(entry);
             }
         }
@@ -204,10 +176,11 @@ pub fn collect_block_engine_url_status(
 
 #[derive(Default, Clone)]
 pub struct BlockEngineStageStats {
-    pub num_bundles: u64,
-    pub num_bundle_packets: u64,
-    pub num_packets: u64,
-    pub num_empty_packets: u64,
+    pub(crate) num_bundles: u64,
+    num_bundle_packets: u64,
+    num_packets: u64,
+    num_empty_packets: u64,
+    num_bundles_throttled: u64,
 }
 
 impl BlockEngineStageStats {
@@ -219,7 +192,8 @@ impl BlockEngineStageStats {
             ("num_bundles", self.num_bundles, i64),
             ("num_bundle_packets", self.num_bundle_packets, i64),
             ("num_packets", self.num_packets, i64),
-            ("num_empty_packets", self.num_empty_packets, i64)
+            ("num_empty_packets", self.num_empty_packets, i64),
+            ("num_bundles_throttled", self.num_bundles_throttled, i64)
         );
     }
 }
@@ -228,6 +202,34 @@ impl BlockEngineStageStats {
 pub struct BlockBuilderFeeInfo {
     pub block_builder: Pubkey,
     pub block_builder_commission: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEngineBundleRateLimit {
+    /// Bundles admitted per `period_ms`. 0 = unlimited.
+    pub max_bundles: u32,
+    /// Quota window in milliseconds. 0 = unlimited.
+    pub period_ms: u32,
+    /// Token-bucket capacity. If 0 and quota is set, treat as equal to `max_bundles`.
+    pub max_bundle_burst: u32,
+}
+
+fn maybe_bundle_limiter(
+    limit: &BlockEngineBundleRateLimit,
+) -> Option<Arc<DefaultDirectRateLimiter>> {
+    if limit.max_bundles == 0 || limit.period_ms == 0 {
+        return None;
+    }
+    let burst = if limit.max_bundle_burst == 0 {
+        limit.max_bundles
+    } else {
+        limit.max_bundle_burst
+    };
+    let burst = NonZeroU32::new(burst)?;
+    let cell_period =
+        Duration::from_millis(limit.period_ms as u64).checked_div(limit.max_bundles)?;
+    let quota = Quota::with_period(cell_period)?.allow_burst(burst);
+    Some(Arc::new(RateLimiter::direct(quota)))
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -243,6 +245,11 @@ pub struct BlockEngineConfig {
 
     /// If set then it will be assumed the backend verified packets so signature verification will be bypassed in the validator.
     pub trust_packets: bool,
+
+    /// Ingress bundle rate limit for this connection. 0/0 = unlimited.
+    /// Primary is never throttled. Admin/CLI secondaries default to unlimited;
+    /// on-chain secondaries use the per-URL values from `rakurai_client_config`.
+    pub bundle_rate_limit: BlockEngineBundleRateLimit,
 }
 
 pub struct BlockEngineStage {
@@ -288,6 +295,8 @@ impl BlockEngineStage {
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        vote_account: Pubkey,
     ) -> Self {
         let secondary_task_exits = Arc::new(Mutex::new(HashMap::new()));
 
@@ -315,6 +324,7 @@ impl BlockEngineStage {
                 bam_enabled.clone(),
                 input_tx_signature_sender.clone(),
                 gui_metrics_sender.clone(),
+                bundle_lifecycle_dump_enabled.clone(),
             ));
 
             // Start secondary URL manager task
@@ -333,6 +343,8 @@ impl BlockEngineStage {
                 bam_enabled.clone(),
                 input_tx_signature_sender.clone(),
                 gui_metrics_sender.clone(),
+                bundle_lifecycle_dump_enabled,
+                vote_account,
             ));
 
             tasks
@@ -381,6 +393,8 @@ impl BlockEngineStage {
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        vote_account: Pubkey,
     ) {
         const CHECK_INTERVAL: Duration = Duration::from_secs(5);
         let mut check_interval = interval(CHECK_INTERVAL);
@@ -393,7 +407,10 @@ impl BlockEngineStage {
                     let admin_entries = secondary_entries.load().as_ref().clone();
                     let blocklist = blocklisted_uuids.load().as_ref().clone();
                     let onchain_entries = bank_forks.read().ok().and_then(|bank_forks_guard| {
-                        load_secondary_block_engine_entries_from_bank(&bank_forks_guard.working_bank())
+                        load_secondary_block_engine_entries_from_bank(
+                            &bank_forks_guard.working_bank(),
+                            &vote_account,
+                        )
                     });
                     let new_entries = merged_secondary_block_engine_entries(
                         &admin_entries,
@@ -423,7 +440,7 @@ impl BlockEngineStage {
                         for entry in entries_to_remove {
                             if let Some(task_exit) = {
                                 let mut exits = secondary_task_exits.lock().unwrap();
-                                exits.remove(&entry.uuid)
+                                exits.remove(&secondary_task_key(&entry))
                             } {
                                 info!(
                                     "Stopping task for removed block engine entry: uuid={}, url={}",
@@ -438,12 +455,12 @@ impl BlockEngineStage {
 
                             {
                                 let mut exits = secondary_task_exits.lock().unwrap();
-                                exits.insert(entry.uuid.clone(), task_exit.clone());
+                                exits.insert(secondary_task_key(&entry), task_exit.clone());
                             }
 
                             info!(
-                                "Starting task for new block engine entry: uuid={}, url={}",
-                                entry.uuid, entry.url
+                                "Starting task for new block engine entry: uuid={}, url={}, rate={:?}",
+                                entry.uuid, entry.url, entry.bundle_rate_limit
                             );
                             task_set.spawn(Self::start(
                                 Either::Right(entry.clone()),
@@ -457,6 +474,7 @@ impl BlockEngineStage {
                                 bam_enabled.clone(),
                                 input_tx_signature_sender.clone(),
                                 gui_metrics_sender.clone(),
+                                bundle_lifecycle_dump_enabled.clone(),
                             ));
                         }
 
@@ -495,6 +513,7 @@ impl BlockEngineStage {
         bam_enabled: Arc<AtomicU8>,
         input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
     ) {
         let mut error_count: u64 = 0;
 
@@ -508,6 +527,7 @@ impl BlockEngineStage {
                     block_engine_uuid: entry.uuid.clone(),
                     disable_block_engine_autoconfig: false,
                     trust_packets: false, // Default to false for secondary URLs
+                    bundle_rate_limit: entry.bundle_rate_limit.clone(),
                 },
             };
             if !Self::is_valid_block_engine_config(&local_block_engine_config) {
@@ -532,6 +552,7 @@ impl BlockEngineStage {
                 &bam_enabled,
                 &input_tx_signature_sender,
                 &gui_metrics_sender,
+                &bundle_lifecycle_dump_enabled,
             )
             .await
             {
@@ -577,6 +598,7 @@ impl BlockEngineStage {
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         if BamConnectionState::from_u8(bam_enabled.load(Ordering::Relaxed))
             == BamConnectionState::Connected
@@ -606,6 +628,7 @@ impl BlockEngineStage {
                 bam_enabled,
                 input_tx_signature_sender,
                 gui_metrics_sender,
+                bundle_lifecycle_dump_enabled,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err));
@@ -655,6 +678,7 @@ impl BlockEngineStage {
             bam_enabled,
             input_tx_signature_sender,
             gui_metrics_sender,
+            bundle_lifecycle_dump_enabled,
         )
         .await
         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -683,6 +707,7 @@ impl BlockEngineStage {
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         let endpoints = Self::get_block_engine_endpoints(&endpoint)
             .await
@@ -754,6 +779,7 @@ impl BlockEngineStage {
                 bam_enabled,
                 input_tx_signature_sender,
                 gui_metrics_sender,
+                bundle_lifecycle_dump_enabled,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -829,6 +855,7 @@ impl BlockEngineStage {
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         // Get a copy of configs here in case they have changed at runtime
         let keypair = cluster_info.keypair().clone();
@@ -886,6 +913,7 @@ impl BlockEngineStage {
             bam_enabled,
             input_tx_signature_sender,
             gui_metrics_sender,
+            bundle_lifecycle_dump_enabled,
         )
         .await
     }
@@ -1089,6 +1117,7 @@ impl BlockEngineStage {
         bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         let subscribe_packets_stream = timeout(
             *connection_timeout,
@@ -1157,6 +1186,7 @@ impl BlockEngineStage {
             bam_enabled,
             input_tx_signature_sender,
             gui_metrics_sender,
+            bundle_lifecycle_dump_enabled,
         )
         .await
     }
@@ -1184,6 +1214,7 @@ impl BlockEngineStage {
         #[allow(unused_variables)] bam_enabled: &Arc<AtomicU8>,
         input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
         gui_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
+        bundle_lifecycle_dump_enabled: &Arc<AtomicBool>,
     ) -> crate::proxy::Result<()> {
         const METRICS_TICK: Duration = Duration::from_secs(1);
         const MAINTENANCE_TICK: Duration = Duration::from_secs(10 * 60);
@@ -1200,6 +1231,11 @@ impl BlockEngineStage {
         let mut block_engine_stats = BlockEngineStageStats::default();
         let mut metrics_and_auth_tick = interval(metrics_report_tick);
         let mut maintenance_tick = interval(MAINTENANCE_TICK);
+        let bundle_limiter = if global_config.is_left() {
+            None
+        } else {
+            maybe_bundle_limiter(&local_config.bundle_rate_limit)
+        };
 
         info!(
             "connected to packet and bundle stream: {} (primary: {})",
@@ -1209,8 +1245,7 @@ impl BlockEngineStage {
 
         // Per-connection BE peer IPv4 (primary and each secondary resolve independently).
         // Used as FD-style fallback when bundle packet meta.addr is not a usable IPv4.
-        let block_engine_ipv4 =
-            Self::resolve_block_engine_ipv4(&local_config.block_engine_url);
+        let block_engine_ipv4 = Self::resolve_block_engine_ipv4(&local_config.block_engine_url);
         if let Some(ip) = block_engine_ipv4 {
             info!(
                 "block engine source ipv4 fallback for {}: {ip}",
@@ -1249,6 +1284,9 @@ impl BlockEngineStage {
                         bundle_tx,
                         &local_config.block_engine_uuid,
                         block_engine_ipv4,
+                        global_config.is_left(),
+                        bundle_limiter.as_deref(),
+                        bundle_lifecycle_dump_enabled.load(Ordering::Relaxed),
                         &mut block_engine_stats,
                     )?;
                 }
@@ -1326,44 +1364,23 @@ impl BlockEngineStage {
         bundle_sender: &Sender<Vec<PacketBundle>>,
         block_engine_uuid: &str,
         block_engine_ipv4: Option<Ipv4Addr>,
+        is_primary: bool,
+        limiter: Option<&DefaultDirectRateLimiter>,
+        dump_enabled: bool,
         block_engine_stats: &mut BlockEngineStageStats,
     ) -> crate::proxy::Result<()> {
-        let mut bundle_packets = 0u64;
-        let bundles: Vec<PacketBundle> = bundles_response
-            .bundles
-            .into_iter()
-            .filter_map(|bundle| {
-                info!("Block Engine Bundle Received, ID: {:?}", bundle.uuid);
-                let packet_batch = PacketBatch::from(
-                    bundle
-                        .bundle?
-                        .packets
-                        .into_iter()
-                        .map(|proto| {
-                            let mut packet = proto_packet_to_packet(proto);
-                            Self::apply_bundle_source_ipv4_fallback(
-                                &mut packet,
-                                block_engine_ipv4,
-                            );
-                            packet
-                        })
-                        .collect::<Vec<BytesPacket>>(),
-                );
-                bundle_packets += packet_batch.len() as u64;
-                Some(PacketBundle::new(
-                    packet_batch,
-                    bundle.uuid,
-                    block_engine_uuid.to_string(),
-                ))
-            })
-            .collect();
-        block_engine_stats
-            .num_bundles
-            .add_assign(bundles.len() as u64);
-        block_engine_stats
-            .num_bundle_packets
-            .add_assign(bundle_packets);
-
+        let bundles = admit_bundles_with_rate_limit(
+            bundles_response,
+            block_engine_uuid,
+            is_primary,
+            limiter,
+            dump_enabled,
+            block_engine_stats,
+            block_engine_ipv4,
+        );
+        if bundles.is_empty() {
+            return Ok(());
+        }
         // NOTE: bundles are sanitized in bundle_sanitizer module
         bundle_sender
             .send(bundles)
@@ -1564,6 +1581,66 @@ impl BlockEngineStage {
     }
 }
 
+fn admit_bundles_with_rate_limit(
+    bundles_response: block_engine::SubscribeBundlesResponse,
+    block_engine_uuid: &str,
+    is_primary: bool,
+    limiter: Option<&DefaultDirectRateLimiter>,
+    dump_enabled: bool,
+    block_engine_stats: &mut BlockEngineStageStats,
+    block_engine_ipv4: Option<Ipv4Addr>,
+) -> Vec<PacketBundle> {
+    let mut bundle_packets = 0u64;
+    let bundles: Vec<PacketBundle> = bundles_response
+        .bundles
+        .into_iter()
+        .filter_map(|bundle| {
+            if limiter.is_some_and(|limiter| limiter.check().is_err()) {
+                block_engine_stats.num_bundles_throttled.add_assign(1);
+                if dump_enabled {
+                    BundleExecutionStats::report_immediate_drop(
+                        &bundle.uuid,
+                        block_engine_uuid.to_string(),
+                        is_primary,
+                        BundleDropReason::RateLimited,
+                    );
+                }
+                return None;
+            }
+
+            info!("Block Engine Bundle Received, ID: {:?}", bundle.uuid);
+            let packet_batch = PacketBatch::from(
+                bundle
+                    .bundle?
+                    .packets
+                    .into_iter()
+                    .map(|proto| {
+                        let mut packet = proto_packet_to_packet(proto);
+                        BlockEngineStage::apply_bundle_source_ipv4_fallback(
+                            &mut packet,
+                            block_engine_ipv4,
+                        );
+                        packet
+                    })
+                    .collect::<Vec<BytesPacket>>(),
+            );
+            bundle_packets += packet_batch.len() as u64;
+            Some(PacketBundle::new(
+                packet_batch,
+                bundle.uuid,
+                block_engine_uuid.to_string(),
+            ))
+        })
+        .collect();
+    block_engine_stats
+        .num_bundles
+        .add_assign(bundles.len() as u64);
+    block_engine_stats
+        .num_bundle_packets
+        .add_assign(bundle_packets);
+    bundles
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1579,6 +1656,7 @@ mod tests {
         BlockEngineEntry {
             url: url.to_string(),
             uuid: uuid.to_string(),
+            ..Default::default()
         }
     }
 
@@ -1649,6 +1727,67 @@ mod tests {
     }
 
     #[test]
+    fn test_merged_secondary_keeps_multiple_onchain_urls_for_one_uuid() {
+        let admin_entries = vec![entry("https://admin-1", "admin-1")];
+        let onchain_entries = vec![
+            BlockEngineEntry {
+                url: "https://onchain-a".to_string(),
+                uuid: "engine-a".to_string(),
+                bundle_rate_limit: BlockEngineBundleRateLimit {
+                    max_bundles: 10,
+                    period_ms: 1000,
+                    max_bundle_burst: 10,
+                },
+            },
+            BlockEngineEntry {
+                url: "https://onchain-b".to_string(),
+                uuid: "engine-a".to_string(),
+                bundle_rate_limit: BlockEngineBundleRateLimit {
+                    max_bundles: 5,
+                    period_ms: 1000,
+                    max_bundle_burst: 5,
+                },
+            },
+            entry("https://onchain-admin-1", "admin-1"),
+        ];
+
+        let merged =
+            merged_secondary_block_engine_entries(&admin_entries, Some(onchain_entries), &[]);
+
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0], entry("https://admin-1", "admin-1"));
+        assert_eq!(merged[1].url, "https://onchain-a");
+        assert_eq!(merged[1].uuid, "engine-a");
+        assert_eq!(merged[1].bundle_rate_limit.max_bundles, 10);
+        assert_eq!(merged[2].url, "https://onchain-b");
+        assert_eq!(merged[2].uuid, "engine-a");
+        assert_eq!(merged[2].bundle_rate_limit.max_bundles, 5);
+    }
+
+    #[test]
+    fn test_onchain_rate_change_is_treated_as_entry_change() {
+        let previous = BlockEngineEntry {
+            url: "https://onchain".to_string(),
+            uuid: "engine-a".to_string(),
+            bundle_rate_limit: BlockEngineBundleRateLimit {
+                max_bundles: 10,
+                period_ms: 1000,
+                max_bundle_burst: 10,
+            },
+        };
+        let updated = BlockEngineEntry {
+            url: previous.url.clone(),
+            uuid: previous.uuid.clone(),
+            bundle_rate_limit: BlockEngineBundleRateLimit {
+                max_bundles: 20,
+                period_ms: 1000,
+                max_bundle_burst: 10,
+            },
+        };
+        assert_ne!(previous, updated);
+    }
+
+    #[test]
     fn test_parse_block_engine_entry() {
         assert_eq!(
             parse_block_engine_entry("http://example.com:15001,uuid-123").unwrap(),
@@ -1682,5 +1821,83 @@ mod tests {
         kept.meta_mut().addr = IpAddr::V4(valid);
         BlockEngineStage::apply_bundle_source_ipv4_fallback(&mut kept, Some(be_ip));
         assert_eq!(kept.meta().addr, IpAddr::V4(valid));
+    }
+
+    fn fake_bundles_response(n: usize) -> block_engine::SubscribeBundlesResponse {
+        use jito_protos::proto::bundle::{Bundle, BundleUuid};
+        block_engine::SubscribeBundlesResponse {
+            bundles: (0..n)
+                .map(|i| BundleUuid {
+                    uuid: format!("bundle-{i}"),
+                    bundle: Some(Bundle {
+                        header: None,
+                        packets: vec![],
+                    }),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn test_admit_unlimited_when_rate_is_zero() {
+        let limiter = maybe_bundle_limiter(&BlockEngineBundleRateLimit::default());
+        assert!(limiter.is_none());
+        let mut stats = BlockEngineStageStats::default();
+        let admitted = admit_bundles_with_rate_limit(
+            fake_bundles_response(5),
+            "uuid",
+            true,
+            None,
+            false,
+            &mut stats,
+        );
+        assert_eq!(admitted.len(), 5);
+        assert_eq!(stats.num_bundles, 5);
+        assert_eq!(stats.num_bundles_throttled, 0);
+    }
+
+    #[test]
+    fn test_admit_throttles_beyond_burst() {
+        let limiter = maybe_bundle_limiter(&BlockEngineBundleRateLimit {
+            max_bundles: 1,
+            period_ms: 1,
+            max_bundle_burst: 1,
+        })
+        .expect("limiter");
+        let mut stats = BlockEngineStageStats::default();
+        let admitted = admit_bundles_with_rate_limit(
+            fake_bundles_response(5),
+            "uuid",
+            false,
+            Some(limiter.as_ref()),
+            false,
+            &mut stats,
+        );
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(stats.num_bundles, 1);
+        assert_eq!(stats.num_bundles_throttled, 4);
+    }
+
+    #[test]
+    fn test_admit_all_throttled_returns_empty() {
+        let limiter = maybe_bundle_limiter(&BlockEngineBundleRateLimit {
+            max_bundles: 1,
+            period_ms: 1,
+            max_bundle_burst: 1,
+        })
+        .expect("limiter");
+        assert!(limiter.check().is_ok());
+        let mut stats = BlockEngineStageStats::default();
+        let admitted = admit_bundles_with_rate_limit(
+            fake_bundles_response(3),
+            "uuid",
+            true,
+            Some(limiter.as_ref()),
+            false,
+            &mut stats,
+        );
+        assert!(admitted.is_empty());
+        assert_eq!(stats.num_bundles, 0);
+        assert_eq!(stats.num_bundles_throttled, 3);
     }
 }

@@ -1979,6 +1979,7 @@ impl Validator {
             config.client_mode.clone(),
             config.reset_rakurai.clone(),
             config.bundle_lifecycle_dump_enabled.clone(),
+            *vote_account,
             config.scheduling_strategy,
             config.postpack_confirmation_config.clone(),
             config.postpack_confirmation_active_entries.clone(),
