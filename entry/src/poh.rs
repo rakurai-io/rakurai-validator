@@ -8,6 +8,7 @@ use {
 
 const LOW_POWER_MODE: u64 = u64::MAX;
 
+#[repr(C)]
 pub struct Poh {
     pub hash: Hash,
     num_hashes: u64,

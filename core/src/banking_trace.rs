@@ -1,13 +1,19 @@
 use {
+    crate::{
+        banking_stage::house_keeper::get_serialized_packet_for_logging, packet_bundle::PacketBundle,
+    },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     bincode::serialize_into,
     chrono::{DateTime, Local},
-    crossbeam_channel::{Receiver, SendError, TryRecvError, TrySendError, bounded},
+    crossbeam_channel::{Receiver, SendError, Sender, TryRecvError, TrySendError, bounded},
+    jito_protos::proto::bam_types::AtomicTxnBatch,
     rolling_file::{RollingCondition, RollingConditionBasic, RollingFileAppender},
     serde::{Deserialize, Serialize},
     solana_clock::Slot,
     solana_hash::Hash,
+    solana_perf::packet::PacketBatch,
     solana_streamer::{evicting_sender::EvictingSender, streamer::ChannelSend},
+    solana_transaction::versioned::VersionedTransaction,
     std::{
         fs::{create_dir_all, remove_dir_all},
         io::{self, Write},
@@ -30,6 +36,9 @@ const VOTE_CHANNEL_CAPACITY: usize = 1024 * 8;
 /// Larger than the vote channel to absorb bursty TPU load.
 const NON_VOTE_CHANNEL_CAPACITY: usize = 1024 * 16;
 
+pub type BamBundle = Arc<AtomicTxnBatch>;
+pub type BundleBatch = Arc<PacketBundle>;
+pub type BundlePacketBatch = Arc<(PacketBatch, String)>;
 pub type BankingPacketSender = TracedSender;
 pub type TracerThreadResult = Result<(), TraceError>;
 pub type TracerThread = Option<JoinHandle<TracerThreadResult>>;
@@ -82,6 +91,8 @@ pub struct TimedTracedEvent(pub std::time::SystemTime, pub TracedEvent);
 pub enum TracedEvent {
     PacketBatch(ChannelLabel, BankingPacketBatch),
     BlockAndBankHash(Slot, Hash, Hash),
+    Bundles(BundlePacketBatch),
+    BamBatch(BamBundle),
 }
 
 #[cfg_attr(
@@ -399,7 +410,11 @@ impl TracedSender {
     /// Send a batch on the channel. This may evict an existing batch to make
     /// room; in that case `Ok(n)` is returned where `n` is the number of
     /// evicted packets. On channel disconnect returns `Err(SendError)`.
-    pub fn send(&self, batch: BankingPacketBatch) -> Result<usize, SendError<BankingPacketBatch>> {
+    pub fn send(
+        &self,
+        batch: BankingPacketBatch,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+    ) -> Result<usize, SendError<BankingPacketBatch>> {
         if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer
             && !exit.load(Ordering::Relaxed)
         {
@@ -409,11 +424,68 @@ impl TracedSender {
                 TracedEvent::PacketBatch(self.label, BankingPacketBatch::clone(&batch)),
             ));
         }
+
+        // See tx_io_check_readme.md for details on tx_in_signature reporting.
+        if let Some((input_tx_signature_sender, exit)) = input_tx_signature_sender {
+            if !exit.load(Ordering::Relaxed) {
+                for packet_batch in batch.iter() {
+                    for packet in packet_batch {
+                        if let Some(Ok(versioned_transaction)) = packet
+                            .data(..)
+                            .map(bincode::deserialize::<VersionedTransaction>)
+                        {
+                            if let Some(signature) = versioned_transaction.signatures.first() {
+                                let _ = input_tx_signature_sender.try_send(signature.to_string());
+                            }
+                        } else {
+                            let msg = get_serialized_packet_for_logging(&packet);
+                            let _ = input_tx_signature_sender.try_send(msg);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((_, exit)) = input_tx_signature_sender {
+            if exit.load(Ordering::Relaxed) {
+                return Err(SendError(batch));
+            }
+        }
+
         match self.sender.try_send(batch) {
             Ok(()) => Ok(0),
             Err(TrySendError::Full(b)) => Ok(b.iter().map(|pb| pb.len()).sum()),
             Err(TrySendError::Disconnected(b)) => Err(SendError(b)),
         }
+    }
+
+    pub fn send_bundle(
+        &self,
+        bundle: BundlePacketBatch,
+    ) -> Result<(), SendError<BundlePacketBatch>> {
+        if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer
+            && !exit.load(Ordering::Relaxed)
+        {
+            // Ignore errors in sending to tracer - it is a non-critical component.
+            let _ = trace_sender.try_send(TimedTracedEvent(
+                SystemTime::now(),
+                TracedEvent::Bundles(BundlePacketBatch::clone(&bundle)),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn send_bam_batch(&self, batch: BamBundle) -> Result<(), SendError<BamBundle>> {
+        if let Some(ActiveTracer { trace_sender, exit }) = &self.active_tracer
+            && !exit.load(Ordering::Relaxed)
+        {
+            // Ignore errors in sending to tracer - it is a non-critical component.
+            let _ = trace_sender.try_send(TimedTracedEvent(
+                SystemTime::now(),
+                TracedEvent::BamBatch(BamBundle::clone(&batch)),
+            ));
+        }
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -491,7 +563,7 @@ mod tests {
         });
 
         non_vote_sender
-            .send(BankingPacketBatch::new(vec![]))
+            .send(BankingPacketBatch::new(vec![]), &None)
             .unwrap();
         for_test::terminate_tracer(tracer, None, dummy_main_thread, non_vote_sender, None);
     }
@@ -529,7 +601,7 @@ mod tests {
         // .send() must succeed even after exit is already set to true and further tracer is
         // already dropped
         non_vote_sender
-            .send(for_test::sample_packet_batch())
+            .send(for_test::sample_packet_batch(), &None)
             .unwrap();
 
         // finally terminate and join the main thread
@@ -555,7 +627,7 @@ mod tests {
         });
 
         non_vote_sender
-            .send(for_test::sample_packet_batch())
+            .send(for_test::sample_packet_batch(), &None)
             .unwrap();
         let blockhash = Hash::from_str("B1ockhash1111111111111111111111111111111111").unwrap();
         let bank_hash = Hash::from_str("BankHash11111111111111111111111111111111111").unwrap();

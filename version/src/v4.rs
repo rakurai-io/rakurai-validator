@@ -159,9 +159,9 @@ impl PackedMinor {
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
-    major: u16,
-    minor: u16,
-    patch: u16,
+    pub major: u16,
+    pub minor: u16,
+    pub patch: u16,
     commit: u32,
     feature_set: u32,
     client: ClientId,

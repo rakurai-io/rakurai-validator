@@ -995,7 +995,7 @@ fn handle_parent_ready(
             // technically this send can evict to make room (which may drop a few packets)
             // but this should (hopefully) not be significant amounts since we are evicting
             // at most 1 batch.
-            .send(banking_packet_batch)
+            .send(banking_packet_batch, &None)
             .map_err(|_| PohRecorderError::RescheduleTransactionsError(slot))?;
     }
 

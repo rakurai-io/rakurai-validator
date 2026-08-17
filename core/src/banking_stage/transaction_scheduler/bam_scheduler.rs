@@ -702,6 +702,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             num_scheduled,
             num_unschedulable_conflicts: 0,
             num_unschedulable_threads: 0,
+            num_conflict_with_bundles: 0,
         })
     }
 
@@ -786,6 +787,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         todo!()
+    }
+
+    fn in_flight_txns(&mut self) -> bool {
+        false
     }
 }
 

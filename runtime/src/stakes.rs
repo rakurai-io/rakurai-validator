@@ -13,7 +13,7 @@ use {
     log::error,
     num_derive::ToPrimitive,
     rayon::{ThreadPool, prelude::*},
-    serde::Serialize,
+    serde::{Deserialize, Serialize},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_accounts_db::utils::create_account_shared_data,
     solana_clock::Epoch,
@@ -72,6 +72,7 @@ pub(crate) type DelegatedStakes = ImblHashMap<Pubkey, u64>;
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct StakesCache(RwLock<Stakes<StakeAccount>>);
 
 impl StakesCache {
@@ -79,7 +80,7 @@ impl StakesCache {
         Self(RwLock::new(stakes))
     }
 
-    pub(crate) fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
+    pub fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
         self.0.read().unwrap()
     }
 
@@ -191,7 +192,8 @@ impl StakesCache {
 /// the need to load the stake account from accounts-db when working with
 /// stake-delegations.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
-#[derive(Default, Clone, PartialEq, Debug, Serialize)]
+#[derive(Default, Clone, PartialEq, Debug, Deserialize, Serialize)]
+#[repr(C)]
 #[cfg_attr(
     feature = "dev-context-only-utils",
     field_qualifiers(

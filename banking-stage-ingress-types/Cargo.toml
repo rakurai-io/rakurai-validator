@@ -18,8 +18,10 @@ rustdoc-args = ["--cfg=docsrs"]
 agave-unstable-api = []
 
 [dependencies]
+serde = { workspace = true }
 crossbeam-channel = { workspace = true }
 solana-perf = { workspace = true }
+solana-message = { workspace = true }
 
 [lints]
 workspace = true

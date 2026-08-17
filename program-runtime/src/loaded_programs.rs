@@ -199,7 +199,8 @@ pub struct ProgramToLoad<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) enum IndexImplementation {
+#[repr(C)]
+pub enum IndexImplementation {
     /// Fork-graph aware index implementation
     V1 {
         /// A two level index:
@@ -263,6 +264,7 @@ impl<FG: ForkGraph> std::fmt::Debug for ProgramCache<FG> {
 /// while the TX batch is guaranteed it will continue to find all the programs it requires.
 /// For program management instructions this also buffers them before they are merged back into the global [ProgramCache].
 #[derive(Clone, Debug, Default)]
+#[repr(C)]
 pub struct ProgramCacheForTxBatch {
     /// Pubkey is the address of a program.
     /// ProgramCacheEntry is the corresponding program entry valid for the slot in which a transaction is being executed.

@@ -5,30 +5,63 @@ use {
     },
     solana_poh::poh_recorder::{PohRecorder, SharedLeaderState},
     solana_runtime::bank::Bank,
-    std::sync::Arc,
+    std::sync::{Arc, RwLock},
+    std::time::Instant,
 };
 
+const SWITCHING_OFFSET: u64 = 26;
+
 #[derive(Debug, Clone)]
+#[repr(C)]
+pub struct BankStart {
+    pub working_bank: Arc<Bank>,
+    pub bank_creation_time: Arc<Instant>,
+}
+
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub enum BufferedPacketsDecision {
-    Consume(Arc<Bank>),
+    Consume(BankStart),
     Forward,
     ForwardAndHold,
     Hold,
+}
+
+impl PartialEq for BufferedPacketsDecision {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                BufferedPacketsDecision::Consume(bank_start1),
+                BufferedPacketsDecision::Consume(bank_start2),
+            ) => bank_start1.working_bank.slot() == bank_start2.working_bank.slot(),
+            (BufferedPacketsDecision::Forward, BufferedPacketsDecision::Forward) => true,
+            (BufferedPacketsDecision::ForwardAndHold, BufferedPacketsDecision::ForwardAndHold) => {
+                true
+            }
+            (BufferedPacketsDecision::Hold, BufferedPacketsDecision::Hold) => true,
+            _ => false,
+        }
+    }
 }
 
 impl BufferedPacketsDecision {
     /// Returns the `Bank` if the decision is `Consume`. Otherwise, returns `None`.
     pub fn bank(&self) -> Option<&Arc<Bank>> {
         match self {
-            Self::Consume(bank) => Some(bank),
+            Self::Consume(bank_start) => Some(&bank_start.working_bank),
             _ => None,
         }
     }
 }
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct DecisionMaker {
     shared_leader_state: SharedLeaderState,
+    ticks_per_slot: u64,
+    bank_creation_time: Arc<Instant>,
+    previous_bank_slot: u64,
+    poh_recorder: Arc<RwLock<PohRecorder>>,
 }
 
 impl std::fmt::Debug for DecisionMaker {
@@ -38,17 +71,44 @@ impl std::fmt::Debug for DecisionMaker {
 }
 
 impl DecisionMaker {
-    pub fn new(shared_leader_state: SharedLeaderState) -> Self {
+    pub fn new(
+        shared_leader_state: SharedLeaderState,
+        ticks_per_slot: u64,
+        bank_creation_time: Arc<Instant>,
+        previous_bank_slot: u64,
+        poh_recorder: Arc<RwLock<PohRecorder>>,
+    ) -> Self {
         Self {
             shared_leader_state,
+            ticks_per_slot,
+            bank_creation_time,
+            previous_bank_slot,
+            poh_recorder,
         }
     }
 
-    pub(crate) fn make_consume_or_forward_decision(&self) -> BufferedPacketsDecision {
+    pub(crate) fn make_consume_or_forward_decision(
+        &mut self,
+    ) -> (BufferedPacketsDecision, bool, u64) {
         let state = self.shared_leader_state.load();
+        let slot = state.tick_height() / self.ticks_per_slot;
 
-        if let Some(working_bank) = state.working_bank() {
-            BufferedPacketsDecision::Consume(working_bank.clone())
+        let mut switching_point = false;
+
+        let decision = if let Some(bank) = state.working_bank() {
+            if bank.slot() != self.previous_bank_slot {
+                self.previous_bank_slot = bank.slot();
+                self.bank_creation_time = self
+                    .poh_recorder
+                    .read()
+                    .ok()
+                    .and_then(|poh| poh.working_bank.as_ref().map(|bank| bank.start.clone()))
+                    .unwrap_or_else(|| Arc::new(Instant::now()));
+            }
+            BufferedPacketsDecision::Consume(BankStart {
+                working_bank: bank.clone(),
+                bank_creation_time: self.bank_creation_time.clone(),
+            })
         } else if let Some(leader_first_tick_height) = state.leader_first_tick_height() {
             let current_tick_height = state.tick_height();
             let ticks_until_leader = leader_first_tick_height.saturating_sub(current_tick_height);
@@ -59,17 +119,53 @@ impl DecisionMaker {
             } else if ticks_until_leader < HOLD_TRANSACTIONS_SLOT_OFFSET * DEFAULT_TICKS_PER_SLOT {
                 BufferedPacketsDecision::ForwardAndHold
             } else {
+                switching_point = self.check_switching_point();
+
                 BufferedPacketsDecision::Forward
             }
         } else {
+            switching_point = self.check_switching_point();
+
             BufferedPacketsDecision::Forward
+        };
+        (decision, switching_point, slot)
+    }
+
+    fn check_switching_point(&self) -> bool {
+        self.would_be_leader(SWITCHING_OFFSET * DEFAULT_TICKS_PER_SLOT)
+            && !self.would_be_leader((SWITCHING_OFFSET - 1) * DEFAULT_TICKS_PER_SLOT)
+    }
+
+    pub fn would_be_leader(&self, within_next_n_ticks: u64) -> bool {
+        if let Some(leader_first_tick_height) =
+            self.shared_leader_state.load().leader_first_tick_height()
+        {
+            self.shared_leader_state.load().tick_height() + within_next_n_ticks
+                >= leader_first_tick_height
+                && self.shared_leader_state.load().tick_height()
+                    <= leader_first_tick_height + (self.ticks_per_slot * 4)
+        } else {
+            false
         }
     }
 }
 
-impl From<&PohRecorder> for DecisionMaker {
-    fn from(poh_recorder: &PohRecorder) -> Self {
-        Self::new(poh_recorder.shared_leader_state())
+impl From<&Arc<RwLock<PohRecorder>>> for DecisionMaker {
+    fn from(poh_recorder: &Arc<RwLock<PohRecorder>>) -> Self {
+        let bank_creation_time = poh_recorder
+            .read()
+            .ok()
+            .and_then(|poh| poh.working_bank.as_ref().map(|bank| bank.start.clone()))
+            .unwrap_or_else(|| Arc::new(Instant::now()));
+
+        let poh_recorder_deref = poh_recorder.read().unwrap();
+        Self::new(
+            poh_recorder_deref.shared_leader_state(),
+            poh_recorder_deref.ticks_per_slot(),
+            bank_creation_time,
+            0, // initial default value
+            poh_recorder.clone(),
+        )
     }
 }
 
@@ -96,7 +192,13 @@ mod tests {
 
         let mut shared_leader_state = SharedLeaderState::new(0, None, None);
 
-        let decision_maker = DecisionMaker::new(shared_leader_state.clone());
+        let decision_maker = DecisionMaker::new(
+            shared_leader_state.clone(),
+            0,
+            Arc::new(Instant::now()),
+            0,
+            Arc::new(RwLock::new(PohRecorder::default())),
+        );
 
         // No active bank, no leader first tick height.
         assert_matches!(

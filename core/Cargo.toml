@@ -16,6 +16,9 @@ rustdoc-args = ["--cfg=docsrs"]
 
 [features]
 agave-unstable-api = []
+build_validator = []
+local_build = []
+jemalloc-stats = ["dep:jemalloc-ctl"]
 dev-context-only-utils = [
     "solana-entry/dev-context-only-utils",
     "solana-ledger/dev-context-only-utils",
@@ -45,6 +48,9 @@ frozen-abi = [
 ]
 
 [dependencies]
+quanta = "0.12.5"
+anchor-lang = { workspace = true }
+agave-reserved-account-keys = { workspace = true }
 agave-banking-stage-ingress-types = { workspace = true }
 agave-bls-cert-verify = { workspace = true }
 agave-bls-sigverify = { workspace = true }
@@ -75,10 +81,14 @@ chrono = { workspace = true, features = ["default", "serde"] }
 crossbeam-channel = { workspace = true }
 dashmap = { workspace = true, features = ["rayon", "raw-api"] }
 futures = { workspace = true }
+five8_core = { workspace = true }
 histogram = { workspace = true }
 itertools = { workspace = true }
+reward_distribution = { workspace = true }
+rakurai_activation = { workspace = true }
 jito-protos = { workspace = true }
 lazy-lru = { workspace = true }
+jito-tip-distribution = { workspace = true }
 lazy_static = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
@@ -99,13 +109,19 @@ serde = { workspace = true }
 serde_bytes = { workspace = true }
 shaq = { workspace = true }
 signal-hook = { workspace = true }
+serde_derive = { workspace = true }
+serde_json = { workspace = true }
 slab = { workspace = true }
 smallvec = { workspace = true }
+csv = { workspace = true }
 solana-account = { workspace = true }
+solana-address = { workspace = true }
 solana-accounts-db = { workspace = true }
 solana-address-lookup-table-interface = { workspace = true }
 solana-bincode = { workspace = true }
 solana-bls-signatures = { workspace = true }
+solana-blake3-hasher = {workspace = true}
+solana-bloom = { workspace = true }
 solana-builtins-default-costs = { workspace = true }
 solana-bundle = { workspace = true }
 solana-client = { workspace = true }
@@ -191,20 +207,24 @@ strum_macros = { workspace = true }
 sys-info = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+rakurai_tip_manager = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tonic = { workspace = true, features = ["tls-ring", "tls-native-roots", "tls-webpki-roots"] }
 trees = { workspace = true }
 wincode = { workspace = true }
+zmq = { workspace = true }
 
 [target.'cfg(not(any(target_env = "msvc", target_os = "freebsd")))'.dependencies]
-jemalloc-ctl = { workspace = true }
+jemallocator = { workspace = true }
+jemalloc-ctl = { workspace = true, optional = true }
 
 [target."cfg(unix)".dependencies]
 sysctl = { workspace = true }
 
 [build-dependencies]
+rustc_version = "0.4"
 tonic-build = { workspace = true }
 
 [dev-dependencies]

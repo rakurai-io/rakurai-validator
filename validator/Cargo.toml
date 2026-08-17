@@ -55,7 +55,7 @@ solana-cli-config = { workspace = true }
 solana-cli-output = { workspace = true }
 solana-clock = { workspace = true }
 solana-commitment-config = { workspace = true }
-solana-core = { workspace = true }
+solana-core = { workspace = true, features = ["jemalloc-stats"] }
 solana-download-utils = { workspace = true }
 solana-entry = { workspace = true }
 solana-epoch-schedule = { workspace = true }
@@ -115,7 +115,7 @@ predicates = { workspace = true }
 pretty_assertions = { workspace = true }
 scopeguard = { workspace = true }
 solana-account-decoder = { path = "../account-decoder", features = ["agave-unstable-api"] }
-solana-core = { path = "../core", features = ["agave-unstable-api", "dev-context-only-utils"] }
+solana-core = { path = "../core", features = ["agave-unstable-api", "dev-context-only-utils", "jemalloc-stats"] }
 solana-program-option = { workspace = true }
 solana-program-pack = { workspace = true }
 solana-runtime = { path = "../runtime", features = ["agave-unstable-api", "dev-context-only-utils"] }

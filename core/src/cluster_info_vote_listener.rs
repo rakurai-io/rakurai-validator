@@ -537,7 +537,7 @@ impl ClusterInfoVoteListener {
                     .banking_channel_max_len
                     .max(verified_packets_sender.len());
                 stats.banking_channel_eviction_drops +=
-                    verified_packets_sender.send(BankingPacketBatch::new(packets))?;
+                    verified_packets_sender.send(BankingPacketBatch::new(packets), &None)?;
             }
             if last_report.elapsed() >= STATS_REPORT_INTERVAL {
                 datapoint_info!(

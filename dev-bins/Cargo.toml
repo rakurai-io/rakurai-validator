@@ -184,3 +184,51 @@ lto = "thin"
 inherits = "release"
 lto = "fat"
 codegen-units = 1
+
+[patch.crates-io]
+# We include the following crates as our dependencies above from crates.io:
+#
+#  * spl-associated-token-account-interface
+#  * spl-instruction-padding
+#  * spl-memo-interface
+#  * spl-pod
+#  * spl-token
+#  * spl-token-2022-interface
+#  * spl-token-metadata-interface
+#
+# They, in turn, depend on a number of crates that we also include directly
+# using `path` specifications.  For example, `spl-token` depends on
+# `solana-program`.  And we explicitly specify `solana-program` above as a local
+# path dependency:
+#
+#     solana-program = { path = "../../../sdk/program", version = "=1.16.0" }
+#
+# Unfortunately, Cargo will try to resolve the `spl-token` `solana-program`
+# dependency only using what is available on crates.io.  Crates.io normally
+# contains a previous version of these crates, and we end up with two versions
+# of `solana-program` and `solana-zk-token-sdk` and all of their dependencies in
+# our build tree.
+#
+# If you are developing downstream using non-crates-io solana-program (local or
+# forked repo, or from github rev, eg), duplicate the following patch statements
+# in your Cargo.toml. If you still hit duplicate-type errors with the patch
+# statements in place, run `cargo update -p solana-program` and/or `cargo update
+# -p solana-zk-token-sdk` to remove extraneous versions from your Cargo.lock
+# file.
+#
+# There is a similar override in `programs/sbf/Cargo.toml`.  Please keep both
+# comments and the overrides in sync.
+solana-account = { path = "../solana-sdk/account" }
+solana-cluster-type = { path = "../solana-sdk/cluster-type" }
+solana-epoch-schedule = { path = "../solana-sdk/epoch-schedule" }
+solana-example-mocks = { path = "../solana-sdk/example-mocks" }
+solana-fee-calculator = { path = "../solana-sdk/fee-calculator" }
+solana-fee-structure = { path = "../solana-sdk/fee-structure" }
+solana-hard-forks = { path = "../solana-sdk/hard-forks" }
+solana-inflation = { path = "../solana-sdk/inflation" }
+solana-message = { path = "../solana-sdk/message" }
+solana-packet = { path = "../solana-sdk/packet" }
+solana-reward-info = { path = "../solana-sdk/reward-info" }
+solana-time-utils = { path = "../solana-sdk/time-utils" }
+solana-transaction = { path = "../solana-sdk/transaction" }
+parking_lot_core = { path = "../parking_lot/core" }

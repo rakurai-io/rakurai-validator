@@ -74,7 +74,7 @@ impl ProgressTracker {
 
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset());
+                .for_each(|metrics| metrics.maybe_report_and_reset(false));
 
             // Yield to other threads. Sleeping isn't that accurate and we want to avoid
             // missing updates and delaying progress messages to the external.

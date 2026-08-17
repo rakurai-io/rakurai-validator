@@ -65,6 +65,7 @@ pub struct UpdatedCosts {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct CostTrackerLimits {
     pub account_cost: u64,
     pub block_cost: u64,
@@ -97,9 +98,11 @@ impl Default for CostTrackerLimits {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Debug)]
+#[repr(C)]
 pub struct CostTracker {
     limits: CostTrackerLimits,
-    cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
+    /// Writable-account cost map. Public for rakurai-scheduler post-analysis / throttling.
+    pub cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
     block_cost: SharedBlockCost,
     transaction_count: Saturating<u64>,
     allocated_accounts_data_size: Saturating<u64>,
@@ -235,6 +238,10 @@ impl CostTracker {
 
     pub fn block_cost_limit(&self) -> u64 {
         self.limits.block_cost
+    }
+
+    pub fn account_cost_limit(&self) -> u64 {
+        self.limits.account_cost
     }
 
     pub fn transaction_count(&self) -> u64 {

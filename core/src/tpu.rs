@@ -1,6 +1,12 @@
 //! The `tpu` module implements the Transaction Processing Unit, a
 //! multi-stage transaction processing pipeline in software.
 
+// allow multiple connections for NAT and any open/close overlap
+use crate::banking_stage::{DecisionState, RakuraiConfig, house_keeper::HouseKeeper};
+#[deprecated(
+    since = "2.2.0",
+    note = "Use solana_streamer::quic::DEFAULT_MAX_QUIC_CONNECTIONS_PER_PEER instead"
+)]
 use {
     crate::{
         admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
@@ -8,7 +14,7 @@ use {
         bam_manager::BamManager,
         banking_stage::{
             BankingControlMsg, BankingStage, BankingStageHandle,
-            consumer::TipProcessingDependencies,
+            consumer::TipProcessingDependencies, reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         banking_trace::{Channels, TracerThread},
@@ -32,7 +38,7 @@ use {
         staked_nodes_updater_service::StakedNodesUpdaterService,
         tip_manager::{TipManager, TipManagerConfig},
         tpu_entry_notifier::TpuEntryNotifier,
-        validator::{BlockProductionMethod, GeneratorConfig},
+        validator::{BlockProductionMethod, ClientMode, GeneratorConfig},
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
     agave_votor::event::VotorEventSender,
@@ -40,7 +46,7 @@ use {
     agave_xdp::transmitter::XdpSender,
     ahash::HashSet as AHashSet,
     arc_swap::ArcSwap,
-    crossbeam_channel::{Receiver, bounded},
+    crossbeam_channel::{Receiver, bounded, unbounded},
     solana_clock::Slot,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
@@ -122,6 +128,7 @@ pub struct Tpu {
     cluster_info_vote_listener: ClusterInfoVoteListener,
     sigverify_stage: SigVerifyStage,
     banking_stage: BankingStageHandle,
+    house_keeper_thread: HouseKeeper,
     forwarding_stage: JoinHandle<()>,
     broadcast_stage: BroadcastStage,
     tpu_quic_t: thread::JoinHandle<()>,
@@ -189,6 +196,10 @@ impl Tpu {
         cancel: CancellationToken,
         votor_event_sender: VotorEventSender,
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        secondary_block_engine_entries: Arc<
+            ArcSwap<Vec<crate::proxy::block_engine_stage::BlockEngineEntry>>,
+        >,
+        block_engine_uuid_blocklist: Arc<ArcSwap<Vec<String>>>,
         relayer_config: Arc<ArcSwap<RelayerConfig>>,
         tip_manager_config: TipManagerConfig,
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
@@ -196,6 +207,17 @@ impl Tpu {
         bam_shred_receiver_addresses: Arc<ArcSwap<ShredReceiverAddresses>>,
         multicast_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_url: Arc<ArcSwap<Option<String>>>,
+        reward_distribution_config: RewardDistributionConfig,
+        rakurai_config: Arc<RwLock<RakuraiConfig>>,
+        tx_io_check: Option<String>,
+        oms_connector: bool,
+        client_mode: Arc<Mutex<ClientMode>>,
+        reset_rakurai: Arc<AtomicBool>,
+        bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+        scheduling_strategy: Option<crate::banking_stage::SchedlingStrategy>,
+        postpack_confirmation_config: Arc<RwLock<crate::banking_stage::PostPackConfirmationConfig>>,
+        postpack_confirmation_active_entries: crate::banking_stage::PostPackConfirmationActiveEntries,
+        post_pack_confirmation_uuid_blocklist: crate::banking_stage::PostPackConfirmationUuidBlocklist,
     ) -> Self {
         let TpuSockets {
             vote: tpu_vote_sockets,
@@ -321,10 +343,19 @@ impl Tpu {
 
         let (forward_stage_sender, forward_stage_receiver) = bounded(50_000);
 
-        // Shared between sigverify and scheduler. The scheduler publishes
-        // a priority floor under saturation; sigverify reads it and drops
-        // below-floor packets ahead of signature verification.
         let scheduler_priority_floor = Arc::new(SchedulerPriorityFloor::new());
+        const TX_IO_CHANNEL_SZIE: usize = 100_000;
+        let enable_tx_io_check = tx_io_check.is_some();
+        let (input_tx_signature_sender, input_tx_signature_receiver) = if enable_tx_io_check {
+            let (input_tx_signature_sender, input_tx_signature_receiver) =
+                bounded(TX_IO_CHANNEL_SZIE);
+            (
+                Some((input_tx_signature_sender, exit.clone())),
+                Some(input_tx_signature_receiver),
+            )
+        } else {
+            (None, None)
+        };
 
         let (sigverify_stage, gossip_sigverify_handle) = SigVerifyStage::new(
             sigverify_stage_receiver,
@@ -336,7 +367,20 @@ impl Tpu {
             enable_block_production_forwarding,
             bank_forks.read().unwrap().sharable_banks(),
             Some(scheduler_priority_floor.clone()),
+            input_tx_signature_sender.clone(),
         );
+
+        let (output_tx_signature_sender, output_tx_signature_receiver) =
+            if enable_tx_io_check || oms_connector {
+                let (output_tx_signature_sender, output_tx_signature_receiver) =
+                    bounded(TX_IO_CHANNEL_SZIE);
+                (
+                    Some(output_tx_signature_sender),
+                    Some(output_tx_signature_receiver),
+                )
+            } else {
+                (None, None)
+            };
 
         let sigverify_threadpool = Arc::new(
             rayon::ThreadPoolBuilder::new()
@@ -351,11 +395,14 @@ impl Tpu {
             block_builder_commission: 0,
         }));
 
-        let (unverified_bundle_sender, unverified_bundle_receiver) = bounded(1024);
+        let (unverified_bundle_sender, unverified_bundle_receiver) = bounded(16_384);
         let bam_enabled = Arc::new(AtomicU8::new(BamConnectionState::Disconnected as u8));
 
         let block_engine_stage = BlockEngineStage::new(
-            block_engine_config,
+            block_engine_config.clone(),
+            secondary_block_engine_entries,
+            block_engine_uuid_blocklist,
+            bank_forks.clone(),
             unverified_bundle_sender,
             cluster_info.clone(),
             sigverify_stage_sender.clone(),
@@ -364,13 +411,15 @@ impl Tpu {
             &block_builder_fee_info,
             shredstream_receiver_address.clone(),
             bam_enabled.clone(),
+            input_tx_signature_sender.clone(),
         );
-        let (verified_bundle_sender, verified_bundle_receiver) = bounded(1024);
+        let (verified_bundle_sender, verified_bundle_receiver) = bounded(16_384);
         let bundle_sigverify_stage = BundleSigverifyStage::new(
             sigverify_threadpool.clone(),
             unverified_bundle_receiver,
             verified_bundle_sender,
             exit.clone(),
+            banking_stage_sender.clone(),
         );
 
         let bam_tpu_info = Arc::new(ArcSwap::new(Arc::new(None)));
@@ -415,6 +464,7 @@ impl Tpu {
         let filter_keys = {
             let mut filter_keys = filter_keys.as_ref().clone();
             filter_keys.insert(tip_manager.tip_payment_program_id());
+            filter_keys.insert(reward_distribution_config.rakurai_tip_manager_program_id);
             Arc::new(filter_keys)
         };
         let (bam_batch_sender, bam_batch_receiver) = bounded(100_000);
@@ -431,6 +481,14 @@ impl Tpu {
             bam_tpu_info,
             bam_shred_receiver_addresses: bam_shred_receiver_addresses.clone(),
         };
+
+        let shared_decision = (
+            Arc::new(RwLock::new(DecisionState::Hold)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let nonce_packets = Arc::new(RwLock::new(HashMap::new()));
+        let (nonce_packet_sender, nonce_packet_receiver) = unbounded();
+        let scheduler_postpack_conf_signatures = Arc::new(RwLock::new(HashMap::new()));
 
         let banking_stage = BankingStage::new_num_threads(
             block_production_method,
@@ -458,6 +516,33 @@ impl Tpu {
                 bundle_account_locker: bundle_account_locker.clone(),
             }),
             Some(bam_dependencies.clone()),
+            cluster_info,
+            blockstore.clone(),
+            reward_distribution_config,
+            rakurai_config,
+            input_tx_signature_sender.clone(),
+            output_tx_signature_sender,
+            shared_decision.clone(),
+            exit.clone(),
+            client_mode.clone(),
+            reset_rakurai.clone(),
+            scheduling_strategy,
+            nonce_packets.clone(),
+            nonce_packet_receiver,
+            postpack_confirmation_config,
+            postpack_confirmation_active_entries,
+            post_pack_confirmation_uuid_blocklist,
+            scheduler_postpack_conf_signatures.clone(),
+        );
+
+        // House keeper
+        let house_keeper_thread = HouseKeeper::new(
+            input_tx_signature_receiver,
+            output_tx_signature_receiver,
+            tx_io_check,
+            oms_connector,
+            shared_decision,
+            exit.clone(),
         );
 
         #[cfg(unix)]
@@ -493,6 +578,11 @@ impl Tpu {
             &block_builder_fee_info,
             prioritization_fee_cache.clone(),
             filter_keys.iter().copied().collect::<AHashSet<_>>(),
+            nonce_packets,
+            nonce_packet_sender,
+            scheduler_postpack_conf_signatures,
+            block_engine_config,
+            bundle_lifecycle_dump_enabled,
         );
 
         let bam_manager = BamManager::new(
@@ -502,6 +592,8 @@ impl Tpu {
             bam_outbound_receiver,
             poh_recorder.clone(),
             key_notifiers.clone(),
+            banking_stage_sender.clone(),
+            client_mode.clone(),
         );
 
         let (entry_receiver, tpu_entry_notifier) =
@@ -547,6 +639,7 @@ impl Tpu {
             cluster_info_vote_listener,
             sigverify_stage,
             banking_stage,
+            house_keeper_thread,
             forwarding_stage,
             broadcast_stage,
             tpu_quic_t,
@@ -570,6 +663,7 @@ impl Tpu {
             self.cluster_info_vote_listener.join(),
             self.sigverify_stage.join(),
             self.banking_stage.join(),
+            self.house_keeper_thread.join(),
             self.forwarding_stage.join(),
             self.staked_nodes_updater_service.join(),
             self.tpu_quic_t.join(),

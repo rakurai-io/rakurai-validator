@@ -10,7 +10,7 @@
 //!         - Running in this mode means pending transactions are not exposed to external actors. This mode is ideal if the validator wishes
 //!           to accept bundles while maintaining some level of privacy for in-flight transactions.
 
-mod auth;
+pub mod auth;
 pub mod block_engine_stage;
 pub mod fetch_stage_manager;
 pub mod relayer_stage;

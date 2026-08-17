@@ -1,0 +1,75 @@
+{
+  "log_level": "info",
+  "check_version": true,
+  "supported_programs": {
+    "orca": [
+      "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    ],
+    "raydium": [
+      "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+    ],
+    "meteora": [
+      "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+    ],
+    "phoenix": [
+      "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+    ],
+    "tokenprogram": [
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    ],
+    "system": [
+      "Sysvar1111111111111111111111111111111111111"
+    ]
+  },
+  "zmq_sockets": {
+    "Slot": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5550",
+        "hwm": 100
+      }
+    },
+    "AccAndTx": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5551"
+      }
+    },
+    "Entry": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5552",
+        "hwm": 3000
+      }
+    },
+    "Block": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5553",
+        "hwm": 100
+      }
+    },
+    "Account": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5554"
+      }
+    },
+    "BlockMeta": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5555",
+        "hwm": 100
+      }
+    },
+    "Transaction": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5556"
+      }
+    },
+    "Tick": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5557",
+        "hwm": 1000
+      }
+    }
+  },
+  "libpath": "./libspark_geyser_plugin-4_2_0-rc_1.so"
+}

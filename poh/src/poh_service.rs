@@ -44,7 +44,7 @@ pub const DEFAULT_PINNED_CPU_CORE: Option<usize> = Some(0);
 #[cfg(not(target_os = "linux"))]
 pub const DEFAULT_PINNED_CPU_CORE: Option<usize> = None;
 
-const TARGET_SLOT_ADJUSTMENT_NS: u64 = 0;
+pub const TARGET_SLOT_ADJUSTMENT_NS: u64 = 0;
 
 #[derive(Debug)]
 struct PohTiming {
@@ -111,6 +111,7 @@ impl PohService {
         poh_service_receiver: PohServiceMessageReceiver,
         migration_status: Arc<MigrationStatus>,
         record_receiver_sender: Sender<RecordReceiver>,
+        target_slot_adjustment_ns: u64,
     ) -> Self {
         migration_status.set_poh_service_started();
         let poh_config = poh_config.clone();
@@ -164,6 +165,7 @@ impl PohService {
                             )
                         });
                     }
+
                     Self::tick_producer(
                         poh_recorder,
                         &poh_config,
@@ -173,7 +175,8 @@ impl PohService {
                         &mut record_receiver,
                         poh_service_receiver,
                         &migration_status.shutdown_poh,
-                    )
+                        target_slot_adjustment_ns,
+                    );
                 }
 
                 if poh_exit.load(Ordering::Relaxed)
@@ -206,11 +209,12 @@ impl PohService {
         Self { tick_producer }
     }
 
-    // Adjusts the target nanoseconds per PoH tick to enable hitting slot time
-    // targets by compensating for time spent outside of PoH, such as network
-    // propagation.
-    pub fn target_tick_ns_adjusted(ticks_per_slot: u64, target_tick_ns: u64) -> u64 {
-        let adjustment_per_tick = TARGET_SLOT_ADJUSTMENT_NS
+    pub fn target_tick_ns_adjusted(
+        ticks_per_slot: u64,
+        target_tick_ns: u64,
+        target_slot_adjustment_ns: u64,
+    ) -> u64 {
+        let adjustment_per_tick = target_slot_adjustment_ns
             .checked_div(ticks_per_slot)
             .unwrap_or(0);
         target_tick_ns.saturating_sub(adjustment_per_tick)
@@ -558,6 +562,7 @@ impl PohService {
         record_receiver: &mut RecordReceiver,
         poh_service_receiver: PohServiceMessageReceiver,
         shutdown_poh: &AtomicBool,
+        target_slot_adjustment_ns: u64,
     ) {
         let poh = poh_recorder.read().unwrap().poh.clone();
         let mut timing = PohTiming::new();
@@ -566,6 +571,7 @@ impl PohService {
         let mut target_ns_per_tick = Self::target_tick_ns_adjusted(
             ticks_per_slot,
             Self::target_tick_ns_reconciled(&poh_recorder, poh_config),
+            target_slot_adjustment_ns,
         );
 
         loop {
@@ -617,14 +623,15 @@ impl PohService {
                 }
             }
 
-            if let Some(service_message) = service_message
-                && !should_exit
-            {
-                Self::handle_service_message(&poh_recorder, service_message, record_receiver);
-                target_ns_per_tick = Self::target_tick_ns_adjusted(
-                    ticks_per_slot,
-                    Self::target_tick_ns_reconciled(&poh_recorder, poh_config),
-                );
+            if let Some(service_message) = service_message {
+                if !should_exit {
+                    Self::handle_service_message(&poh_recorder, service_message, record_receiver);
+                    target_ns_per_tick = Self::target_tick_ns_adjusted(
+                        ticks_per_slot,
+                        Self::target_tick_ns_reconciled(&poh_recorder, poh_config),
+                        target_slot_adjustment_ns,
+                    );
+                }
             }
 
             // If exit signal is set and there are no more records to process, exit.

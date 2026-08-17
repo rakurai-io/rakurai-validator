@@ -38,7 +38,6 @@ pub struct MaxAge {
     pub alt_invalidation_slot: Slot,
 }
 
-#[cfg(test)]
 impl MaxAge {
     pub const MAX: Self = Self {
         sanitized_epoch: Epoch::MAX,
@@ -64,6 +63,7 @@ pub struct FinishedConsumeWork<Tx> {
     pub work: ConsumeWork<Tx>,
     pub retryable_indexes: Vec<RetryableIndex>,
     pub extra_info: Option<FinishedConsumeWorkExtraInfo>,
+    pub cu_err_indexes: Option<(Vec<usize>, Vec<usize>)>,
 }
 
 #[derive(Debug)]

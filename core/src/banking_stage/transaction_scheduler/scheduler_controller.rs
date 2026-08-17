@@ -1,6 +1,12 @@
 //! Control flow for BankingStage's transaction scheduler.
 //!
 
+use std::sync::Mutex;
+
+use crate::{
+    banking_stage::{DecisionState, LeaderMetaData},
+    validator::ClientMode,
+};
 use {
     super::{
         receive_and_buffer::{DisconnectedError, ReceiveAndBuffer},
@@ -65,6 +71,7 @@ const DEFAULT_SCHEDULER_PACING_NON_FILL_TIME_MILLIS: u64 = 50;
 pub(crate) const DEFAULT_SCHEDULER_PACING_FILL_TIME_MILLIS: NonZeroU64 =
     NonZeroU64::new(DEFAULT_MS_PER_SLOT - DEFAULT_SCHEDULER_PACING_NON_FILL_TIME_MILLIS).unwrap();
 
+
 /// Detects saturation and publishes the priority floor for dropping low-priority transactions upstream.
 struct SaturationState {
     priority_floor: Arc<SchedulerPriorityFloor>,
@@ -115,6 +122,24 @@ impl Drop for SaturationState {
     }
 }
 
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    fn check_state(
+        is_priority_queue_empty: bool,
+        decision_state: &DecisionState,
+        in_flight_txns: bool,
+        block_reception: &mut bool,
+        is_switching_point_detected: bool,
+    );
+}
+
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    fn initial_check_state_for_standard();
+}
+
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
 pub(crate) struct SchedulerController<R, S>
 where
@@ -153,6 +178,8 @@ where
     bam_controller: bool,
     /// Whether BAM is enabled.
     bam_enabled: Arc<AtomicU8>,
+    /// Client mode.
+    client_mode: Arc<Mutex<ClientMode>>,
 }
 
 impl<R, S> SchedulerController<R, S>
@@ -172,6 +199,7 @@ where
         priority_floor: Arc<SchedulerPriorityFloor>,
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
+        client_mode: Arc<Mutex<ClientMode>>,
     ) -> Self {
         Self::new_with_metrics_id(
             0,
@@ -185,6 +213,7 @@ where
             priority_floor,
             bam_controller,
             bam_enabled,
+            client_mode,
         )
     }
 
@@ -201,6 +230,7 @@ where
         priority_floor: Arc<SchedulerPriorityFloor>,
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
+        client_mode: Arc<Mutex<ClientMode>>,
     ) -> Self {
         SchedulerController::new_with_metrics(
             exit,
@@ -216,6 +246,7 @@ where
             priority_floor,
             bam_controller,
             bam_enabled,
+            client_mode,
         )
     }
 
@@ -234,6 +265,7 @@ where
         priority_floor: Arc<SchedulerPriorityFloor>,
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
+        client_mode: Arc<Mutex<ClientMode>>,
     ) -> Self {
         priority_floor.clear();
         let container_capacity = TOTAL_BUFFERED_PACKETS;
@@ -244,7 +276,7 @@ where
             decision_maker,
             receive_and_buffer,
             sharable_banks,
-            container: R::Container::with_capacity(container_capacity),
+            container: R::Container::with_capacity(container_capacity, false),
             scheduler,
             count_metrics,
             timing_metrics,
@@ -255,12 +287,24 @@ where
             saturation_state,
             bam_controller,
             bam_enabled,
+            client_mode,
         }
     }
 
-    pub fn run(&mut self) -> Result<(), SchedulerError> {
+    pub fn run(mut self) -> Result<(), SchedulerError> {
         let mut most_recent_leader_slot = None;
         let mut cost_pacer = None;
+
+        #[allow(unused_mut)]
+        let mut block_reception = false;
+        #[cfg(feature = "build_validator")]
+        if !self.bam_controller {
+            unsafe {
+                initial_check_state_for_standard();
+            };
+        }
+        #[cfg(feature = "build_validator")]
+        let mut decision_state: DecisionState;
 
         while !self.exit.load(Ordering::Relaxed) {
             let now = Instant::now();
@@ -274,16 +318,17 @@ where
             // `Forward` will drop packets from the buffer instead of forwarding.
             // During receiving, since packets would be dropped from buffer anyway, we can
             // bypass sanitization and buffering and immediately drop the packets.
-            let (decision, decision_time_us) =
+            #[allow(unused_variables)]
+            let ((decision, is_switching_point_detected, _), decision_time_us) =
                 measure_us!(self.decision_maker.make_consume_or_forward_decision());
             self.timing_metrics.update(|timing_metrics| {
                 timing_metrics.decision_time_us += decision_time_us;
             });
             let new_leader_slot = decision.bank().map(|b| b.slot());
             self.count_metrics
-                .maybe_report_and_reset_slot(new_leader_slot);
+                .maybe_report_and_reset_slot(new_leader_slot, self.bam_controller);
             self.timing_metrics
-                .maybe_report_and_reset_slot(new_leader_slot);
+                .maybe_report_and_reset_slot(new_leader_slot, self.bam_controller);
 
             if !self.bam_controller && most_recent_leader_slot != new_leader_slot {
                 self.container.flush_held_transactions();
@@ -324,6 +369,7 @@ where
             }
 
             self.receive_completed(&decision)?;
+
             let scheduled = self.process_transactions(&decision, cost_pacer.as_ref(), &now)?;
             if scheduled == 0 {
                 let (_, clean_time_us) = measure_us!(self.incremental_recheck());
@@ -331,25 +377,45 @@ where
                     timing_metrics.clean_time_us += clean_time_us;
                 });
             }
-            let receiving_stats = self.receive_and_buffer_packets(&decision).map_err(|_| {
-                SchedulerError::DisconnectedRecvChannel("receive and buffer disconnected")
-            })?;
+            let receiving_stats = if block_reception {
+                ReceivingStats::default()
+            } else {
+                self.receive_and_buffer_packets(&decision).map_err(|_| {
+                    SchedulerError::DisconnectedRecvChannel("receive and buffer disconnected")
+                })?
+            };
+
+            #[cfg(feature = "build_validator")]
+            {
+                if !self.bam_controller {
+                    decision_state = translate_decision_into_decision_state(&decision);
+                    unsafe {
+                        check_state(
+                            self.container.is_empty(),
+                            &decision_state,
+                            self.scheduler.in_flight_txns(),
+                            &mut block_reception,
+                            is_switching_point_detected,
+                        );
+                    };
+                }
+            }
+
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
-            let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
+            // let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
+            let should_report = self.count_metrics.interval_has_data();
             let priority_min_max = self.container.get_min_max_priority();
             self.count_metrics.update(|count_metrics| {
                 count_metrics.update_priority_stats(priority_min_max);
             });
             self.update_scheduler_priority_floor(receiving_stats.num_dropped_on_capacity);
             self.count_metrics
-                .maybe_report_and_reset_interval(should_report);
-            self.timing_metrics
-                .maybe_report_and_reset_interval(should_report);
+                .maybe_report_and_reset_interval(should_report, self.bam_controller);
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset());
-            self.scheduling_details.maybe_report();
+                .for_each(|metrics| metrics.maybe_report_and_reset(self.bam_controller));
+            self.scheduling_details.maybe_report(self.bam_controller);
         }
 
         Ok(())
@@ -365,16 +431,11 @@ where
         let scheduled = match decision {
             BufferedPacketsDecision::Consume(_bank) => {
                 if !self.scheduling_enabled() {
-                    // When BAM disconnects while we're still leader, `schedule`
-                    // is never called so `pull_into_prio_graph` never drains the
-                    // priority queue. Drain leftover batch entries here to avoid
-                    // stale batches accumulating until the next slot change.
-                    if self.bam_controller {
-                        while let Some(id) = self.container.pop() {
-                            self.container.remove_by_id(id.id);
-                        }
+                    if self.client_mode.lock().unwrap().clone() == ClientMode::BAMStrictCompliance {
+                        return Ok(0);
+                    } else if self.bam_controller {
+                        return Ok(0);
                     }
-                    return Ok(0);
                 }
                 let scheduling_budget = if self.bam_controller {
                     u64::MAX
@@ -383,6 +444,7 @@ where
                         .expect("cost pacer must be set for Consume")
                         .scheduling_budget(now)
                 };
+
                 let (scheduling_summary, schedule_time_us) = measure_us!(
                     self.scheduler
                         .schedule(&mut self.container, scheduling_budget,)?
@@ -557,9 +619,11 @@ where
         &mut self,
         decision: &BufferedPacketsDecision,
     ) -> Result<ReceivingStats, DisconnectedError> {
-        let receiving_stats = self
-            .receive_and_buffer
-            .receive_and_buffer_packets(&mut self.container, decision)?;
+        let receiving_stats = self.receive_and_buffer.receive_and_buffer_packets(
+            &mut self.container,
+            Some(decision),
+            None,
+        )?;
 
         self.count_metrics.update(|count_metrics| {
             let ReceivingStats {
@@ -632,6 +696,21 @@ impl CostPacer {
         };
 
         target.saturating_sub(self.shared_block_cost.load())
+    }
+}
+
+pub fn translate_decision_into_decision_state(decision: &BufferedPacketsDecision) -> DecisionState {
+    match decision {
+        BufferedPacketsDecision::Consume(bank_start) => {
+            let bank = &bank_start.working_bank;
+            DecisionState::Consume(LeaderMetaData {
+                slot: bank.slot(),
+                bank_creation_time: *bank_start.bank_creation_time,
+            })
+        }
+        BufferedPacketsDecision::ForwardAndHold => DecisionState::ForwardAndHold,
+        BufferedPacketsDecision::Forward => DecisionState::Forward,
+        BufferedPacketsDecision::Hold => DecisionState::Hold,
     }
 }
 
@@ -722,7 +801,7 @@ mod tests {
 
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 
-        let decision_maker = DecisionMaker::new(shared_leader_state.clone());
+        let decision_maker = DecisionMaker::from(&poh_recorder);
 
         let (banking_packet_sender, banking_packet_receiver) = unbounded();
         let receive_and_buffer = create_receive_and_buffer(
@@ -762,6 +841,7 @@ mod tests {
             Arc::new(SchedulerPriorityFloor::default()),
             false,
             Arc::new(AtomicU8::new(BamConnectionState::Disconnected as u8)),
+            Arc::new(Mutex::new(ClientMode::default())),
         );
 
         (test_frame, scheduler_controller)
@@ -807,7 +887,7 @@ mod tests {
     fn test_receive_then_schedule<R: ReceiveAndBuffer>(
         scheduler_controller: &mut SchedulerController<R, impl Scheduler<R::Transaction>>,
     ) {
-        let decision = scheduler_controller
+        let (decision, _, _) = scheduler_controller
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
@@ -871,6 +951,7 @@ mod tests {
                 },
                 retryable_indexes: vec![],
                 extra_info: None,
+                cu_err_indexes: None,
             })
             .unwrap();
 

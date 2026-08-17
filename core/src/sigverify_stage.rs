@@ -157,6 +157,7 @@ impl SigVerifyStage {
         forward_non_votes: bool,
         sharable_banks: SharableBanks,
         scheduler_priority_floor: Option<Arc<SchedulerPriorityFloor>>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> (Self, GossipSigVerifyHandle) {
         let (gossip_verified_vote_sender, verified_vote_receiver) = unbounded();
         let non_vote_stats = SigVerifierStats::default();
@@ -217,6 +218,7 @@ impl SigVerifyStage {
                 },
                 None, // votes are not dropped for priority-floor
             ),
+            input_tx_signature_sender,
         );
         let servicer_thread_hdl = Self::servicer(
             exit.clone(),

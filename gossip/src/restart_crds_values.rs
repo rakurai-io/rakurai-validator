@@ -24,6 +24,7 @@ use {
     )
 )]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, SchemaWrite, SchemaRead)]
+#[repr(C)]
 pub struct RestartLastVotedForkSlots {
     pub from: Pubkey,
     pub wallclock: u64,
@@ -65,6 +66,7 @@ pub struct RestartHeaviestFork {
     derive(AbiExample, AbiEnumVisitor, StableAbi, StableAbiSample)
 )]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[repr(C)]
 enum SlotsOffsets {
     RunLengthEncoding(RunLengthEncoding),
     RawOffsets(RawOffsets),
@@ -82,10 +84,12 @@ struct U16(
 // For example, 110000111 is [2, 4, 3].
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[repr(C)]
 struct RunLengthEncoding(Vec<U16>);
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq, SchemaWrite, SchemaRead)]
+#[repr(C)]
 struct RawOffsets(
     // `BitVec` has no `StableAbi` impl; sample a non-empty one (see `sample_bit_vec`).
     #[cfg_attr(

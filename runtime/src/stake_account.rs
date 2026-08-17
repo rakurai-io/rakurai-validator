@@ -23,6 +23,7 @@ use {
 /// wraps any account with stake state.
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Clone, Debug, Default)]
+#[repr(C)]
 pub struct StakeAccount<T> {
     // Skipped by the custom (delegation/stake-format) serializer; sample the default.
     #[cfg_attr(feature = "frozen-abi", stable_abi_sample(with = "Default::default()"))]

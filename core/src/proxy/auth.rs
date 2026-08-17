@@ -19,13 +19,13 @@ use {
 };
 
 /// Interceptor responsible for adding the access token to request headers.
-pub(crate) struct AuthInterceptor {
+pub struct AuthInterceptor {
     /// The token added to each request header.
     access_token: Arc<ArcSwap<Token>>,
 }
 
 impl AuthInterceptor {
-    pub(crate) fn new(access_token: Arc<ArcSwap<Token>>) -> Self {
+    pub fn new(access_token: Arc<ArcSwap<Token>>) -> Self {
         Self { access_token }
     }
 }

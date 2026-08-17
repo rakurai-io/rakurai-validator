@@ -11,6 +11,7 @@ use {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[repr(C)]
 pub struct HashInfo {
     fee_calculator: FeeCalculator,
     hash_index: u64,
@@ -34,6 +35,7 @@ impl HashInfo {
     )
 )]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(C)]
 pub struct BlockhashQueue {
     /// index of last hash to be registered
     last_hash_index: u64,

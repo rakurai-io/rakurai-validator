@@ -17,18 +17,22 @@ use {
     solana_core::{
         admin_rpc_post_init::AdminRpcRequestMetadataPostInit,
         banking_stage::{
-            BankingControlMsg, BankingStage,
+            BankingControlMsg, BankingStage, PostPackConfirmation, PostPackConfirmationConfig,
+            PostPackConfirmationConfigStatus, RakuraiConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
         },
         consensus::{Tower, tower_storage::TowerStorage},
         proxy::{
-            block_engine_stage::{BlockEngineConfig, BlockEngineStage},
+            block_engine_stage::{
+                BlockEngineConfig, BlockEngineEntry, BlockEngineStage, BlockEngineUrlStatus,
+                collect_block_engine_url_status, load_secondary_block_engine_entries_from_bank,
+            },
             relayer_stage::{RelayerConfig, RelayerStage},
         },
         repair::repair_service,
         validator::{
-            BlockProductionMethod, SchedulerPacing, TransactionStructure, ValidatorStartProgress,
-            should_require_vote_history_file,
+            BlockProductionMethod, ClientMode, SchedulerPacing, TransactionStructure,
+            ValidatorStartProgress, should_require_vote_history_file,
         },
     },
     solana_geyser_plugin_manager::GeyserPluginManagerRequest,
@@ -48,7 +52,7 @@ use {
         path::{Path, PathBuf},
         str::FromStr,
         sync::{
-            Arc, RwLock,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, Builder},
@@ -57,6 +61,17 @@ use {
     tokio::runtime::Runtime,
     tonic::transport::Endpoint,
 };
+
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq)]
+pub struct AdminRPCPostPackConfirmation {
+    pub url: String,
+    pub uuid: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Eq, PartialEq, Default)]
+pub struct AdminRPCPostPackConfirmationConfig {
+    pub entries: Vec<AdminRPCPostPackConfirmation>,
+}
 
 #[derive(Clone)]
 pub struct AdminRpcRequestMetadata {
@@ -72,6 +87,15 @@ pub struct AdminRpcRequestMetadata {
     pub post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
     pub rpc_to_plugin_manager_sender: Option<Sender<GeyserPluginManagerRequest>>,
     pub bam_url: Arc<ArcSwap<Option<String>>>,
+    pub client_mode: Arc<Mutex<ClientMode>>,
+    pub rakurai_config: Arc<RwLock<RakuraiConfig>>,
+    pub reset_rakurai: Arc<AtomicBool>,
+    pub bundle_lifecycle_dump_enabled: Arc<AtomicBool>,
+    pub postpack_confirmation_config: Arc<RwLock<PostPackConfirmationConfig>>,
+    pub postpack_confirmation_active_entries:
+        solana_core::banking_stage::PostPackConfirmationActiveEntries,
+    pub post_pack_confirmation_uuid_blocklist:
+        solana_core::banking_stage::PostPackConfirmationUuidBlocklist,
 }
 
 impl Metadata for AdminRpcRequestMetadata {}
@@ -329,8 +353,40 @@ pub trait AdminRpc {
         trust_packets: bool,
     ) -> Result<()>;
 
+    #[rpc(meta, name = "setSecondaryBlockEngineUrls")]
+    fn set_secondary_block_engine_urls(
+        &self,
+        meta: Self::Metadata,
+        secondary_block_engine_entries: Vec<BlockEngineEntry>,
+    ) -> Result<()>;
+
+    #[rpc(meta, name = "getBlockEngineUrls")]
+    fn get_block_engine_urls(&self, meta: Self::Metadata) -> Result<BlockEngineUrlStatus>;
+
+    #[rpc(meta, name = "setBlockEngineUrlBlocklist")]
+    fn set_block_engine_url_blocklist(
+        &self,
+        meta: Self::Metadata,
+        blocklisted_uuids: Vec<String>,
+    ) -> Result<()>;
+
     #[rpc(meta, name = "setBamUrl")]
     fn set_bam_url(&self, meta: Self::Metadata, bam_url: Option<String>) -> Result<()>;
+
+    #[rpc(meta, name = "setClientMode")]
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()>;
+
+    #[rpc(meta, name = "setRakuraiConfig")]
+    fn set_rakurai_config(&self, meta: Self::Metadata, config_json: String) -> Result<()>;
+
+    #[rpc(meta, name = "resetRakurai")]
+    fn reset_rakurai(&self, meta: Self::Metadata) -> Result<()>;
+
+    #[rpc(meta, name = "setBundleLifecycleDumpEnabled")]
+    fn set_bundle_lifecycle_dump_enabled(&self, meta: Self::Metadata, enabled: bool) -> Result<()>;
+
+    #[rpc(meta, name = "getBundleLifecycleDumpEnabled")]
+    fn get_bundle_lifecycle_dump_enabled(&self, meta: Self::Metadata) -> Result<bool>;
 
     #[rpc(meta, name = "setRelayerConfig")]
     fn set_relayer_config(
@@ -349,6 +405,26 @@ pub trait AdminRpc {
         &self,
         meta: Self::Metadata,
         addr: String,
+    ) -> Result<()>;
+
+    #[rpc(meta, name = "setPostPackConfirmationConfig")]
+    fn set_postpack_confirmation_config(
+        &self,
+        meta: Self::Metadata,
+        request_json: String,
+    ) -> Result<()>;
+
+    #[rpc(meta, name = "getPostPackConfirmationConfig")]
+    fn get_postpack_confirmation_config(
+        &self,
+        meta: Self::Metadata,
+    ) -> Result<PostPackConfirmationConfigStatus>;
+
+    #[rpc(meta, name = "setPostPackConfirmationUuidBlocklist")]
+    fn set_post_pack_confirmation_uuid_blocklist(
+        &self,
+        meta: Self::Metadata,
+        blocklisted_uuids: Vec<String>,
     ) -> Result<()>;
 }
 
@@ -628,6 +704,7 @@ impl AdminRpc for AdminRpcImpl {
             block_engine_url,
             disable_block_engine_autoconfig,
             trust_packets,
+            ..Default::default()
         };
         // Detailed log messages are printed inside validate function
         if !BlockEngineStage::is_valid_block_engine_config(&config) {
@@ -637,6 +714,57 @@ impl AdminRpc for AdminRpcImpl {
         }
         meta.with_post_init(|post_init| {
             post_init.block_engine_config.store(Arc::new(config));
+            Ok(())
+        })
+    }
+
+    fn set_secondary_block_engine_urls(
+        &self,
+        meta: Self::Metadata,
+        secondary_block_engine_entries: Vec<BlockEngineEntry>,
+    ) -> Result<()> {
+        debug!("set_secondary_block_engine_urls request received");
+
+        meta.with_post_init(|post_init| {
+            post_init
+                .secondary_block_engine_entries
+                .store(Arc::new(secondary_block_engine_entries));
+            Ok(())
+        })
+    }
+
+    fn get_block_engine_urls(&self, meta: Self::Metadata) -> Result<BlockEngineUrlStatus> {
+        debug!("get_block_engine_urls request received");
+
+        meta.with_post_init(|post_init| {
+            let block_engine_config = post_init.block_engine_config.load();
+            let admin_secondary_entries = post_init.secondary_block_engine_entries.load();
+            let blocklisted_uuids = post_init.block_engine_uuid_blocklist.load();
+            let onchain_secondary_entries =
+                post_init.bank_forks.read().ok().and_then(|bank_forks| {
+                    load_secondary_block_engine_entries_from_bank(&bank_forks.working_bank())
+                });
+
+            Ok(collect_block_engine_url_status(
+                block_engine_config.as_ref(),
+                admin_secondary_entries.as_ref(),
+                onchain_secondary_entries,
+                blocklisted_uuids.as_ref(),
+            ))
+        })
+    }
+
+    fn set_block_engine_url_blocklist(
+        &self,
+        meta: Self::Metadata,
+        blocklisted_uuids: Vec<String>,
+    ) -> Result<()> {
+        debug!("set_block_engine_url_blocklist request received");
+
+        meta.with_post_init(|post_init| {
+            post_init
+                .block_engine_uuid_blocklist
+                .store(Arc::new(blocklisted_uuids));
             Ok(())
         })
     }
@@ -668,6 +796,76 @@ impl AdminRpc for AdminRpcImpl {
 
         meta.bam_url.store(Arc::new(bam_url));
         Ok(())
+    }
+
+    fn set_client_mode(&self, meta: Self::Metadata, client_mode: String) -> Result<()> {
+        let old_client_mode = meta.client_mode.lock().unwrap().clone();
+        info!(
+            "set_client_mode old= {}, new={}",
+            old_client_mode, client_mode
+        );
+
+        let new_client_mode = ClientMode::from_str(&client_mode).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}. Valid options: {:?}",
+                client_mode,
+                e,
+                ClientMode::cli_names()
+            ))
+        })?;
+
+        if new_client_mode == ClientMode::RakuraiBAM {
+            return Err(jsonrpc_core::error::Error::invalid_params(format!(
+                "Invalid client mode '{}': {}",
+                client_mode, "RakuraiBAM is not allowed for now",
+            )));
+        }
+
+        if new_client_mode != ClientMode::RakuraiJito {
+            if meta.bam_url.load().is_some() {
+                *meta.client_mode.lock().unwrap() = new_client_mode;
+            } else {
+                *meta.client_mode.lock().unwrap() = ClientMode::RakuraiJito;
+                info!(
+                    "BAM URL not specified, Please set bam-url first before switching client mode"
+                );
+                return Err(jsonrpc_core::error::Error::invalid_params(
+                    "BAM URL not specified, Please set bam-url first before switching client mode",
+                ));
+            }
+        } else {
+            *meta.client_mode.lock().unwrap() = new_client_mode;
+        }
+        Ok(())
+    }
+
+    fn set_rakurai_config(&self, meta: Self::Metadata, config_json: String) -> Result<()> {
+        let config: RakuraiConfig = serde_json::from_str(&config_json).map_err(|e| {
+            jsonrpc_core::error::Error::invalid_params(format!("Invalid RakuraiConfig JSON: {e}"))
+        })?;
+
+        let old = meta.rakurai_config.read().unwrap().clone();
+        info!("set_rakurai_config old={:?}, new={:?}", old, config);
+
+        *meta.rakurai_config.write().unwrap() = config;
+        Ok(())
+    }
+
+    fn reset_rakurai(&self, meta: Self::Metadata) -> Result<()> {
+        info!("reset_rakurai request received");
+        meta.reset_rakurai.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn set_bundle_lifecycle_dump_enabled(&self, meta: Self::Metadata, enabled: bool) -> Result<()> {
+        info!("set_bundle_lifecycle_dump_enabled: {enabled}");
+        meta.bundle_lifecycle_dump_enabled
+            .store(enabled, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn get_bundle_lifecycle_dump_enabled(&self, meta: Self::Metadata) -> Result<bool> {
+        Ok(meta.bundle_lifecycle_dump_enabled.load(Ordering::Relaxed))
     }
 
     fn set_identity(
@@ -758,6 +956,74 @@ impl AdminRpc for AdminRpcImpl {
                 .store(Arc::new(shred_receiver_addresses));
             Ok(())
         })
+    }
+
+    fn set_postpack_confirmation_config(
+        &self,
+        meta: Self::Metadata,
+        request_json: String,
+    ) -> Result<()> {
+        let request: AdminRPCPostPackConfirmationConfig = serde_json::from_str(&request_json)
+            .map_err(|err| {
+                jsonrpc_core::error::Error::invalid_params(format!(
+                    "Invalid PostPackConfirmationConfig JSON: {err}"
+                ))
+            })?;
+
+        let entries = request
+            .entries
+            .into_iter()
+            .map(|entry| PostPackConfirmation {
+                url: entry.url,
+                uuid: entry.uuid,
+            })
+            .collect();
+
+        let postpack_confirmation_config = PostPackConfirmationConfig { entries: entries };
+
+        *meta.postpack_confirmation_config.write().unwrap() = postpack_confirmation_config.clone();
+        info!(
+            "set_postpack_confirmation_config updated admin entries: {:?}",
+            postpack_confirmation_config
+        );
+        Ok(())
+    }
+
+    fn get_postpack_confirmation_config(
+        &self,
+        meta: Self::Metadata,
+    ) -> Result<PostPackConfirmationConfigStatus> {
+        info!("get_postpack_confirmation_config request received");
+
+        let status = meta.postpack_confirmation_active_entries.load();
+        for entry in &status.active_entries {
+            info!(
+                "postpack_confirmation active entry url={} uuid={}",
+                entry.url, entry.uuid
+            );
+        }
+        for entry in &status.blocklisted_entries {
+            info!(
+                "postpack_confirmation blocklisted entry url={} uuid={}",
+                entry.url, entry.uuid
+            );
+        }
+
+        Ok(status.as_ref().clone())
+    }
+
+    fn set_post_pack_confirmation_uuid_blocklist(
+        &self,
+        meta: Self::Metadata,
+        blocklisted_uuids: Vec<String>,
+    ) -> Result<()> {
+        info!(
+            "set_post_pack_confirmation_uuid_blocklist updated blocklist: {:?}",
+            blocklisted_uuids
+        );
+        meta.post_pack_confirmation_uuid_blocklist
+            .store(Arc::new(blocklisted_uuids));
+        Ok(())
     }
 
     fn set_shred_retransmit_receiver_address(
@@ -1317,6 +1583,7 @@ mod tests {
         },
         solana_core::{
             admin_rpc_post_init::{KeyUpdaterType, KeyUpdaters},
+            banking_stage::RakuraiMode,
             consensus::tower_storage::NullTowerStorage,
             validator::{Validator, ValidatorConfig, ValidatorTpuConfig},
         },
@@ -1394,6 +1661,8 @@ mod tests {
                 votor_event_sender
             });
             let block_engine_config = Arc::new(ArcSwap::from_pointee(BlockEngineConfig::default()));
+            let secondary_block_engine_entries = Arc::new(ArcSwap::from_pointee(vec![]));
+            let block_engine_uuid_blocklist = Arc::new(ArcSwap::from_pointee(vec![]));
             let relayer_config = Arc::new(ArcSwap::from_pointee(RelayerConfig::default()));
             let shred_receiver_addresses =
                 Arc::new(ArcSwap::from_pointee(ShredReceiverAddresses::new()));
@@ -1428,6 +1697,8 @@ mod tests {
                     blockstore,
                     votor_event_sender,
                     block_engine_config,
+                    secondary_block_engine_entries,
+                    block_engine_uuid_blocklist,
                     relayer_config,
                     shred_receiver_addresses,
                     shred_retransmit_receiver_addresses,
@@ -1435,6 +1706,27 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                    rs_mode: RakuraiMode::Mode1,
+                    rs_cfg_d1: 40,
+                    rs_cfg_ct1: 65,
+                    rs_cfg_nd1: 30,
+                    rs_cfg_ff1: 1.0,
+                    rs_cfg_ft1: 400,
+                    rs_cfg_tf1: 1.077,
+                    rs_cfg_ntft: 500,
+                    rs_cfg_nm: 1,
+                })),
+                reset_rakurai: Arc::new(AtomicBool::new(false)),
+                bundle_lifecycle_dump_enabled: Arc::new(AtomicBool::new(true)),
+                postpack_confirmation_config: Arc::new(RwLock::new(
+                    PostPackConfirmationConfig::default(),
+                )),
+                postpack_confirmation_active_entries: Arc::new(ArcSwap::from_pointee(
+                    PostPackConfirmationConfigStatus::default(),
+                )),
+                post_pack_confirmation_uuid_blocklist: Arc::new(ArcSwap::from_pointee(Vec::new())),
             };
             let mut io = MetaIoHandler::default();
             io.extend_with(AdminRpcImpl.to_delegate());
@@ -1589,6 +1881,27 @@ mod tests {
                 staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
                 rpc_to_plugin_manager_sender: None,
                 bam_url: Arc::new(ArcSwap::from_pointee(None)),
+                client_mode: Arc::new(Mutex::new(ClientMode::default())),
+                rakurai_config: Arc::new(RwLock::new(RakuraiConfig {
+                    rs_mode: RakuraiMode::Mode1,
+                    rs_cfg_d1: 40,
+                    rs_cfg_ct1: 65,
+                    rs_cfg_nd1: 30,
+                    rs_cfg_ff1: 1.0,
+                    rs_cfg_ft1: 400,
+                    rs_cfg_tf1: 1.077,
+                    rs_cfg_ntft: 500,
+                    rs_cfg_nm: 1,
+                })),
+                reset_rakurai: Arc::new(AtomicBool::new(false)),
+                bundle_lifecycle_dump_enabled: Arc::new(AtomicBool::new(true)),
+                postpack_confirmation_config: Arc::new(RwLock::new(
+                    crate::banking_stage::PostPackConfirmationConfig::default(),
+                )),
+                postpack_confirmation_active_entries: Arc::new(ArcSwap::from_pointee(
+                    crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+                )),
+                post_pack_confirmation_uuid_blocklist: Arc::new(ArcSwap::from_pointee(Vec::new())),
             };
 
             let _validator = Validator::new(
@@ -1674,6 +1987,17 @@ mod tests {
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             rpc_to_plugin_manager_sender: None,
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig::default())),
+            reset_rakurai: Arc::new(AtomicBool::new(false)),
+            bundle_lifecycle_dump_enabled: Arc::new(AtomicBool::new(true)),
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                PostPackConfirmationConfig::default(),
+            )),
+            postpack_confirmation_active_entries: Arc::new(ArcSwap::from_pointee(
+                PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
 
         let snapshot_controller = meta.snapshot_controller();
@@ -1771,6 +2095,17 @@ mod tests {
             staked_nodes_overrides: Arc::new(RwLock::new(HashMap::new())),
             rpc_to_plugin_manager_sender: None,
             bam_url: Arc::new(ArcSwap::from_pointee(None)),
+            client_mode: Arc::new(Mutex::new(ClientMode::default())),
+            rakurai_config: Arc::new(RwLock::new(RakuraiConfig::default())),
+            reset_rakurai: Arc::new(AtomicBool::new(false)),
+            bundle_lifecycle_dump_enabled: Arc::new(AtomicBool::new(true)),
+            postpack_confirmation_config: Arc::new(RwLock::new(
+                crate::banking_stage::PostPackConfirmationConfig::default(),
+            )),
+            postpack_confirmation_active_entries: Arc::new(ArcSwap::from_pointee(
+                crate::banking_stage::PostPackConfirmationConfigStatus::default(),
+            )),
+            post_pack_confirmation_uuid_blocklist: Arc::new(ArcSwap::from_pointee(Vec::new())),
         };
 
         let response = io.handle_request_sync(request, meta_no_post_init);

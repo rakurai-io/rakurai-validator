@@ -10,6 +10,7 @@ use {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone)]
+#[repr(C)]
 pub struct RollingBitField {
     max_width: u64,
     min: u64,

@@ -18,8 +18,9 @@ use {
     },
     ahash::HashMapExt,
     arc_swap::ArcSwap,
+    borsh::BorshDeserialize,
     crossbeam_channel::Sender,
-    itertools::Itertools,
+    itertools::{Either, Itertools},
     jito_protos::proto::{
         auth::{Token, auth_service_client::AuthServiceClient},
         block_engine::{
@@ -27,18 +28,21 @@ use {
             block_engine_validator_client::BlockEngineValidatorClient,
         },
     },
+    serde::{Deserialize, Serialize},
+    solana_account::ReadableAccount,
     solana_gossip::cluster_info::ClusterInfo,
     solana_keypair::Keypair,
     solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
+    solana_runtime::{bank::Bank, bank_forks::BankForks},
     solana_signer::Signer,
     std::{
-        collections::hash_map::Entry,
+        collections::{HashMap, HashSet, hash_map::Entry},
         net::{SocketAddr, ToSocketAddrs},
         ops::AddAssign,
         str::FromStr,
         sync::{
-            Arc,
+            Arc, Mutex, RwLock,
             atomic::{AtomicBool, AtomicU8, Ordering},
         },
         thread::{self, Builder, JoinHandle},
@@ -46,7 +50,7 @@ use {
     },
     thiserror::Error,
     tokio::{
-        task,
+        task::{self, JoinSet},
         time::{interval, sleep, timeout},
     },
     tonic::{
@@ -59,6 +63,145 @@ use {
 const CONNECTION_TIMEOUT_S: u64 = 10;
 const CONNECTION_BACKOFF_S: u64 = 5;
 
+/// On-chain block engine config PDA (`["block_engine_config"]` + activation program).
+pub const BLOCK_ENGINE_PROGRAM_ID: Pubkey =
+    Pubkey::from_str_const("L9D6MXnwqQeQhBJnJRXaNbqEnXu4WzubWRvmPhw4opt");
+const BLOCK_ENGINE_CONFIG_SEED: &[u8] = b"BLOCK_ENGINE_CONFIG_ACCOUNT";
+const ACCOUNT_HEADER_LEN: usize = 8 + 32 + 1 + 4;
+
+#[derive(BorshDeserialize, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEngineEntry {
+    pub url: String,
+    pub uuid: String,
+}
+
+#[derive(BorshDeserialize, Clone, Debug, PartialEq)]
+struct BlockEngineUrl {
+    pub url: String,
+}
+
+#[derive(BorshDeserialize, Clone, Debug, PartialEq)]
+struct UuidBlockEngineGroup {
+    pub service_uuid: [u8; 32],
+    pub entries: Vec<BlockEngineUrl>,
+}
+
+pub fn parse_block_engine_entry(value: &str) -> Result<BlockEngineEntry, String> {
+    let (url, uuid) = value
+        .split_once(',')
+        .ok_or_else(|| format!("expected url,uuid format, got: {value}"))?;
+    if url.is_empty() || uuid.is_empty() {
+        return Err(format!("url and uuid must be non-empty, got: {value}"));
+    }
+    Ok(BlockEngineEntry {
+        url: url.to_string(),
+        uuid: uuid.to_string(),
+    })
+}
+
+pub fn derive_block_engine_config_pda() -> Pubkey {
+    Pubkey::find_program_address(&[BLOCK_ENGINE_CONFIG_SEED], &BLOCK_ENGINE_PROGRAM_ID).0
+}
+
+pub fn uuid_to_string(uuid: &[u8; 32]) -> String {
+    let end = uuid
+        .iter()
+        .rposition(|b| *b != 0)
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    if end == 0 {
+        return String::new();
+    }
+    String::from_utf8_lossy(&uuid[..end]).into_owned()
+}
+
+pub fn load_secondary_block_engine_entries_from_bank(bank: &Bank) -> Option<Vec<BlockEngineEntry>> {
+    let pda = derive_block_engine_config_pda();
+    let account = bank.get_account(&pda)?;
+    if account.owner() != &BLOCK_ENGINE_PROGRAM_ID {
+        return None;
+    }
+    let data = account.data();
+    if data.len() <= ACCOUNT_HEADER_LEN {
+        return None;
+    }
+
+    let mut slice = &data[ACCOUNT_HEADER_LEN..];
+
+    let groups = Vec::<UuidBlockEngineGroup>::deserialize(&mut slice)
+        .map_err(|err| {
+            warn!("failed to deserialize block engine entries from {pda}: {err}");
+            err
+        })
+        .ok()?;
+    Some(
+        groups
+            .into_iter()
+            .flat_map(|group| {
+                let uuid = uuid_to_string(&group.service_uuid);
+                group
+                    .entries
+                    .into_iter()
+                    .map(move |entry| BlockEngineEntry {
+                        uuid: uuid.clone(),
+                        url: entry.url,
+                    })
+            })
+            .collect::<Vec<BlockEngineEntry>>(),
+    )
+}
+
+pub fn merged_secondary_block_engine_entries(
+    admin_entries: &[BlockEngineEntry],
+    onchain_entries: Option<Vec<BlockEngineEntry>>,
+    blocklisted_uuids: &[String],
+) -> Vec<BlockEngineEntry> {
+    let blocklist: HashSet<&str> = blocklisted_uuids.iter().map(String::as_str).collect();
+    let mut merged = admin_entries
+        .iter()
+        .filter(|entry| !blocklist.contains(entry.uuid.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut merged_uuids: HashSet<String> = merged.iter().map(|entry| entry.uuid.clone()).collect();
+    if let Some(onchain_entries) = onchain_entries {
+        for entry in onchain_entries {
+            if !blocklist.contains(entry.uuid.as_str()) && merged_uuids.insert(entry.uuid.clone()) {
+                merged.push(entry);
+            }
+        }
+    }
+    merged
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockEngineUrlStatus {
+    pub primary_url: String,
+    pub admin_secondary_entries: Vec<BlockEngineEntry>,
+    pub onchain_secondary_entries: Vec<BlockEngineEntry>,
+    pub blocklisted_uuids: Vec<String>,
+    pub active_secondary_entries: Vec<BlockEngineEntry>,
+}
+
+pub fn collect_block_engine_url_status(
+    block_engine_config: &BlockEngineConfig,
+    admin_secondary_entries: &[BlockEngineEntry],
+    onchain_secondary_entries: Option<Vec<BlockEngineEntry>>,
+    blocklisted_uuids: &[String],
+) -> BlockEngineUrlStatus {
+    let onchain_secondary_entries = onchain_secondary_entries.unwrap_or_default();
+    BlockEngineUrlStatus {
+        primary_url: block_engine_config.block_engine_url.clone(),
+        admin_secondary_entries: admin_secondary_entries.to_vec(),
+        onchain_secondary_entries: onchain_secondary_entries.clone(),
+        blocklisted_uuids: blocklisted_uuids.to_vec(),
+        active_secondary_entries: merged_secondary_block_engine_entries(
+            admin_secondary_entries,
+            Some(onchain_secondary_entries),
+            blocklisted_uuids,
+        ),
+    }
+}
+
 #[derive(Default)]
 struct BlockEngineStageStats {
     num_bundles: u64,
@@ -68,9 +211,11 @@ struct BlockEngineStageStats {
 }
 
 impl BlockEngineStageStats {
-    pub(crate) fn report(&self) {
+    pub(crate) fn report_with_url(&self, url: &str, is_primary: bool) {
         datapoint_info!(
             "block_engine_stage-stats",
+            ("url", url, String),
+            ("is_primary", is_primary, bool),
             ("num_bundles", self.num_bundles, i64),
             ("num_bundle_packets", self.num_bundle_packets, i64),
             ("num_packets", self.num_packets, i64),
@@ -89,6 +234,9 @@ pub struct BlockBuilderFeeInfo {
 pub struct BlockEngineConfig {
     /// Block Engine URL
     pub block_engine_url: String,
+
+    /// Stable identity for this connection (secondary entries); empty string for primary.
+    pub block_engine_uuid: String,
 
     /// Disables Block Engine auto-configuration. This stops the validator client from using the most performant Block Engine region. Values provided to `--block-engine-url` will be used as-is.
     pub disable_block_engine_autoconfig: bool,
@@ -123,6 +271,9 @@ impl BlockEngineStage {
     const CONNECTION_BACKOFF: Duration = Duration::from_secs(CONNECTION_BACKOFF_S);
     pub fn new(
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+        blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
+        bank_forks: Arc<RwLock<BankForks>>,
         // Channel that bundles get piped through.
         bundle_tx: Sender<Vec<PacketBundle>>,
         // The keypair stored here is used to sign auth challenges.
@@ -135,27 +286,68 @@ impl BlockEngineStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: Arc<AtomicU8>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> Self {
-        let block_builder_fee_info = block_builder_fee_info.clone();
+        let secondary_task_exits = Arc::new(Mutex::new(HashMap::new()));
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let mut set: JoinSet<_> = {
+            let _rt_guard = rt.enter();
+
+            let mut tasks = JoinSet::new();
+
+            // Start primary task
+            info!("starting block-engine-primary");
+            tasks.spawn(Self::start(
+                Either::Left(block_engine_config.clone()),
+                cluster_info.clone(),
+                bundle_tx.clone(),
+                packet_tx.clone(),
+                banking_packet_sender.clone(),
+                exit.clone(),
+                block_builder_fee_info.clone(),
+                shredstream_receiver_address.clone(),
+                bam_enabled.clone(),
+                input_tx_signature_sender.clone(),
+            ));
+
+            // Start secondary URL manager task
+            tasks.spawn(Self::manage_secondary_urls(
+                secondary_entries.clone(),
+                blocklisted_uuids.clone(),
+                bank_forks,
+                cluster_info.clone(),
+                bundle_tx.clone(),
+                packet_tx.clone(),
+                banking_packet_sender.clone(),
+                exit.clone(),
+                block_builder_fee_info.clone(),
+                secondary_task_exits.clone(),
+                shredstream_receiver_address.clone(),
+                bam_enabled.clone(),
+                input_tx_signature_sender.clone(),
+            ));
+
+            tasks
+        };
 
         let thread = Builder::new()
-            .name("block-engine-stage".to_string())
+            .name("block-engine-runtime".to_string())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap();
-                rt.block_on(Self::start(
-                    block_engine_config,
-                    cluster_info,
-                    bundle_tx,
-                    packet_tx,
-                    banking_packet_sender,
-                    exit,
-                    block_builder_fee_info,
-                    shredstream_receiver_address,
-                    bam_enabled,
-                ));
+                rt.block_on(async move {
+                    while let Some(res) = set.join_next().await {
+                        match res {
+                            Ok(_) => continue,
+                            Err(e) => {
+                                error!("Block engine task failed: {}", e);
+                            }
+                        }
+                    }
+                })
             })
             .unwrap();
 
@@ -171,9 +363,123 @@ impl BlockEngineStage {
         Ok(())
     }
 
+    async fn manage_secondary_urls(
+        secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
+        blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        cluster_info: Arc<ClusterInfo>,
+        bundle_tx: Sender<Vec<PacketBundle>>,
+        packet_tx: Sender<PacketBatch>,
+        banking_packet_sender: BankingPacketSender,
+        exit: Arc<AtomicBool>,
+        block_builder_fee_info: Arc<ArcSwap<BlockBuilderFeeInfo>>,
+        secondary_task_exits: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
+        shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
+        bam_enabled: Arc<AtomicU8>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+    ) {
+        const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+        let mut check_interval = interval(CHECK_INTERVAL);
+        let mut current_entries: Vec<BlockEngineEntry> = Vec::new();
+        let mut task_set: JoinSet<()> = JoinSet::new();
+
+        while !exit.load(Ordering::Relaxed) {
+            tokio::select! {
+                _ = check_interval.tick() => {
+                    let admin_entries = secondary_entries.load().as_ref().clone();
+                    let blocklist = blocklisted_uuids.load().as_ref().clone();
+                    let onchain_entries = bank_forks.read().ok().and_then(|bank_forks_guard| {
+                        load_secondary_block_engine_entries_from_bank(&bank_forks_guard.working_bank())
+                    });
+                    let new_entries = merged_secondary_block_engine_entries(
+                        &admin_entries,
+                        onchain_entries,
+                        &blocklist,
+                    );
+
+                    if new_entries != current_entries {
+                        info!(
+                            "Secondary block engine entries changed from {:#?} to {:#?}",
+                            current_entries,
+                            new_entries
+                        );
+
+                        let entries_to_remove: Vec<BlockEngineEntry> = current_entries
+                            .iter()
+                            .filter(|entry| !new_entries.contains(entry))
+                            .cloned()
+                            .collect();
+
+                        let entries_to_add: Vec<BlockEngineEntry> = new_entries
+                            .iter()
+                            .filter(|entry| !current_entries.contains(entry))
+                            .cloned()
+                            .collect();
+
+                        for entry in entries_to_remove {
+                            if let Some(task_exit) = {
+                                let mut exits = secondary_task_exits.lock().unwrap();
+                                exits.remove(&entry.uuid)
+                            } {
+                                info!(
+                                    "Stopping task for removed block engine entry: uuid={}, url={}",
+                                    entry.uuid, entry.url
+                                );
+                                task_exit.store(true, Ordering::Relaxed);
+                            }
+                        }
+
+                        for entry in entries_to_add {
+                            let task_exit = Arc::new(AtomicBool::new(false));
+
+                            {
+                                let mut exits = secondary_task_exits.lock().unwrap();
+                                exits.insert(entry.uuid.clone(), task_exit.clone());
+                            }
+
+                            info!(
+                                "Starting task for new block engine entry: uuid={}, url={}",
+                                entry.uuid, entry.url
+                            );
+                            task_set.spawn(Self::start(
+                                Either::Right(entry.clone()),
+                                cluster_info.clone(),
+                                bundle_tx.clone(),
+                                packet_tx.clone(),
+                                banking_packet_sender.clone(),
+                                task_exit,
+                                block_builder_fee_info.clone(),
+                                shredstream_receiver_address.clone(),
+                                bam_enabled.clone(),
+                                input_tx_signature_sender.clone(),
+                            ));
+                        }
+
+                        current_entries = new_entries;
+                    }
+                }
+                Some(result) = task_set.join_next() => {
+                    if let Err(e) = result {
+                        error!("Secondary block engine task failed: {}", e);
+                    }
+                }
+            }
+        }
+
+        {
+            let exits = secondary_task_exits.lock().unwrap();
+            for (uuid, task_exit) in exits.iter() {
+                info!("Stopping secondary block engine task for uuid: {}", uuid);
+                task_exit.store(true, Ordering::Relaxed);
+            }
+        }
+
+        while task_set.join_next().await.is_some() {}
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn start(
-        block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
+        block_engine_config: Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
         cluster_info: Arc<ClusterInfo>,
         bundle_tx: Sender<Vec<PacketBundle>>,
         packet_tx: Sender<PacketBatch>,
@@ -182,15 +488,27 @@ impl BlockEngineStage {
         block_builder_fee_info: Arc<ArcSwap<BlockBuilderFeeInfo>>,
         shredstream_receiver_address: Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: Arc<AtomicU8>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) {
         let mut error_count: u64 = 0;
 
         while !exit.load(Ordering::Relaxed) {
             // Wait until a valid config is supplied (either initially or by admin rpc)
             // Use if!/else here to avoid extra CONNECTION_BACKOFF wait on successful termination
-            let local_block_engine_config = block_engine_config.load();
+            let local_block_engine_config = match &block_engine_config {
+                Either::Left(config) => config.load().as_ref().clone(),
+                Either::Right(entry) => BlockEngineConfig {
+                    block_engine_url: entry.url.clone(),
+                    block_engine_uuid: entry.uuid.clone(),
+                    disable_block_engine_autoconfig: false,
+                    trust_packets: false, // Default to false for secondary URLs
+                },
+            };
             if !Self::is_valid_block_engine_config(&local_block_engine_config) {
-                shredstream_receiver_address.store(Arc::new(None));
+                Self::maybe_clear_shredstream_receiver_address(
+                    &block_engine_config,
+                    &shredstream_receiver_address,
+                );
                 sleep(Self::CONNECTION_BACKOFF).await;
                 continue;
             }
@@ -206,6 +524,7 @@ impl BlockEngineStage {
                 &shredstream_receiver_address,
                 &local_block_engine_config,
                 &bam_enabled,
+                &input_tx_signature_sender,
             )
             .await
             {
@@ -223,6 +542,12 @@ impl BlockEngineStage {
                             "block_engine_stage-proxy_error",
                             ("count", error_count, i64),
                             ("error", e.to_string(), String),
+                            (
+                                "url",
+                                local_block_engine_config.block_engine_url.clone(),
+                                String
+                            ),
+                            ("is_primary", block_engine_config.is_left(), bool),
                         );
                     }
                 }
@@ -233,7 +558,7 @@ impl BlockEngineStage {
 
     #[allow(clippy::too_many_arguments)]
     async fn connect_auth_and_stream_maybe_autoconfig(
-        block_engine_config: &Arc<ArcSwap<BlockEngineConfig>>,
+        block_engine_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
         cluster_info: &Arc<ClusterInfo>,
         bundle_tx: &Sender<Vec<PacketBundle>>,
         packet_tx: &Sender<PacketBatch>,
@@ -243,6 +568,7 @@ impl BlockEngineStage {
         shredstream_receiver_address: &Arc<ArcSwap<Option<SocketAddr>>>,
         local_block_engine_config: &BlockEngineConfig,
         bam_enabled: &Arc<AtomicU8>,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         if BamConnectionState::from_u8(bam_enabled.load(Ordering::Relaxed))
             == BamConnectionState::Connected
@@ -270,6 +596,7 @@ impl BlockEngineStage {
                 block_builder_fee_info,
                 shredstream_receiver_address,
                 bam_enabled,
+                input_tx_signature_sender,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err));
@@ -293,12 +620,11 @@ impl BlockEngineStage {
             "type" => "direct_global",
             ("count", 1, i64),
         );
-        if let Some(shredstream_socket) =
-            Self::resolve_shredstream_receiver_address(&global.shredstream_receiver_address)
-        {
-            // Direct leader-broadcast copies still go to shred_receiver_addresses.
-            shredstream_receiver_address.store(Arc::new(Some(shredstream_socket)));
-        }
+        Self::maybe_update_shredstream_receiver_address(
+            block_engine_config,
+            shredstream_receiver_address,
+            Self::resolve_shredstream_receiver_address(&global.shredstream_receiver_address),
+        );
         let backend_endpoint = Self::get_endpoint(global.block_engine_url.as_str())?;
 
         datapoint_info!(
@@ -318,6 +644,7 @@ impl BlockEngineStage {
             block_builder_fee_info,
             &Self::CONNECTION_TIMEOUT,
             bam_enabled,
+            input_tx_signature_sender,
         )
         .await
         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -335,7 +662,7 @@ impl BlockEngineStage {
     async fn connect_auth_and_stream_autoconfig(
         endpoint: Endpoint,
         local_block_engine_config: &BlockEngineConfig,
-        global_block_engine_config: &Arc<ArcSwap<BlockEngineConfig>>,
+        global_block_engine_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
         cluster_info: &Arc<ClusterInfo>,
         bundle_tx: &Sender<Vec<PacketBundle>>,
         packet_tx: &Sender<PacketBatch>,
@@ -344,6 +671,7 @@ impl BlockEngineStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         shredstream_receiver_address: &Arc<ArcSwap<Option<SocketAddr>>>,
         bam_enabled: &Arc<AtomicU8>,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         let endpoints = Self::get_block_engine_endpoints(&endpoint)
             .await
@@ -394,9 +722,11 @@ impl BlockEngineStage {
                 );
                 backend_endpoint = Self::get_endpoint(block_engine_url.as_str())?;
             }
-            if let Some(shredstream_socket) = maybe_shredstream_socket {
-                shredstream_receiver_address.store(Arc::new(Some(shredstream_socket)));
-            }
+            Self::maybe_update_shredstream_receiver_address(
+                global_block_engine_config,
+                shredstream_receiver_address,
+                maybe_shredstream_socket,
+            );
             attempted = true;
             let connect_start = Instant::now();
             match Self::connect_auth_and_stream(
@@ -411,6 +741,7 @@ impl BlockEngineStage {
                 block_builder_fee_info,
                 &Self::CONNECTION_TIMEOUT,
                 bam_enabled,
+                input_tx_signature_sender,
             )
             .await
             .map_err(|err| Self::map_bam_enabled(bam_enabled, err))
@@ -475,7 +806,7 @@ impl BlockEngineStage {
     async fn connect_auth_and_stream(
         backend_endpoint: &Endpoint,
         local_block_engine_config: &BlockEngineConfig,
-        global_block_engine_config: &Arc<ArcSwap<BlockEngineConfig>>,
+        global_block_engine_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
         cluster_info: &Arc<ClusterInfo>,
         bundle_tx: &Sender<Vec<PacketBundle>>,
         packet_tx: &Sender<PacketBatch>,
@@ -484,6 +815,7 @@ impl BlockEngineStage {
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
         connection_timeout: &Duration,
         bam_enabled: &Arc<AtomicU8>,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         // Get a copy of configs here in case they have changed at runtime
         let keypair = cluster_info.keypair().clone();
@@ -497,7 +829,8 @@ impl BlockEngineStage {
         let backend_url = backend_endpoint.uri().to_string();
         datapoint_info!(
             "block_engine_stage-tokens_generated",
-            ("url", backend_url, String),
+            ("url", local_block_engine_config.block_engine_url, String),
+            ("is_primary", global_block_engine_config.is_left(), bool),
             ("count", 1, i64),
         );
 
@@ -537,8 +870,8 @@ impl BlockEngineStage {
             connection_timeout,
             keypair,
             cluster_info,
-            &backend_url,
             bam_enabled,
+            input_tx_signature_sender,
         )
         .await
     }
@@ -729,7 +1062,7 @@ impl BlockEngineStage {
         mut client: BlockEngineValidatorClient<InterceptedService<Channel, AuthInterceptor>>,
         packet_tx: &Sender<PacketBatch>,
         local_config: &BlockEngineConfig, // local copy of config with current connections
-        global_config: &Arc<ArcSwap<BlockEngineConfig>>, // guarded reference for detecting run-time updates
+        global_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>, // guarded reference for detecting run-time updates
         banking_packet_sender: &BankingPacketSender,
         exit: &Arc<AtomicBool>,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
@@ -739,8 +1072,8 @@ impl BlockEngineStage {
         connection_timeout: &Duration,
         keypair: Arc<Keypair>,
         cluster_info: &Arc<ClusterInfo>,
-        block_engine_url: &str,
         bam_enabled: &Arc<AtomicU8>,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         let subscribe_packets_stream = timeout(
             *connection_timeout,
@@ -778,14 +1111,17 @@ impl BlockEngineStage {
         })?
         .into_inner();
 
-        Self::refresh_block_builder_fee_info(
-            &mut client,
-            connection_timeout,
-            block_builder_fee_info,
-            block_engine_url,
-            bam_enabled,
-        )
-        .await?;
+        // Only update block builder fee info for primary connections
+        if global_config.is_left() {
+            Self::refresh_block_builder_fee_info(
+                &mut client,
+                connection_timeout,
+                block_builder_fee_info,
+                &local_config.block_engine_url,
+                bam_enabled,
+            )
+            .await?;
+        }
 
         Self::consume_bundle_and_packet_stream(
             client,
@@ -803,8 +1139,8 @@ impl BlockEngineStage {
             keypair,
             cluster_info,
             connection_timeout,
-            block_engine_url,
             bam_enabled,
+            input_tx_signature_sender,
         )
         .await
     }
@@ -819,7 +1155,7 @@ impl BlockEngineStage {
         bundle_tx: &Sender<Vec<PacketBundle>>,
         packet_tx: &Sender<PacketBatch>,
         local_config: &BlockEngineConfig, // local copy of config with current connections
-        global_config: &Arc<ArcSwap<BlockEngineConfig>>, // guarded reference for detecting run-time updates
+        global_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>, // guarded reference for detecting run-time updates
         banking_packet_sender: &BankingPacketSender,
         exit: &Arc<AtomicBool>,
         block_builder_fee_info: &Arc<ArcSwap<BlockBuilderFeeInfo>>,
@@ -829,8 +1165,8 @@ impl BlockEngineStage {
         keypair: Arc<Keypair>,
         cluster_info: &Arc<ClusterInfo>,
         connection_timeout: &Duration,
-        block_engine_url: &str,
-        bam_enabled: &Arc<AtomicU8>,
+        #[allow(unused_variables)] bam_enabled: &Arc<AtomicU8>,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         const METRICS_TICK: Duration = Duration::from_secs(1);
         const MAINTENANCE_TICK: Duration = Duration::from_secs(10 * 60);
@@ -842,7 +1178,11 @@ impl BlockEngineStage {
         let mut metrics_and_auth_tick = interval(METRICS_TICK);
         let mut maintenance_tick = interval(MAINTENANCE_TICK);
 
-        info!("connected to packet and bundle stream");
+        info!(
+            "connected to packet and bundle stream: {} (primary: {})",
+            local_config.block_engine_url,
+            global_config.is_left()
+        );
 
         while !exit.load(Ordering::Relaxed) {
             if BamConnectionState::from_u8(bam_enabled.load(Ordering::Relaxed))
@@ -858,25 +1198,33 @@ impl BlockEngineStage {
                         .map_err(ProxyError::from)?
                         .ok_or(ProxyError::GrpcStreamDisconnected)
                         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))?;
-                    Self::handle_block_engine_packets(resp, packet_tx, banking_packet_sender, local_config.trust_packets, &mut block_engine_stats)?;
+                    Self::handle_block_engine_packets(resp, packet_tx, banking_packet_sender, local_config.trust_packets, &mut block_engine_stats, input_tx_signature_sender)?;
                 }
                 maybe_bundles = bundle_stream.message() => {
                     let resp = maybe_bundles
                         .map_err(ProxyError::from)?
                         .ok_or(ProxyError::GrpcStreamDisconnected)
                         .map_err(|err| Self::map_bam_enabled(bam_enabled, err))?;
-                    Self::handle_block_engine_bundles(resp, bundle_tx, &mut block_engine_stats)?;
+                    Self::handle_block_engine_bundles(
+                        resp,
+                        bundle_tx,
+                        &local_config.block_engine_uuid,
+                        &mut block_engine_stats,
+                    )?;
                 }
                 _ = metrics_and_auth_tick.tick() => {
-                    block_engine_stats.report();
+                    block_engine_stats.report_with_url(&local_config.block_engine_url, global_config.is_left());
                     block_engine_stats = BlockEngineStageStats::default();
 
                     if cluster_info.id() != keypair.pubkey() {
                         return Err(ProxyError::AuthenticationConnectionError("validator identity changed".to_string()));
                     }
 
-                    if global_config.load().as_ref() != local_config {
-                        return Err(ProxyError::BlockEngineConfigChanged);
+                    // Only check config changes for primary connection
+                    if let Either::Left(global_config) = global_config {
+                        if global_config.load().as_ref() != local_config {
+                            return Err(ProxyError::BlockEngineConfigChanged);
+                        }
                     }
 
                     let (maybe_new_access, maybe_new_refresh) = maybe_refresh_auth_tokens(&mut auth_client,
@@ -892,7 +1240,8 @@ impl BlockEngineStage {
                         num_refresh_access_token += 1;
                         datapoint_info!(
                             "block_engine_stage-refresh_access_token",
-                            ("url", &block_engine_url, String),
+                            ("url", &local_config.block_engine_url, String),
+                            ("is_primary", global_config.is_left(), bool),
                             ("count", num_refresh_access_token, i64),
                         );
 
@@ -902,20 +1251,24 @@ impl BlockEngineStage {
                         num_full_refreshes += 1;
                         datapoint_info!(
                             "block_engine_stage-tokens_generated",
-                            ("url", &block_engine_url, String),
+                            ("url", &local_config.block_engine_url, String),
+                            ("is_primary", global_config.is_left(), bool),
+
                             ("count", num_full_refreshes, i64),
                         );
                         refresh_token = new_token;
                     }
                 }
-                _ = maintenance_tick.tick() => {
+                // Only update fee info periodically for primary connection
+                _ = maintenance_tick.tick(), if global_config.is_left() => {
                     Self::refresh_block_builder_fee_info(
                         &mut client,
                         connection_timeout,
                         block_builder_fee_info,
-                        block_engine_url,
+                        &local_config.block_engine_url,
                         bam_enabled,
-                    ).await?;
+                    )
+                    .await?;
                 }
             }
         }
@@ -926,6 +1279,7 @@ impl BlockEngineStage {
     fn handle_block_engine_bundles(
         bundles_response: block_engine::SubscribeBundlesResponse,
         bundle_sender: &Sender<Vec<PacketBundle>>,
+        block_engine_uuid: &str,
         block_engine_stats: &mut BlockEngineStageStats,
     ) -> crate::proxy::Result<()> {
         let mut bundle_packets = 0u64;
@@ -933,6 +1287,7 @@ impl BlockEngineStage {
             .bundles
             .into_iter()
             .filter_map(|bundle| {
+                info!("Block Engine Bundle Received, ID: {:?}", bundle.uuid);
                 let packet_batch = PacketBatch::from(
                     bundle
                         .bundle?
@@ -942,7 +1297,11 @@ impl BlockEngineStage {
                         .collect::<Vec<BytesPacket>>(),
                 );
                 bundle_packets += packet_batch.len() as u64;
-                Some(PacketBundle::new(packet_batch, bundle.uuid))
+                Some(PacketBundle::new(
+                    packet_batch,
+                    bundle.uuid,
+                    block_engine_uuid.to_string(),
+                ))
             })
             .collect();
         block_engine_stats
@@ -964,6 +1323,7 @@ impl BlockEngineStage {
         banking_packet_sender: &BankingPacketSender,
         trust_packets: bool,
         block_engine_stats: &mut BlockEngineStageStats,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> crate::proxy::Result<()> {
         if let Some(batch) = resp.batch {
             if batch.packets.is_empty() {
@@ -985,7 +1345,7 @@ impl BlockEngineStage {
 
             if trust_packets {
                 banking_packet_sender
-                    .send(Arc::new(vec![packet_batch]))
+                    .send(Arc::new(vec![packet_batch]), input_tx_signature_sender)
                     .map_err(|_| ProxyError::PacketForwardError)?;
             } else {
                 packet_tx
@@ -1024,6 +1384,27 @@ impl BlockEngineStage {
                 message: sanitize_status_message_for_influx(s.message()),
             })
             .map(|response| response.into_inner())
+    }
+
+    fn maybe_update_shredstream_receiver_address(
+        block_engine_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
+        shredstream_receiver_address: &Arc<ArcSwap<Option<SocketAddr>>>,
+        maybe_shredstream_socket: Option<SocketAddr>,
+    ) {
+        if block_engine_config.is_left() {
+            if let Some(shredstream_socket) = maybe_shredstream_socket {
+                shredstream_receiver_address.store(Arc::new(Some(shredstream_socket)));
+            }
+        }
+    }
+
+    fn maybe_clear_shredstream_receiver_address(
+        block_engine_config: &Either<Arc<ArcSwap<BlockEngineConfig>>, BlockEngineEntry>,
+        shredstream_receiver_address: &Arc<ArcSwap<Option<SocketAddr>>>,
+    ) {
+        if block_engine_config.is_left() {
+            shredstream_receiver_address.store(Arc::new(None));
+        }
     }
 
     fn resolve_shredstream_receiver_address(address: &str) -> Option<SocketAddr> {
@@ -1095,6 +1476,13 @@ mod tests {
         }
     }
 
+    fn entry(url: &str, uuid: &str) -> BlockEngineEntry {
+        BlockEngineEntry {
+            url: url.to_string(),
+            uuid: uuid.to_string(),
+        }
+    }
+
     #[test]
     fn block_engine_config_validation_uses_runtime_endpoint_builder() {
         assert!(BlockEngineStage::is_valid_block_engine_config(&config(
@@ -1103,5 +1491,70 @@ mod tests {
         assert!(!BlockEngineStage::is_valid_block_engine_config(&config(
             "not a valid url"
         )));
+    }
+
+    #[test]
+    fn test_merged_secondary_block_engine_entries_applies_blocklist() {
+        let admin_entries = vec![
+            entry("https://admin-1", "admin-1"),
+            entry("https://blocked", "blocked"),
+        ];
+        let onchain_entries = vec![
+            entry("https://onchain-1", "onchain-1"),
+            entry("https://blocked-onchain", "blocked"),
+        ];
+        let blocklist = vec!["blocked".to_string()];
+
+        let merged = merged_secondary_block_engine_entries(
+            &admin_entries,
+            Some(onchain_entries),
+            &blocklist,
+        );
+
+        assert_eq!(
+            merged,
+            vec![
+                entry("https://admin-1", "admin-1"),
+                entry("https://onchain-1", "onchain-1"),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_collect_block_engine_url_status() {
+        let config = BlockEngineConfig {
+            block_engine_url: "https://primary".to_string(),
+            ..BlockEngineConfig::default()
+        };
+        let status = collect_block_engine_url_status(
+            &config,
+            &[entry("https://admin", "admin")],
+            Some(vec![entry("https://onchain", "onchain")]),
+            &["admin".to_string()],
+        );
+
+        assert_eq!(status.primary_url, "https://primary");
+        assert_eq!(
+            status.admin_secondary_entries,
+            vec![entry("https://admin", "admin")]
+        );
+        assert_eq!(
+            status.onchain_secondary_entries,
+            vec![entry("https://onchain", "onchain")]
+        );
+        assert_eq!(status.blocklisted_uuids, vec!["admin".to_string()]);
+        assert_eq!(
+            status.active_secondary_entries,
+            vec![entry("https://onchain", "onchain")]
+        );
+    }
+
+    #[test]
+    fn test_parse_block_engine_entry() {
+        assert_eq!(
+            parse_block_engine_entry("http://example.com:15001,uuid-123").unwrap(),
+            entry("http://example.com:15001", "uuid-123")
+        );
+        assert!(parse_block_engine_entry("missing-uuid").is_err());
     }
 }

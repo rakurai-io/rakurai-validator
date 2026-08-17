@@ -63,6 +63,16 @@ impl BundleAccountLocks {
         }
     }
 
+    pub fn lock_accounts_sch(&mut self, transaction_locks: Vec<(Pubkey, bool)>) {
+        for (acc, writable) in transaction_locks {
+            if writable {
+                *self.write_locks.entry(acc).or_insert(0) += 1;
+            } else {
+                *self.read_locks.entry(acc).or_insert(0) += 1;
+            }
+        }
+    }
+
     pub fn unlock_accounts<
         'a,
         T: Iterator<Item = (&'a Pubkey, bool)>,
@@ -138,7 +148,7 @@ impl BundleAccountLocker {
 
     /// Returns the read and write locks for this bundle
     /// Each lock type contains a HashMap which maps Pubkey to number of locks held
-    fn get_transaction_locks<'a, Tx: TransactionWithMeta>(
+    pub fn get_transaction_locks<'a, Tx: TransactionWithMeta>(
         transactions: &'a [Tx],
         bank: &Bank,
     ) -> BundleAccountLockerResult<

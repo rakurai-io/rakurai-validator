@@ -456,6 +456,58 @@ pub enum ReplicaContactInfoVersions<'a> {
     V0_0_1(&'a ReplicaContactInfoV0_0_1<'a>),
 }
 
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct ReplicaTickInfo<'a> {
+    /// The slot number containing this tick
+    pub slot: Slot,
+    /// The tick's index within the slot
+    pub tick_index: u64,
+    /// The number of hashes in this tick
+    pub num_hashes: u64,
+    /// The tick's SHA-256 hash
+    pub hash: &'a [u8],
+    /// The pubkey of the leader for this slot (None if leader is unknown)
+    pub leader: Option<&'a [u8]>,
+}
+
+
+/// Source of the tick notification
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum TickSource {
+    /// Tick generated from PohRecorder (periodic, real-time)
+    PohRecorder = 0,
+    /// Tick processed from BlockstoreProcessor (batched, from ledger)
+    BlockstoreProcessor = 1,
+}
+
+#[derive(Clone, Debug)]
+#[repr(C)]
+pub struct ReplicaTickInfoV2<'a> {
+    /// The slot number containing this tick
+    pub slot: Slot,
+    /// The tick's index within the slot
+    pub tick_index: u64,
+    /// The number of hashes in this tick
+    pub num_hashes: u64,
+    /// The tick's SHA-256 hash
+    pub hash: &'a [u8],
+    /// The pubkey of the leader for this slot (None if leader is unknown)
+    pub leader: Option<&'a [u8]>,
+    /// The source of this tick notification
+    pub source: TickSource,
+}
+
+/// A wrapper to future-proof ReplicaTickInfo handling. To make a change to the structure of
+/// ReplicaTickInfo, add a new enum variant wrapping a newer version, which will force plugin
+/// implementations to handle the change.
+#[repr(u32)]
+pub enum ReplicaTickInfoVersions<'a> {
+    V0_0_1(&'a ReplicaTickInfo<'a>),
+    V0_0_2(&'a ReplicaTickInfoV2<'a>),
+}
+
 /// Errors returned by plugin calls
 #[derive(Error, Debug)]
 #[repr(u32)]
@@ -485,6 +537,10 @@ pub enum GeyserPluginError {
     /// Error when updating the transaction.
     #[error("Error updating transaction. Error message: ({msg})")]
     TransactionUpdateError { msg: String },
+
+    /// Error when updating the tick
+    #[error("Error updating tick. Error message: ({msg})")]
+    TickUpdateError { msg: String },
 }
 
 /// The current status of a slot
@@ -606,6 +662,16 @@ pub trait GeyserPlugin: Any + Send + Sync + std::fmt::Debug {
         slot: Slot,
         parent: Option<u64>,
         status: &SlotStatus,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called when a tick is updated
+    #[allow(unused_variables)]
+    fn update_tick(
+        &self,
+        tick: ReplicaTickInfoVersions,
+        slot: Slot,
     ) -> Result<()> {
         Ok(())
     }

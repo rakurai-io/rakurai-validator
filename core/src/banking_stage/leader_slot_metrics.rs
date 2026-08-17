@@ -307,6 +307,11 @@ fn report_transaction_error_metrics(errors: &TransactionErrorMetrics, slot: Slot
             errors.blockhash_not_found.0 as i64,
             i64
         ),
+        (
+            "nonce_account_not_found",
+            errors.nonce_account_not_found.0 as i64,
+            i64
+        ),
         ("blockhash_too_old", errors.blockhash_too_old.0 as i64, i64),
         (
             "call_chain_too_deep",

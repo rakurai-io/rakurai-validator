@@ -91,6 +91,7 @@ pub enum Error {
     )
 )]
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, SchemaWrite)]
+#[repr(C)]
 pub struct ContactInfo {
     pubkey: Pubkey,
     #[serde(with = "serde_varint")]
@@ -120,6 +121,7 @@ pub struct ContactInfo {
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Deserialize, Serialize, SchemaWrite, SchemaRead)]
+#[repr(C)]
 pub(crate) struct SocketEntry {
     pub(crate) key: u8,   // Protocol identifier, e.g. tvu, tpu, etc
     pub(crate) index: u8, // IpAddr index in the accompanying addrs vector.

@@ -1,5 +1,8 @@
 use {
-    crate::packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    crate::{
+        banking_trace::TracedSender,
+        packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::ThreadPool,
     solana_perf::sigverify::ed25519_verify,
@@ -9,7 +12,7 @@ use {
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle, spawn},
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     },
 };
 
@@ -23,8 +26,11 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
     ) -> Self {
-        let thread = spawn(move || Self::sigverify_service(thread_pool, receiver, sender, exit));
+        let thread = spawn(move || {
+            Self::sigverify_service(thread_pool, receiver, sender, exit, non_vote_sender)
+        });
         Self { thread }
     }
 
@@ -37,6 +43,7 @@ impl BundleSigverifyStage {
         receiver: Receiver<Vec<PacketBundle>>,
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
+        non_vote_sender: TracedSender,
     ) {
         let mut workspace = Vec::with_capacity(100);
 
@@ -85,6 +92,16 @@ impl BundleSigverifyStage {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
 
+            let mut bundle_metas: Vec<(String, String, SystemTime)> = bundles
+                .iter()
+                .map(|bundle| {
+                    (
+                        bundle.block_engine_uuid().to_string(),
+                        bundle.bundle_id().to_string(),
+                        bundle.received_at(),
+                    )
+                })
+                .collect();
             workspace.extend(bundles.into_iter().map(|bundle| bundle.take()));
 
             let packet_count: usize = workspace.iter().map(|bundle| bundle.len()).sum();
@@ -94,24 +111,38 @@ impl BundleSigverifyStage {
 
             ed25519_verify(&thread_pool, &mut workspace, false, packet_count, false);
 
-            for bundle in workspace.drain(..) {
+            for (bundle, (block_engine_uuid, bundle_id, received_at)) in
+                workspace.drain(..).zip(bundle_metas.drain(..))
+            {
                 let num_packets_failed_sigverify_in_bundle = bundle
                     .iter()
                     .filter(|packet| packet.meta().discard())
                     .count();
 
-                // all the transactions in the bundle need to be verified to be valid
                 let len = bundle.len();
-                if num_packets_failed_sigverify_in_bundle == 0
-                    && sender.send(VerifiedPacketBundle::new(bundle)).is_err()
+                let sigverify_ok = num_packets_failed_sigverify_in_bundle == 0;
+
+                // Always forward to BundleStage so failed sigverify bundles are tracked.
+                if sender
+                    .send(VerifiedPacketBundle::new_with_block_engine_uuid(
+                        bundle.clone(),
+                        block_engine_uuid.clone(),
+                        bundle_id,
+                        received_at,
+                    ))
+                    .is_err()
                 {
                     warn!("failed to send verified packet bundle");
                     num_bundles_failed_send += 1;
                     num_packets_failed_send += len;
                     break;
-                } else if num_packets_failed_sigverify_in_bundle > 0 {
+                }
+
+                if !sigverify_ok {
                     num_bundles_failed_sigverify += 1;
                     num_packets_failed_sigverify += num_packets_failed_sigverify_in_bundle;
+                } else {
+                    let _ = non_vote_sender.send_bundle(Arc::new((bundle, block_engine_uuid)));
                 }
             }
 
@@ -191,6 +222,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         let txs_2 = (0..4).map(|_| test_tx()).collect::<Vec<_>>();
@@ -202,6 +234,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender
@@ -267,6 +300,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender.send(vec![packet_bundle_1]).unwrap();

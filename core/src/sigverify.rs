@@ -145,6 +145,7 @@ struct WorkerPoolChannels {
     sharable_banks: SharableBanks,
     non_vote_state: SigVerifyWorkerState,
     tpu_vote_state: SigVerifyWorkerState,
+    input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
 }
 
 pub(crate) struct SigVerifyWorkerPool {
@@ -174,6 +175,7 @@ impl SigVerifyWorkerPool {
         sharable_banks: SharableBanks,
         non_vote_state: SigVerifyWorkerState,
         tpu_vote_state: SigVerifyWorkerState,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> Self {
         let (gossip_sender, gossip_receiver) = bounded(SIGVERIFY_GOSSIP_VOTE_WORK_CHANNEL_SIZE);
         let channels = WorkerPoolChannels {
@@ -185,6 +187,7 @@ impl SigVerifyWorkerPool {
             sharable_banks,
             non_vote_state,
             tpu_vote_state,
+            input_tx_signature_sender,
         };
         let exit = Arc::new(AtomicBool::new(false));
         let worker_hdls = (0..num_workers.get())
@@ -232,6 +235,7 @@ impl SigVerifyWorkerPool {
                         false,
                         &channels.sharable_banks,
                         &channels.non_vote_state,
+                        &channels.input_tx_signature_sender,
                     ),
                     Err(_) => false,
                 }
@@ -246,6 +250,7 @@ impl SigVerifyWorkerPool {
                         true,
                         &channels.sharable_banks,
                         &channels.tpu_vote_state,
+                        &channels.input_tx_signature_sender,
                     ),
                     Err(_) => false,
                 }
@@ -271,6 +276,7 @@ impl SigVerifyWorkerPool {
         is_tpu_vote: bool,
         sharable_banks: &SharableBanks,
         state: &SigVerifyWorkerState,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
     ) -> bool {
         state.stats.total_batches.fetch_add(1, Ordering::Relaxed);
         state
@@ -343,7 +349,7 @@ impl SigVerifyWorkerPool {
             .fetch_max(state.banking_stage_sender.len(), Ordering::Relaxed);
         match state
             .banking_stage_sender
-            .send(banking_packet_batch.clone())
+            .send(banking_packet_batch.clone(), input_tx_signature_sender)
         {
             Ok(0) => {} // avoid poking atomics if nothing was evicted (typical case)
             Ok(evicted) => {

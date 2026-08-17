@@ -232,6 +232,10 @@ impl Bank {
                 compute_budget,
             ))
         } else {
+            if let Some(_) = tx.get_durable_nonce() {
+                error_counters.nonce_account_not_found += 1;
+            }
+
             error_counters.blockhash_not_found += 1;
             Err(TransactionError::BlockhashNotFound)
         }

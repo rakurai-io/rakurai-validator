@@ -30,7 +30,7 @@ use {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-pub(crate) fn calculate_priority_and_cost<Tx: TransactionMeta + SVMStaticMessage>(
+pub fn calculate_priority_and_cost<Tx: TransactionMeta + SVMStaticMessage>(
     bank: &Bank,
     transaction: &Tx,
     transaction_configuration: &TransactionConfiguration,

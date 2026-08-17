@@ -175,6 +175,7 @@ pub enum ClusterInfoError {
     TooManyIncrementalSnapshotHashes,
 }
 
+#[repr(C)]
 pub struct ClusterInfo {
     /// The network
     pub gossip: CrdsGossip,
@@ -185,7 +186,7 @@ pub struct ClusterInfo {
     /// Additional pubkeys to preserve during CRDS table trimming.
     known_validators: OnceLock<HashSet<Pubkey>>,
     outbound_budget: DataBudget,
-    my_contact_info: RwLock<ContactInfo>,
+    my_contact_info: Arc<RwLock<ContactInfo>>,
     ping_cache: Mutex<PingCache>,
     pull_request_budget: KeyedRateLimiter<IpAddr>,
     pub(crate) stats: GossipStats,
@@ -211,7 +212,7 @@ impl ClusterInfo {
             entrypoints: RwLock::default(),
             known_validators: OnceLock::new(),
             outbound_budget: DataBudget::default(),
-            my_contact_info: RwLock::new(contact_info),
+            my_contact_info: Arc::new(RwLock::new(contact_info)),
             ping_cache: Mutex::new(PingCache::new(
                 GOSSIP_PING_CACHE_TTL,
                 GOSSIP_PING_CACHE_RATE_LIMIT_DELAY,
@@ -546,6 +547,10 @@ impl ClusterInfo {
 
     pub fn my_contact_info(&self) -> ContactInfo {
         self.my_contact_info.read().unwrap().clone()
+    }
+
+    pub fn my_contact_arc(&self) -> Arc<RwLock<ContactInfo>> {
+        self.my_contact_info.clone()
     }
 
     pub fn my_shred_version(&self) -> u16 {
