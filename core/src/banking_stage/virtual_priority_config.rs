@@ -19,24 +19,30 @@ pub struct TipUuidDelta {
 
 #[cfg(feature = "build_validator")]
 mod ffi {
-    use {super::CachedUuidTipGroup, solana_runtime::bank::Bank};
+    use {super::CachedUuidTipGroup, solana_pubkey::Pubkey, solana_runtime::bank::Bank};
 
     unsafe extern "C" {
         #[allow(improper_ctypes)]
         #[allow(improper_ctypes_definitions)]
-        pub fn load_cached_uuid_tip_groups(bank: &Bank) -> Option<Vec<CachedUuidTipGroup>>;
+        pub fn load_cached_uuid_tip_groups(
+            bank: &Bank,
+            vote_account: &Pubkey,
+        ) -> Option<Vec<CachedUuidTipGroup>>;
     }
 }
 
-pub fn load_cached_uuid_tip_groups(bank: &Bank) -> Option<Vec<CachedUuidTipGroup>> {
+pub fn load_cached_uuid_tip_groups(
+    bank: &Bank,
+    vote_account: &Pubkey,
+) -> Option<Vec<CachedUuidTipGroup>> {
     #[cfg(feature = "build_validator")]
     {
         // SAFETY: exported by rakurai_scheduler entrypoint from the same revision.
-        return unsafe { ffi::load_cached_uuid_tip_groups(bank) };
+        return unsafe { ffi::load_cached_uuid_tip_groups(bank, vote_account) };
     }
     #[cfg(not(feature = "build_validator"))]
     {
-        let _ = bank;
+        let _ = (bank, vote_account);
         None
     }
 }

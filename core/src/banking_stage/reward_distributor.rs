@@ -1241,7 +1241,7 @@ impl RewardDistributor {
         let mut tip_group_count = 0usize;
         let mut mev_share_group_count = 0usize;
 
-        match load_cached_uuid_tip_groups(bank) {
+        match load_cached_uuid_tip_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) => {
                 tip_group_count = groups.len();
                 for group in groups {
@@ -1274,7 +1274,7 @@ impl RewardDistributor {
             }
         }
 
-        match load_cached_uuid_mev_share_groups(bank) {
+        match load_cached_uuid_mev_share_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) => {
                 mev_share_group_count = groups.len();
                 for group in groups {
@@ -1335,7 +1335,7 @@ impl RewardDistributor {
         let mut already_converted = 0usize;
         let mut p2c_escrow_group_count = 0usize;
 
-        match load_cached_uuid_mev_share_groups(bank) {
+        match load_cached_uuid_mev_share_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) => {
                 p2c_escrow_group_count = groups.len();
                 for group in groups {
@@ -1529,7 +1529,7 @@ impl RewardDistributor {
         let mut tip_group_count = 0usize;
         let mut mev_share_group_count = 0usize;
 
-        match load_cached_uuid_tip_groups(bank) {
+        match load_cached_uuid_tip_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) => {
                 tip_group_count = groups.len();
                 for group in groups {
@@ -1562,7 +1562,7 @@ impl RewardDistributor {
             }
         }
 
-        match load_cached_uuid_mev_share_groups(bank) {
+        match load_cached_uuid_mev_share_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) => {
                 mev_share_group_count = groups.len();
                 for group in groups {
@@ -1935,7 +1935,7 @@ impl RewardDistributor {
         };
         let baseline_slot = baseline_bank.slot();
 
-        match load_cached_uuid_tip_groups(bank) {
+        match load_cached_uuid_tip_groups(bank, &self.distribution_config.vote_account) {
             Some(groups) if !groups.is_empty() => {
                 let groups: Vec<CachedUuidTipGroup> = groups
                     .into_iter()
