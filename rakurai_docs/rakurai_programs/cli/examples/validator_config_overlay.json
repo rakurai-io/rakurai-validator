@@ -1,0 +1,49 @@
+{
+  "block_engine": {
+    "sets": [
+      {
+        "name": "be-main-1",
+        "url": [
+          {
+            "url": "https://validator-be.example",
+            "max_bundles": 50,
+            "period_ms": 1000,
+            "max_bundle_burst": 5
+          }
+        ]
+      },
+      {
+        "name": "be-validator-only",
+        "url": [
+          {
+            "url": "https://be-extra.example",
+            "max_bundles": 10,
+            "period_ms": 500,
+            "max_bundle_burst": 0
+          }
+        ]
+      }
+    ]
+  },
+  "p2c": {
+    "sets": [
+      {
+        "name": "p2c-validator-only",
+        "url": [{ "url": "https://p2c-extra.example" }]
+      }
+    ]
+  },
+  "virtual_priority": {
+    "sets": [
+      {
+        "name": "vp-main-1",
+        "url": [
+          {
+            "key": "11111111111111111111111111111111",
+            "value": 99.0
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -210,5 +210,5 @@ Reference:
 
 **Note:**
 
-- If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai automatically distributes block rewards to your stakers using the reward distribution program ([Details](../../block-rewards-distributor/block_reward_distribution.md)).
+- If you set `--rewards-merkle-root-authority` to `H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`, Rakurai automatically distributes block rewards to your stakers using the [Reward Distribution RCA](../rakurai_programs/programs/reward_distribution/README.md#2-rca--block-rewards-for-stakers).
 - If you set it to any other address, you must run the claim workflow manually.

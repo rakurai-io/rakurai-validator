@@ -6,7 +6,7 @@ Inspect, record (MCA), and settle custom tip and post-pack revenue in validator 
 
 **Product:** Partner Tip and MevShare Revenue Settlement CLI  
 
-For install, see the [CLI overview](./README.md#2-installation). Program details: [Tip and MevShare accounts](../programs/reward_distribution/README.md#5-tip-and-mevshare-collection-accounts).
+For install, see the [CLI overview](./README.md#2-installation). For **P2C / post-pack confirmation prepaid subscription** (Users/Consumers), use **`rakurai-p2c`** — see [P2C Subscription CLI](./p2c_subscription.md). Program details: [Reward Distribution](../programs/reward_distribution/README.md).
 
 ---
 
@@ -72,7 +72,7 @@ Partners may register a custom tip account (or post-pack flow) so their transact
 2. **Settle** by transferring SOL into the MCA (`transfer`).
 3. Claim/distribution is handled by the configured manager (not this CLI).
 
-See [Post-epoch stage: record and settle](../../transaction_inclusion/post_pack_confirmations.md#44-post-epoch-stage-record-and-settle).
+See [Post-epoch stage: record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
 
 > **Note:** If a service does not record and settle within 2 epochs, post-pack access and MCA prioritization stop after a two-epoch grace period.
 
@@ -85,7 +85,6 @@ See [Post-epoch stage: record and settle](../../transaction_inclusion/post_pack_
 Derives and fetches **one** partner revenue vault for a specific validator.
 
 Required: `--revenue-kind`, `--revenue-name`, `--vote-pubkey`.  
-Default: `--account-version auto` (prefer V1, else legacy).
 
 ```sh
 rakurai-revshare \
@@ -97,7 +96,7 @@ rakurai-revshare \
   --vote-pubkey <VALIDATOR_VOTE_PUBKEY>
 ```
 
-Output: derived address, layout (`legacy` / `v1`), type (`Tip` / `Mev-share`), revenue name, vote pubkey, record authority, balance.
+Output: derived address, layout (`v1`), type (`Tip` / `Mev-share`), revenue name, vote pubkey, record authority, balance.
 
 ### 3.2. `get-all-accounts`
 
@@ -143,8 +142,7 @@ rakurai-revshare \
   --epoch <EPOCH>
 ```
 
-- **V1:** `pending_amount = recorded_amount - transferred_amount`
-- **Legacy:** no `transferred_amount`; `pending_amount` is the unclaimed recorded amount (not proof a prior SOL transfer did not occur)
+`pending_amount = recorded_amount - transferred_amount` (unsettled SOL still owed for that epoch).
 
 ### 3.4. `get-all-pending-records`
 
@@ -164,9 +162,9 @@ Use `--revenue-kind Mev-share` for MCA. Results are ordered by epoch.
 
 ### 3.5. `record-revenue` (MCA only)
 
-Records MevShare revenue on the MCA ledger for the **current cluster epoch**. Calls `record_revenue` (legacy) or `record_revenue_v1` (V1). Updates the on-chain ledger only — **no SOL is moved**.
+Records MevShare revenue on the MCA ledger for the **current cluster epoch**. Calls `record_revenue_v1`. Updates the on-chain ledger only — **no SOL is moved**.
 
-**Why it is required for MCA:** unlike TCA, the validator does not record MevShare during leader turns. Post-pack revenue stays in your accounts until you report the owed share once per epoch. Without `record-revenue`, there is nothing to settle and claim. See [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#44-post-epoch-stage-record-and-settle).
+**Why it is required for MCA:** unlike TCA, the validator does not record MevShare during leader turns. Post-pack revenue stays in your accounts until you report the owed share once per epoch. Without `record-revenue`, there is nothing to settle and claim. See [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
 
 Requires `--revenue-kind Mev-share`. When post-pack is enabled, Rakurai creates your MCA; you must hold its **`record_authority`** and pass that keypair as `--keypair` (shown by `get-account` as `Record auth`).
 
@@ -209,7 +207,7 @@ Pass `--dry-run` to preview vault/epoch/amount without sending a transaction.
 
 Settles **all pending epochs on every vault** matching `--revenue-kind` + `--revenue-name` (all validators). Prints the same vote×epoch pending **table** as `get-all-accounts`, then sends settle/transfer instructions in batches (**10 per transaction** by default; override with `--batch-size`).
 
-Legacy = system transfer; V1 = `settle_revenue` per epoch. Rakurai’s own tip TCA is skipped.
+Each pending epoch uses `settle_revenue` (system transfer + credit `transferred_amount`). Rakurai’s own tip TCA is skipped.
 
 ```sh
 # Preview table only
@@ -244,22 +242,22 @@ For MCA, record each epoch first (`record-revenue`) before `transfer-all`.
 
 ---
 
-## 4. Legacy vs V1
+## 4. V1 vaults (TCA / MCA)
 
-| | Legacy | V1 |
+Production uses **`RevenueShareAccountV1`** PDAs:
+
+| | TCA (`Tip`) | MCA (`Mev-share`) |
 | --- | --- | --- |
-| Record (MCA) | `record_revenue` | `record_revenue_v1` |
-| Transfer | System transfer into the vault | `settle_revenue` (transfer + credit `transferred_amount`) |
-| Retry risk | Can double-fund if you re-run transfer without checking balance/signature | Ledger tracks what was already transferred |
-| Force layout | `--account-version legacy` | `--account-version v1` |
+| PDA | `[REVENUE_SHARE_V1, TIP, name, vote]` | `[REVENUE_SHARE_V1, MEV_SHARE, name, vote]` |
+| Record | Validator each leader turn | Partner once post-epoch (`record_revenue_v1`) |
+| Settle | `settle_revenue` (this CLI) | `settle_revenue` (this CLI) |
+| Claim | Manager (`claim_revenue_v1`) | Manager (`claim_revenue_v1`) |
 
-Default `--account-version auto`: prefer V1 if it exists, else legacy; error if neither exists.
+`settle_revenue` transfers SOL and credits `transferred_amount`, so retries will not double-fund. Rakurai’s own tip TCA is drained by Tip Manager — `settle_revenue` is blocked for that account. This CLI is for **partner** custom-tip TCAs and MevShare MCAs only.
 
-Rakurai’s own tip TCA is settled by Tip Manager — `settle_revenue` is blocked for that account. This CLI is for custom partner TCA/MCA only.
+PDA derivation depends on `--revenue-name`, `--vote-pubkey`, `--revenue-kind`, and program ID. Use the exact revenue name assigned by Rakurai.
 
-PDA derivation depends on `--revenue-name`, `--vote-pubkey`, `--revenue-kind`, program ID, and account version. Use the exact revenue name assigned by Rakurai.
-
-See [dual vaults (legacy vs V1)](../programs/reward_distribution/README.md#58-dual-vaults-legacy-vs-v1).
+See [Reward Distribution](../programs/reward_distribution/README.md). P2C **subscription** billing is a **PSA**, not this CLI — use [`rakurai-p2c`](./p2c_subscription.md).
 
 ---
 
@@ -276,8 +274,8 @@ See [dual vaults (legacy vs V1)](../programs/reward_distribution/README.md#58-du
 
 ### 5.2. Post-pack (MCA)
 
-1. Complete post-pack / transaction-landing integration with Rakurai — Rakurai creates your MCA and assigns `--revenue-name` and `record_authority` (you must hold that keypair) — see [MEV revenue sharing](../../transaction_inclusion/post_pack_confirmations.md#4-mev-revenue-sharing).
-2. After the epoch ends, run `record-revenue --revenue-kind Mev-share --amount <LAMPORTS>` with the MCA `record_authority` keypair (per validator) — see [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#44-post-epoch-stage-record-and-settle).
+1. Complete post-pack integration with Rakurai — top up **[PSA](../../transaction_inclusion/post_pack_confirmations.md#5-psa--pay-to-use-the-stream)** first, then Rakurai creates your MCA and assigns `--revenue-name` and `record_authority` (you must hold that keypair) — see [MCA](../../transaction_inclusion/post_pack_confirmations.md#6-mca--share-backrun-profit).
+2. After the epoch ends, run `record-revenue --revenue-kind Mev-share --amount <LAMPORTS>` with the MCA `record_authority` keypair (per validator) — see [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
 3. Confirm with `get-all-accounts` / `get-all-pending-records --revenue-kind Mev-share`.
 4. Run `transfer --revenue-kind Mev-share` for one vault, or `transfer-all --revenue-kind Mev-share` for all pending settlements.
 5. Keep the transaction signatures for reconciliation.

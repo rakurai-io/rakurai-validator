@@ -40,33 +40,27 @@ jobs:
           test -f jito-protos/protos/block_engine.proto
 
       # Overlay submodule program docs under rakurai_docs/rakurai_programs/ only.
-      # Do NOT delete rakurai_docs/validators or rakurai_docs/integrators.
+      # Do NOT delete rakurai_docs/validators or rakurai_docs/transaction_inclusion.
+      # Relative links in program docs resolve against that tree
+      # (e.g. ../../transaction_inclusion/..., ../../../validators/...).
       - name: Sync program docs from submodule
         run: |
-          mkdir -p rakurai_docs/rakurai_programs/programs/rakurai_activation/idl
-          mkdir -p rakurai_docs/rakurai_programs/programs/reward_distribution/idl
-          mkdir -p rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/idl
-          mkdir -p rakurai_docs/rakurai_programs/cli
+          DEST=rakurai_docs/rakurai_programs
 
-          cp rakurai_programs/README.md rakurai_docs/rakurai_programs/README.md
-          cp rakurai_programs/programs/rakurai_activation/README.md \
-            rakurai_docs/rakurai_programs/programs/rakurai_activation/README.md
-          cp rakurai_programs/programs/reward_distribution/README.md \
-            rakurai_docs/rakurai_programs/programs/reward_distribution/README.md
-          cp rakurai_programs/programs/rakurai_tip_manager/README.md \
-            rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/README.md
-          cp rakurai_programs/cli/README.md rakurai_docs/rakurai_programs/cli/README.md
-          cp rakurai_programs/cli/activation.md \
-            rakurai_docs/rakurai_programs/cli/activation.md
-          cp rakurai_programs/cli/partner_reward_settlement.md \
-            rakurai_docs/rakurai_programs/cli/partner_reward_settlement.md
+          mkdir -p "$DEST/cli/examples"
+          for prog in rakurai_activation reward_distribution rakurai_tip_manager rakurai_client_config; do
+            mkdir -p "$DEST/programs/$prog/idl"
+          done
 
-          cp rakurai_programs/programs/rakurai_activation/idl/*.json \
-            rakurai_docs/rakurai_programs/programs/rakurai_activation/idl/ 2>/dev/null || true
-          cp rakurai_programs/programs/reward_distribution/idl/*.json \
-            rakurai_docs/rakurai_programs/programs/reward_distribution/idl/ 2>/dev/null || true
-          cp rakurai_programs/programs/rakurai_tip_manager/idl/*.json \
-            rakurai_docs/rakurai_programs/programs/rakurai_tip_manager/idl/ 2>/dev/null || true
+          cp rakurai_programs/README.md "$DEST/README.md"
+
+          for prog in rakurai_activation reward_distribution rakurai_tip_manager rakurai_client_config; do
+            cp "rakurai_programs/programs/$prog/README.md" "$DEST/programs/$prog/README.md"
+            cp rakurai_programs/programs/$prog/idl/*.json "$DEST/programs/$prog/idl/" 2>/dev/null || true
+          done
+
+          cp rakurai_programs/cli/*.md "$DEST/cli/"
+          cp rakurai_programs/cli/examples/* "$DEST/cli/examples/" 2>/dev/null || true
 
       - name: Commit and push program docs to validator repo
         run: |

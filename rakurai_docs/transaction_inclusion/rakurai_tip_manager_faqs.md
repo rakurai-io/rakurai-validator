@@ -7,7 +7,7 @@ Frequently asked questions about how tips work on Rakurai validators: sending ti
 **References:**
 
 - [Rakurai Tip Manager program](../rakurai_programs/programs/rakurai_tip_manager/README.md)
-- [RevenueShareAccount / RevenueShareAccountV1 structure](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure) (TCA and MCA account layout in the Reward Distribution program)
+- [Four money flows: RCA / TCA / PSA / MCA](../rakurai_programs/programs/reward_distribution/README.md)
 - [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) (`rakurai-revshare` — inspect and settle TCA/MCA)
 
 ---
@@ -55,17 +55,17 @@ The preferred mechanism is to send tips to Rakurai's tip accounts. However, for 
 1. **Register your account** — provide your tip account addresses (e.g., `ABC...DEF`) to the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official) and agree on a commission percentage you will share with Rakurai (e.g., 30%).
 2. **Rakurai adds your account to the validator flow** — the team configures the system so that tips sent to your custom account are recognized by the Rakurai scheduler. Validators control which tip accounts are effective through Admin RPC.
 3. **Prioritization** — when someone tips your custom account, the agreed Rakurai share (e.g., 30%) is used by the scheduler to prioritize the transaction, the same way standard Rakurai tip accounts work.
-4. **Settlement** — after the epoch ends, settle the agreed Rakurai share into the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca)** using the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) (`transfer --revenue-kind Tip`), following the same [tip distribution flow](#6-how-are-tips-distributed).
+4. **Settlement** — after the epoch ends, settle the agreed Rakurai share into the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions)** using the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) (`transfer --revenue-kind Tip`), following the same [tip distribution flow](#6-how-are-tips-distributed).
 
 ---
 
 ## 5. How are tips accumulated?
 
-On **every Rakurai leader turn**, the validator client automatically submits a tip-receiver claim transaction (`change_tip_receiver` / `change_tip_receiver_v1` / `change_tip_receiver_v2`, depending on release) that:
+On **every Rakurai leader turn**, the validator client automatically submits a tip-receiver claim transaction (`change_tip_receiver_v2`) that:
 
 1. Drains all eight tip accounts (lamports above rent exemption from the **previous leader period**).
 2. Transfers Rakurai's commission percentage to the Rakurai commission account.
-3. Transfers the remaining share to the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca)**.
+3. Transfers the remaining share to the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions)**.
 
 ---
 
@@ -73,23 +73,26 @@ On **every Rakurai leader turn**, the validator client automatically submits a t
 
 Tip distribution happens in two stages. The mechanism differs depending on whether tips land in **Rakurai's tip accounts** or in an **external custom tip account**.
 
-Both TCA and MCA use the on-chain **[RevenueShareAccount / RevenueShareAccountV1 structure](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure)**; recording timing differs between them (see [leader-turn](#61-leader-turn-stage-every-leader-turn) and [post-epoch](#62-post-epoch-stage-after-epoch-ends) stages). Partners can inspect pending records and settle with the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md).
+See [how tips vs backrun vs subscription are split](../rakurai_programs/programs/reward_distribution/README.md). Partners can inspect pending amounts and settle with the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md).
+
+P2C **subscription fees** (prepaid, stake-priced) use a **[PSA](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack)** — pay this first to keep the stream on. See [`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md). Backrun profit sharing is a separate **[MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit)**.
 
 ### 6.1. Leader-turn stage (every leader turn)
 
 On every Rakurai leader turn, the claim transaction processes tips from the previous leader period:
 
-- **Rakurai's eight tip accounts** — drained directly. Rakurai's share is transferred to the **Rakurai commission account** (the commission percentage is set on-chain via the [Tip Manager config account](https://solscan.io/account/rKtiPTD7WuCdEEQ2JXWgAmZHHL9iZLc3niCXwtS7wSH?accountName=428560b549b70266#accountsData)), and the remaining share is transferred into the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca)**.
-- **External custom tip accounts** — cannot be drained (Rakurai does not control them), so the attributed amount is only **recorded on-chain** in the relevant per-validator, per-service [TCA ledger](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure) each leader turn. No lamports move at this stage.
+- **Rakurai's eight tip accounts** — drained directly. Rakurai's share is transferred to the **Rakurai commission account** (the commission percentage is set on-chain via the [Tip Manager config account](https://solscan.io/account/rKtiPTD7WuCdEEQ2JXWgAmZHHL9iZLc3niCXwtS7wSH?accountName=428560b549b70266#accountsData)), and the remaining share is transferred into the validator's **[Tips Collection Account (TCA)](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions)**.
+- **External custom tip accounts** — cannot be drained (Rakurai does not control them), so the attributed amount is only **recorded on-chain** in the relevant per-validator, per-service [TCA ledger](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions) each leader turn. No lamports move at this stage.
 - **MevShare (MCA)** — nothing happens on-chain during leader turns. Post-pack / MEV-share revenue stays in the searcher or transaction inclusion service's own accounts until the epoch ends.
 
 ### 6.2. Post-epoch stage (after epoch ends)
 
-After the epoch ends, TCA and MCA revenue is distributed following the same [Tip and MevShare distribution flow](../rakurai_programs/programs/reward_distribution/README.md#53-how-tip-and-mevshare-are-distributed):
+After the epoch ends, TCA and MCA revenue is distributed following the [claim and settle flow](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions):
 
-- **Rakurai's eight tip accounts** — the Rakurai tip balance in the relevant [TCA](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca) is transferred to the validator identity account (with the option to convert it into block rewards).
-- **External custom tip accounts** — the external tip account holder must first **settle** their agreed share into the relevant [TCA](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca) (use [Partner CLI `transfer --revenue-kind Tip`](../rakurai_programs/cli/partner_reward_settlement.md#35-transfer)). Once settled, commission is deducted (credited to Rakurai's account) and the remaining share is transferred to the validator identity account (with the option to convert it into block rewards).
-- **MevShare (MCA)** — when you start using post-pack, Rakurai creates your MCA; you must hold its **`record_authority`**. After the epoch ends, the service **records** the owed revenue on the [MCA](../rakurai_programs/programs/reward_distribution/README.md#52-why-a-mevshare-collection-account-mca) **once** ([Partner CLI `record-revenue`](../rakurai_programs/cli/partner_reward_settlement.md#34-record-revenue-mca-only)), then **settles** it ([Partner CLI `transfer --revenue-kind Mev-share`](../rakurai_programs/cli/partner_reward_settlement.md#35-transfer)). Once settled, commission is deducted and the validator share is credited. For the full post-pack flow, see [MEV revenue sharing](./post_pack_confirmations.md#4-mev-revenue-sharing).
+- **Rakurai's eight tip accounts** — the Rakurai tip balance in the relevant [TCA](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions) is transferred to the validator identity account (with the option to convert it into block rewards).
+- **External custom tip accounts** — the external tip account holder must first **settle** their agreed share into the relevant [TCA](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions) (use [Partner CLI `transfer --revenue-kind Tip`](../rakurai_programs/cli/partner_reward_settlement.md#36-transfer)). Once settled, commission is deducted (credited to Rakurai's account) and the remaining share is transferred to the validator identity account (with the option to convert it into block rewards).
+- **PSA (pay for the stream first)** — top up the prepaid subscription or post-pack stops. See [Post-pack — PSA](./post_pack_confirmations.md#5-psa--pay-to-use-the-stream).
+- **MevShare (MCA)** — when you start using post-pack, Rakurai creates your MCA; you must hold its **`record_authority`**. After the epoch ends, the service **records** the owed revenue on the [MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit) **once** ([Partner CLI `record-revenue`](../rakurai_programs/cli/partner_reward_settlement.md#35-record-revenue-mca-only)), then **settles** it ([Partner CLI `transfer --revenue-kind Mev-share`](../rakurai_programs/cli/partner_reward_settlement.md#36-transfer)). Once settled, commission is deducted and the validator share is credited. Full flow: [Post-pack — MCA](./post_pack_confirmations.md#6-mca--share-backrun-profit).
 
 If a holder does not settle within **2 epochs**, their account stops being used for prioritization starting from the next epoch (two-epoch grace period).
 
@@ -104,10 +107,10 @@ A: No. A normal SOL transfer to any of the eight tip accounts is sufficient.
 A: Yes, but one transfer to one tip account is typical. Multiple transfers to the same account in one transaction still accumulate correctly.
 
 **Q7.3: What happens if tips are never claimed?**  
-A: They remain in the tip PDAs until the next Rakurai validator leader turn, when the validator runs the tip-receiver claim (`change_tip_receiver` / `v1` / `v2`).
+A: They remain in the tip PDAs until the next Rakurai validator leader turn, when the validator runs `change_tip_receiver_v2`.
 
 **Q7.4: Where does the validator's tip share go?**  
-A: The validator's share is transferred to the epoch-specific **[TCA](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca)** on every leader turn. After the epoch ends, it is transferred to the validator identity account.
+A: The validator's share is transferred to the **[TCA](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions)** on every leader turn. After the epoch ends, it is transferred to the validator identity account.
 
 **Q7.5: How is this different from a priority fee?**  
 A: Priority fees are paid through Solana's native fee mechanism. Rakurai tips are direct SOL transfers to tip PDAs that are used by the Rakurai scheduler to prioritize traders' and searchers' bundles. Bundles with higher tips are generally scheduled before bundles with lower tips.
@@ -115,8 +118,8 @@ A: Priority fees are paid through Solana's native fee mechanism. Rakurai tips ar
 **Q7.6: Can I use a custom tip account instead of the eight Rakurai accounts?**  
 A: For the time being, yes. Contact the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official) to register your own tip account and configure a commission share. See [custom tip accounts](#4-can-i-use-my-own-tip-account-instead-of-rakurais-eight-accounts).
 
-**Q7.7: Where can I see TCA, MCA, and Tip Manager account layouts?**  
-A: TCA and MCA use the [RevenueShareAccount / RevenueShareAccountV1 structure](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure) in the Reward Distribution program. To inspect pending amounts and settle, use the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) (`rakurai-revshare`). For Tip Manager instructions and accounts, see the [Tip Manager program guide](../rakurai_programs/programs/rakurai_tip_manager/README.md).
+**Q7.7: Where do I read about TCA, PSA, MCA, and Tip Manager?**  
+A: Start with [Reward Distribution](../rakurai_programs/programs/reward_distribution/README.md) ([TCA](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions), [PSA](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack), [MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit)). Fund PSA with [`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md). Settle TCA/MCA with [`rakurai-revshare`](../rakurai_programs/cli/partner_reward_settlement.md). Tip accounts: [Tip Manager](../rakurai_programs/programs/rakurai_tip_manager/README.md).
 
 ---
 

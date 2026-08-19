@@ -11,9 +11,10 @@ Documentation for searchers, block engines, and partners integrating with Rakura
 | Guide | Description |
 |-------|-------------|
 | [Transaction inclusion](./transaction_inclusion.md) | Bundles, virtual priority boost, and post-pack confirmations |
-| [Post-pack confirmations](./post_pack_confirmations.md) | gRPC protocol, endpoint configuration, and Admin RPC |
+| [Post-pack confirmations](./post_pack_confirmations.md) | gRPC protocol, **PSA** (pay for the stream) then **MCA** (share backrun profit), Admin RPC |
 | [Tips FAQ](./rakurai_tip_manager_faqs.md) | Sending tips, prioritization, custom accounts, and distribution |
-| [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) | Record MCA MevShare (post-pack), settle TCA/MCA revenue (`rakurai-revshare`); partners must hold MCA `record_authority` |
+| [P2C Subscription CLI](../rakurai_programs/cli/p2c_subscription.md) | Top up **PSA** prepaid subscription (`rakurai-p2c`) |
+| [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) | Settle **TCA** / **MCA** (`rakurai-revshare`) |
 
 ---
 

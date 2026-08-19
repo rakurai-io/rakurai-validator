@@ -114,7 +114,12 @@ Sample gRPC endpoint to share:
 https://sample-server.com:20000
 ```
 
-Rakurai will add its partners' gRPC endpoints to an on-chain PDA so that you can receive updates from all Rakurai nodes that have opted in for this feature. When you start using post-pack, Rakurai also creates a per-service, per-validator **[MCA](../rakurai_programs/programs/reward_distribution/README.md#52-why-a-mevshare-collection-account-mca)** where you **record** and **transfer** MevShare revenue — you must hold that MCA's **`record_authority`**. See [MEV revenue sharing](./post_pack_confirmations.md#4-mev-revenue-sharing) and the [Partner Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack).
+Rakurai will add its partners' gRPC endpoints on-chain so you can receive updates from Rakurai nodes that have opted in.
+
+Using post-pack has **two money paths** — **PSA first** (pay for the stream), **then MCA** (share backrun profit). See [Post-pack — PSA then MCA](./post_pack_confirmations.md#4-two-money-paths-psa-then-mca).
+
+1. **[PSA](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack)** — top up the prepaid subscription ([`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md)). If it runs dry, the stream stops.
+2. **[MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit)** — after each epoch, report and send your backrun share ([`rakurai-revshare`](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack)). You must hold the MCA report key.
 
 Once added, the consumer will start receiving transactions as `PacketBatch` (`solana_perf::packet::PacketBatch`). Rakurai uses the same Jito packet gRPC protocol (`packet.proto`, `block_engine.proto`) — `Packet` / `PacketBatch` — used by the Jito relayer.
 

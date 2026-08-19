@@ -119,53 +119,72 @@ let txn: VersionedTransaction = bincode::deserialize(&packet.data)?;
 
 ---
 
-## 4. MEV revenue sharing
+## 4. Two money paths: PSA then MCA
 
-Post-pack and MEV-share revenue is deposited directly into the **searcher or transaction inclusion service's own account**, which Rakurai does **not** control. When you start using **post-pack**, Rakurai creates a per-validator, per-service **[MevShare Collection Account (MCA)](../rakurai_programs/programs/reward_distribution/README.md#5-tip-and-mevshare-collection-accounts)** for you. That MCA is where you **record** revenue and **transfer** SOL; you **must hold the MCA `record_authority`**.
+Using post-pack has **two separate bills**. They do not mix. Comparison: [Reward Distribution](../rakurai_programs/programs/reward_distribution/README.md).
 
-MCA and TCA both use the same on-chain **[RevenueShareAccount / RevenueShareAccountV1 structure](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure)**; only `share_kind` differs (`MEV_SHARE` vs `TIP`). See the [Reward Distribution program](../rakurai_programs/programs/reward_distribution/README.md) for full account layout, PDA seeds, and ledger fields. Partners record and settle MCA balances with the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack).
+| Order | Account | What you pay for | Tool |
+|-------|---------|------------------|------|
+| **1. First** | **[PSA](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack)** (P2C Subscription Account) | **Access** to the stream — a prepaid subscription priced from SOL stake | [`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md) |
+| **2. Then** | **[MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit)** (MevShare Collection Account) | **Sharing backrun / arbitrage profit** you made from those updates | [`rakurai-revshare`](../rakurai_programs/cli/partner_reward_settlement.md) |
 
-### 4.1. Who participates
-
-This flow applies to **searchers** and **transaction inclusion services** that:
-
-- Consume **post-pack confirmations** from Rakurai validators
-- Capture MEV (e.g., backruns / arbitrage) from those confirmations
-- **Share a percentage of MEV revenue** with the validator
-
-Each participant registers separately with Rakurai and receives one MCA per service per validator.
-
-### 4.2. Register an MCA and endpoint
-
-When you start using **post-pack**, Rakurai creates an **[MCA](../rakurai_programs/programs/reward_distribution/README.md#5-tip-and-mevshare-collection-accounts)** for your service (one per service per validator). That MCA is where you **record** MevShare revenue and **transfer** the corresponding SOL after each epoch.
-
-1. Contact the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official) and **share your gRPC endpoint** — see [post-pack setup](./transaction_inclusion.md#31-setup).
-2. Rakurai adds your endpoint on-chain and creates your MCA. You receive a **revenue name** (PDA seed) and must hold the MCA **`record_authority`** keypair — only that authority can call `record_revenue` / `record-revenue` on the MCA. Confirm it with the Partner CLI `get-account` (`Record auth` field).
-3. After registration, you start receiving **post-pack confirmations** and must **share a percentage of MEV revenue** through your MCA (record, then settle).
-
-See the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack) for MCA setup and commands.
-
-### 4.3. During the epoch
-
-Unlike [TCA (custom tips)](../rakurai_programs/programs/reward_distribution/README.md#51-why-a-tips-collection-account-tca), **nothing is recorded on-chain in the MCA during leader turns**. MEV-share revenue stays in the searcher or transaction inclusion service's own accounts until the epoch ends.
-
-For the parallel custom-tip flow, see [Tips FAQ — leader-turn stage](./rakurai_tip_manager_faqs.md#61-leader-turn-stage-every-leader-turn).
-
-### 4.4. Post-epoch stage (record and settle)
-
-After the epoch ends, the searcher or transaction inclusion service (holding the MCA **`record_authority`**):
-
-1. **Record** — report the revenue share owed for the previous epoch by calling `record_revenue` on the MCA **once** (use Partner CLI [`record-revenue`](../rakurai_programs/cli/partner_reward_settlement.md#34-record-revenue-mca-only) with the `record_authority` keypair). This updates the [RevenueShareAccount ledger](../rakurai_programs/programs/reward_distribution/README.md#56-revenueshareaccount-revenueshareaccountv1-structure) only; no lamports move.
-2. **Settle** — transfer the recorded amount into the MCA as SOL using the [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) (`transfer --revenue-kind Mev-share`), which calls `settle_revenue` for V1 vaults.
-3. **Claim** — the reward distribution program splits the settled amount between Rakurai (commission) and the validator (remainder).
-
-> If a service does not record and settle within **2 epochs**, post-pack access and MCA prioritization stop after a two-epoch grace period.
-
-### 4.5. Revenue distribution
-
-Once the recorded amount is settled into the MCA, revenue is split the same way as TCA — see [How Tip and MevShare are distributed](../rakurai_programs/programs/reward_distribution/README.md#53-how-tip-and-mevshare-are-distributed):
-
-- **Client (Rakurai):** the client commission is credited to its account (percentage recorded in the MCA).
-- **Validator:** the remaining share is credited to its identity account (with the option to convert it into block rewards when enabled on the MCA).
+Endpoints (where the scheduler **sends** you transactions) live in [Client Config](../rakurai_programs/programs/rakurai_client_config/README.md). PSA holds prepaid SOL. MCA holds shared backrun SOL.
 
 ---
+
+## 5. PSA — pay to use the stream
+
+Anyone who wants post-pack must **top up a prepaid account**. Each epoch Rakurai takes a fee based on SOL stake: **commission to Rakurai**, **remainder to the validator**. If the account runs dry, after a short grace the **stream is stopped** until you top up.
+
+### 5.1. Flow
+
+1. Contact the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official) and share your gRPC endpoint — see [post-pack setup](./transaction_inclusion.md#31-setup).
+2. Rakurai opens a **PSA** for your service + each validator and adds your endpoint.
+3. **You top up** SOL ([`rakurai-p2c fund`](../rakurai_programs/cli/p2c_subscription.md)).
+4. After each epoch the stake-based fee is taken from prepaid.
+5. Keep the balance funded. **Suspended** means post-pack is off until you clear the deficit.
+
+Walkthrough: [P2C Subscription CLI](../rakurai_programs/cli/p2c_subscription.md) · [PSA model](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack).
+
+---
+
+## 6. MCA — share backrun profit
+
+After you are on the stream, backrun / arbitrage **profit sits in your own wallet**. Rakurai cannot drain it. You **report** the agreed share after the epoch, then **send that SOL** into the MCA. Rakurai takes commission; the remainder goes to the **validator**.
+
+You **must hold the MCA report key** (`record_authority`). Without it you cannot update the books.
+
+### 6.1. Who this is for
+
+Searchers and transaction-inclusion services that:
+
+- Already pay for the stream (**PSA**)
+- Capture MEV (backruns / arbitrage) from those confirmations
+- **Share a percentage** of that profit with the validator
+
+One MCA per service per validator.
+
+### 6.2. Register
+
+1. Same setup as PSA: share your endpoint with the Rakurai team — [post-pack setup](./transaction_inclusion.md#31-setup).
+2. Rakurai creates your **MCA** and gives you a revenue name plus the report key. Confirm it with Partner CLI `get-account` (`Record auth`).
+3. You receive post-pack updates; after each epoch you share profit through the MCA.
+
+Commands: [Partner settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack).
+
+### 6.3. During the epoch
+
+**Nothing** is taken automatically. Profit stays in your accounts until the epoch ends. (Custom tips work differently — see [TCA](../rakurai_programs/programs/reward_distribution/README.md#3-tca--tips-for-landing-transactions) and [Tips FAQ](./rakurai_tip_manager_faqs.md#61-leader-turn-stage-every-leader-turn).)
+
+### 6.4. After the epoch
+
+1. **Report** the share owed once ([Partner CLI `record-revenue`](../rakurai_programs/cli/partner_reward_settlement.md#35-record-revenue-mca-only)) — books only; no SOL moves.
+2. **Send** that SOL into the MCA (`transfer --revenue-kind Mev-share`).
+3. Rakurai’s commission is taken; the remainder is paid to the validator.
+
+> If you do not report and send within **2 epochs**, post-pack priority stops after a two-epoch grace.
+
+Model: [MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit).
+
+---
+

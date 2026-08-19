@@ -106,6 +106,53 @@
       ]
     },
     {
+      "name": "claim_epoch_p2c_subscription",
+      "docs": [
+        "Claim epoch fee from prepaid SOL.",
+        "",
+        "Pays `min(remaining due, free prepaid)` to commission + identity and notes it.",
+        "Marks claimed when fully paid, or when `force_claim` closes with the rest as `deficit`."
+      ],
+      "discriminator": [
+        90,
+        241,
+        98,
+        131,
+        235,
+        140,
+        99,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "commission_account",
+          "writable": true
+        },
+        {
+          "name": "validator_identity",
+          "writable": true
+        },
+        {
+          "name": "manager_authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "force_claim",
+          "type": "bool"
+        }
+      ]
+    },
+    {
       "name": "claim_revenue",
       "docs": [
         "Claims revenue on a **legacy** TCA/MCA (pays recorded `amount` if vault funded).",
@@ -183,6 +230,98 @@
       "args": [
         {
           "name": "epoch",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "clear_deficit_v1",
+      "docs": [
+        "Funder deposits SOL; vault deducts up to open deficit and pays commission + validator.",
+        "Same split as `claim_revenue_v1` (Rakurai tip forces 0 commission). Partial clear OK."
+      ],
+      "discriminator": [
+        154,
+        243,
+        107,
+        113,
+        182,
+        36,
+        207,
+        34
+      ],
+      "accounts": [
+        {
+          "name": "revenue_share_account",
+          "writable": true
+        },
+        {
+          "name": "commission_account",
+          "writable": true
+        },
+        {
+          "name": "validator_identity",
+          "writable": true
+        },
+        {
+          "name": "funder",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "clear_p2c_deficit",
+      "docs": [
+        "Funder deposits SOL; escrow deducts up to open `deficit` and pays commission + identity.",
+        "Partial clear OK. Fully clearing deficit resets grace to Active."
+      ],
+      "discriminator": [
+        47,
+        75,
+        159,
+        13,
+        93,
+        74,
+        55,
+        146
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "commission_account",
+          "writable": true
+        },
+        {
+          "name": "validator_identity",
+          "writable": true
+        },
+        {
+          "name": "funder",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
           "type": "u64"
         }
       ]
@@ -308,6 +447,72 @@
             "The authority that can close the config account."
           ],
           "writable": true,
+          "signer": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_p2c_subscription_account",
+      "docs": [
+        "Closes P2C escrow; rent + residual to initializer. Manager only."
+      ],
+      "discriminator": [
+        118,
+        97,
+        239,
+        254,
+        202,
+        108,
+        245,
+        140
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  80,
+                  50,
+                  67,
+                  95,
+                  83,
+                  85,
+                  66,
+                  83,
+                  67,
+                  82,
+                  73,
+                  80,
+                  84,
+                  73,
+                  79,
+                  78
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "p2c_subscription_account.name",
+                "account": "P2CSubscriptionAccount"
+              },
+              {
+                "kind": "account",
+                "path": "p2c_subscription_account.validator_vote",
+                "account": "P2CSubscriptionAccount"
+              }
+            ]
+          }
+        },
+        {
+          "name": "initializer",
+          "writable": true
+        },
+        {
+          "name": "manager_authority",
           "signer": true
         }
       ],
@@ -605,6 +810,43 @@
       "args": []
     },
     {
+      "name": "fund_p2c_subscription",
+      "docs": [
+        "Top up prepaid SOL on the P2C escrow (any funder)."
+      ],
+      "discriminator": [
+        111,
+        86,
+        79,
+        142,
+        88,
+        159,
+        197,
+        250
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "funder",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "initialize",
       "docs": [
         "Sets up the singleton [RewardDistributionConfigAccount] to store global configuration settings for Rakurai."
@@ -686,6 +928,140 @@
         {
           "name": "revenue_manager_authority",
           "type": "pubkey"
+        },
+        {
+          "name": "bump",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "initialize_p2c_subscription_account",
+      "docs": [
+        "Manager-only create of a prepaid P2C subscription PDA (`P2C_SUBSCRIPTION` + name + vote)."
+      ],
+      "discriminator": [
+        205,
+        19,
+        39,
+        109,
+        57,
+        15,
+        114,
+        254
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  80,
+                  50,
+                  67,
+                  95,
+                  83,
+                  85,
+                  66,
+                  83,
+                  67,
+                  82,
+                  73,
+                  80,
+                  84,
+                  73,
+                  79,
+                  78
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "name"
+              },
+              {
+                "kind": "account",
+                "path": "validator_vote_account"
+              }
+            ]
+          }
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  68,
+                  95,
+                  67,
+                  79,
+                  78,
+                  70,
+                  73,
+                  71,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator_vote_account"
+        },
+        {
+          "name": "manager_authority",
+          "docs": [
+            "Manager creates and funds rent for the PDA (only manager may create)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "name",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        },
+        {
+          "name": "record_authority",
+          "type": "pubkey"
+        },
+        {
+          "name": "max_epoch_entries",
+          "type": "u8"
+        },
+        {
+          "name": "commission_bps",
+          "type": "u16"
+        },
+        {
+          "name": "commission_account",
+          "type": "pubkey"
+        },
+        {
+          "name": "grace_epochs",
+          "type": "u8"
         },
         {
           "name": "bump",
@@ -1539,6 +1915,91 @@
       ]
     },
     {
+      "name": "record_and_transfer",
+      "docs": [
+        "Record attributed amount and settle SOL in one ix on TCAV1 / MCAV1 (non-Rakurai tip).",
+        "Current epoch only. Auth: `record_authority`. Payer funds the transfer (may be same signer)."
+      ],
+      "discriminator": [
+        23,
+        158,
+        199,
+        122,
+        231,
+        36,
+        68,
+        249
+      ],
+      "accounts": [
+        {
+          "name": "revenue_share_account",
+          "writable": true
+        },
+        {
+          "name": "record_authority",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "Funds the settle transfer (may equal `record_authority`)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "record_p2c_subscription",
+      "docs": [
+        "Record stake snapshot and amount due for an epoch (once). Manager only."
+      ],
+      "discriminator": [
+        110,
+        200,
+        204,
+        54,
+        115,
+        204,
+        71,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "manager_authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        },
+        {
+          "name": "stake",
+          "type": "u64"
+        },
+        {
+          "name": "amount_due",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "record_revenue",
       "docs": [
         "Records revenue for the current epoch on a **legacy** TCA/MCA (`REVENUE_SHARE`)."
@@ -1874,6 +2335,158 @@
         {
           "name": "epoch",
           "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "update_p2c_deficit",
+      "docs": [
+        "Manager adjusts cumulative P2C deficit (manual write-off / admin)."
+      ],
+      "discriminator": [
+        108,
+        155,
+        11,
+        143,
+        241,
+        104,
+        246,
+        157
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "manager_authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "update",
+          "type": {
+            "defined": {
+              "name": "DeficitUpdate"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_p2c_epoch_converted_to_block_reward",
+      "docs": [
+        "Marks a claimed P2C epoch as converted to block rewards."
+      ],
+      "discriminator": [
+        182,
+        92,
+        142,
+        136,
+        123,
+        153,
+        222,
+        206
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "validator_vote_account"
+        },
+        {
+          "name": "signer",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "epoch",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "update_p2c_subscription_config",
+      "docs": [
+        "Manager updates commission, grace, BR flag, optional record authority."
+      ],
+      "discriminator": [
+        87,
+        209,
+        44,
+        71,
+        155,
+        194,
+        129,
+        52
+      ],
+      "accounts": [
+        {
+          "name": "p2c_subscription_account",
+          "writable": true
+        },
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  82,
+                  68,
+                  95,
+                  67,
+                  79,
+                  78,
+                  70,
+                  73,
+                  71,
+                  95,
+                  65,
+                  67,
+                  67,
+                  79,
+                  85,
+                  78,
+                  84
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "manager_authority",
+          "signer": true
+        }
+      ],
+      "args": [
+        {
+          "name": "commission_bps",
+          "type": "u16"
+        },
+        {
+          "name": "commission_account",
+          "type": "pubkey"
+        },
+        {
+          "name": "block_reward_conversion_enabled",
+          "type": "bool"
+        },
+        {
+          "name": "grace_epochs",
+          "type": {
+            "option": "u8"
+          }
+        },
+        {
+          "name": "record_authority",
+          "type": {
+            "option": "pubkey"
+          }
         }
       ]
     },
@@ -2226,6 +2839,19 @@
       ]
     },
     {
+      "name": "P2CSubscriptionAccount",
+      "discriminator": [
+        195,
+        27,
+        244,
+        123,
+        197,
+        35,
+        163,
+        113
+      ]
+    },
+    {
       "name": "RakuraiActivationAccount",
       "discriminator": [
         23,
@@ -2384,6 +3010,110 @@
       ]
     },
     {
+      "name": "P2CDeficitClearedEvent",
+      "discriminator": [
+        167,
+        171,
+        119,
+        243,
+        242,
+        68,
+        92,
+        53
+      ]
+    },
+    {
+      "name": "P2CDeficitUpdatedEvent",
+      "discriminator": [
+        32,
+        241,
+        185,
+        251,
+        238,
+        124,
+        92,
+        228
+      ]
+    },
+    {
+      "name": "P2CEpochConvertedToBlockRewardEvent",
+      "discriminator": [
+        213,
+        108,
+        163,
+        117,
+        63,
+        120,
+        100,
+        118
+      ]
+    },
+    {
+      "name": "P2CSubscriptionClaimedEvent",
+      "discriminator": [
+        56,
+        149,
+        130,
+        238,
+        51,
+        47,
+        32,
+        8
+      ]
+    },
+    {
+      "name": "P2CSubscriptionConfigUpdatedEvent",
+      "discriminator": [
+        44,
+        129,
+        154,
+        244,
+        50,
+        138,
+        45,
+        90
+      ]
+    },
+    {
+      "name": "P2CSubscriptionFundedEvent",
+      "discriminator": [
+        203,
+        235,
+        31,
+        250,
+        22,
+        245,
+        17,
+        69
+      ]
+    },
+    {
+      "name": "P2CSubscriptionInitializedEvent",
+      "discriminator": [
+        69,
+        106,
+        95,
+        224,
+        249,
+        104,
+        177,
+        35
+      ]
+    },
+    {
+      "name": "P2CSubscriptionRecordedEvent",
+      "discriminator": [
+        186,
+        43,
+        80,
+        116,
+        117,
+        1,
+        108,
+        164
+      ]
+    },
+    {
       "name": "RevenueClaimedEvent",
       "discriminator": [
         3,
@@ -2394,6 +3124,19 @@
         87,
         87,
         232
+      ]
+    },
+    {
+      "name": "RevenueDeficitClearedEvent",
+      "discriminator": [
+        162,
+        81,
+        220,
+        67,
+        205,
+        132,
+        175,
+        49
       ]
     },
     {
@@ -2688,6 +3431,21 @@
       "code": 6026,
       "name": "InvalidRevenueShareLayout",
       "msg": "Revenue share account data length does not match the expected layout for this instruction."
+    },
+    {
+      "code": 6027,
+      "name": "P2CEpochAlreadyRecorded",
+      "msg": "P2C epoch fee already recorded for this epoch."
+    },
+    {
+      "code": 6028,
+      "name": "P2CHasUnclaimedEpochs",
+      "msg": "P2C subscription still has unclaimed epoch entries and cannot be closed."
+    },
+    {
+      "code": 6029,
+      "name": "NoDeficit",
+      "msg": "No outstanding deficit to clear."
     }
   ],
   "types": [
@@ -3050,6 +3808,494 @@
       }
     },
     {
+      "name": "P2CDeficitClearedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "funder",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_paid",
+            "type": "u64"
+          },
+          {
+            "name": "commission_amount",
+            "type": "u64"
+          },
+          {
+            "name": "validator_amount",
+            "type": "u64"
+          },
+          {
+            "name": "deficit_remaining",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "P2CSubscriptionStatus"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CDeficitUpdatedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "previous_deficit",
+            "type": "u64"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          },
+          {
+            "name": "update",
+            "type": {
+              "defined": {
+                "name": "DeficitUpdate"
+              }
+            }
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CEpochConvertedToBlockRewardEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CEpochEntry",
+      "docs": [
+        "Per-epoch prepaid fee row for a P2C subscription escrow."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "stake",
+            "docs": [
+              "Off-chain stake snapshot used to price this epoch."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "amount_due",
+            "docs": [
+              "Fee due for the epoch."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "amount_deducted",
+            "docs": [
+              "Lamports paid out on claim for this epoch (`min(due, free prepaid)`)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "claimed",
+            "docs": [
+              "Whether this epoch has been claimed (payout attempted)."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "block_reward_converted",
+            "docs": [
+              "Same lifecycle flag as revenue share after claim."
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionAccount",
+      "docs": [
+        "Prepaid P2C subscription escrow per `(name, validator_vote)`.",
+        "PDA: `[P2C_SUBSCRIPTION, name, vote]`. Manager-only create."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "validator_vote",
+            "type": "pubkey"
+          },
+          {
+            "name": "initializer",
+            "docs": [
+              "Who paid rent; receives residual on close."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "manager_authority",
+            "docs": [
+              "Creates PDA (pays rent), records epoch charges, claims, config, close."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "record_authority",
+            "docs": [
+              "Optional extra signer for convert-to-block (with manager / validator identity).",
+              "Not used for `record_p2c_subscription` (manager-only)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "max_epoch_entries",
+            "type": "u8"
+          },
+          {
+            "name": "commission_bps",
+            "docs": [
+              "e.g. 2000 = 20% to `commission_account` on claim."
+            ],
+            "type": "u16"
+          },
+          {
+            "name": "commission_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "grace_epochs",
+            "docs": [
+              "Consecutive unpaid finished epochs allowed before Suspended (default 2)."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "block_reward_conversion_enabled",
+            "type": "bool"
+          },
+          {
+            "name": "unpaid_streak",
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "P2CSubscriptionStatus"
+              }
+            }
+          },
+          {
+            "name": "deficit",
+            "docs": [
+              "Cumulative shortfall closed on underfunded claims."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "ledger",
+            "type": {
+              "defined": {
+                "name": "P2CSubscriptionLedger"
+              }
+            }
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionClaimedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "validator_identity",
+            "type": "pubkey"
+          },
+          {
+            "name": "commission_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "commission_amount",
+            "type": "u64"
+          },
+          {
+            "name": "validator_amount",
+            "type": "u64"
+          },
+          {
+            "name": "paid",
+            "docs": [
+              "Lamports paid this instruction."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "amount_deducted",
+            "docs": [
+              "Running total paid for the epoch."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "shortfall",
+            "docs": [
+              "Written to deficit only when `closed` (full pay or force_claim)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "force_claim",
+            "type": "bool"
+          },
+          {
+            "name": "closed",
+            "docs": [
+              "Epoch marked claimed this instruction."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "deficit",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "P2CSubscriptionStatus"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionConfigUpdatedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "commission_bps",
+            "type": "u16"
+          },
+          {
+            "name": "commission_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "block_reward_conversion_enabled",
+            "type": "bool"
+          },
+          {
+            "name": "grace_epochs",
+            "type": "u8"
+          },
+          {
+            "name": "record_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionFundedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "funder",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionInitializedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "name",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "validator_vote",
+            "type": "pubkey"
+          },
+          {
+            "name": "manager_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "record_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "max_epoch_entries",
+            "type": "u8"
+          },
+          {
+            "name": "commission_bps",
+            "type": "u16"
+          },
+          {
+            "name": "commission_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "grace_epochs",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionLedger",
+      "docs": [
+        "Epoch fee ledger for a P2C subscription escrow."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "entries",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2CEpochEntry"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionRecordedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "p2c_subscription_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "epoch",
+            "type": "u64"
+          },
+          {
+            "name": "stake",
+            "type": "u64"
+          },
+          {
+            "name": "amount_due",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2CSubscriptionStatus",
+      "docs": [
+        "Service eligibility for P2C (clients/ops read this; program does not call out)."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Active"
+          },
+          {
+            "name": "InGrace"
+          },
+          {
+            "name": "Suspended"
+          }
+        ]
+      }
+    },
+    {
       "name": "RakuraiActivationAccount",
       "type": {
         "kind": "struct",
@@ -3162,6 +4408,46 @@
           },
           {
             "name": "deficit",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RevenueDeficitClearedEvent",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "revenue_share_account",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_kind",
+            "type": {
+              "defined": {
+                "name": "RevenueKind"
+              }
+            }
+          },
+          {
+            "name": "funder",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount_paid",
+            "type": "u64"
+          },
+          {
+            "name": "commission_amount",
+            "type": "u64"
+          },
+          {
+            "name": "validator_amount",
+            "type": "u64"
+          },
+          {
+            "name": "deficit_remaining",
             "type": "u64"
           }
         ]

@@ -2,7 +2,7 @@
 
 A multisig-based Solana smart contract for enabling or disabling the Rakurai scheduler. It also governs the commission on block rewards for both the client (Rakurai), which is currently set to 0, and the validator.
 
-**Note:** The remaining block rewards after commission deduction are distributed to stakers via the [`RewardDistributionProgram`](../reward_distribution/README.md).
+**Note:** After commission, the remaining block rewards are shared with stakers through the [RCA](../reward_distribution/README.md#2-rca--block-rewards-for-stakers) in [Reward Distribution](../reward_distribution/README.md).
 
 ➤ For more details, refer to the [IDL file](./idl/rakurai_activation.json).
 
@@ -58,7 +58,7 @@ Once created, this account:
 
 - The validator may update their [**commission percentage**](../../cli/activation.md#33-update-commission) at any time.
 - The updated commission applies either:
-  - From the **current epoch**, if no [`RewardCollectionAccount`](../reward_distribution/README.md#31-rewardcollectionaccount-account-initialization) has been initialized yet.
+  - From the **current epoch**, if no [RCA](../reward_distribution/README.md#2-rca--block-rewards-for-stakers) has been opened yet.
   - Or from the **next epoch**, if one already exists.
 
 ---
