@@ -38,25 +38,6 @@ Rakurai nodes function like standard Solana validators but include performance e
 | [Transaction Inclusion](./rakurai_docs/transaction_inclusion/README.md) | Integrate with Rakurai transaction inclusion, bundle support, virtual priority, and post-pack confirmations. |
 | [Programs](./rakurai_docs/rakurai_programs/README.md)                 | Documentation for Rakurai on-chain programs and protocol components.                                         |
 
-> [!NOTE]
-> Note that this builds a debug version that is **not suitable for running a testnet or mainnet validator**. Please read [the install guide](https://docs.anza.xyz/cli/install#build-from-source) for instructions to build a release version for test and production uses.
-
-### Grant capabilities for XDP (Linux-only)
-
-XDP transmit is enabled on Linux by default and requires extra capabilities. After building, grant them to the validator binary:
-
-```bash
-$ sudo setcap 'cap_net_admin,cap_net_raw+eip' <path-to-agave-validator-binary>
-```
-
-For XDP zero-copy mode (`--xdp-zero-copy`), additional capabilities are needed:
-
-```bash
-$ sudo setcap 'cap_net_admin,cap_net_raw,cap_bpf,cap_perfmon+eip' <path-to-agave-validator-binary>
-```
-
----
-
 ## 3. Contacts
 
 | Channel | Link |

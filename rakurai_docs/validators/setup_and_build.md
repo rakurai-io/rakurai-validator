@@ -173,11 +173,27 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:<path_to_rakurai-validator>/target/relea
 
 ---
 
-## 4. Add additional CLI args
+### 4. Grant capabilities for XDP (Linux-only)
+
+XDP transmit is enabled on Linux by default and requires extra capabilities. After building, grant them to the validator binary:
+
+```bash
+$ sudo setcap 'cap_net_admin,cap_net_raw+eip' <path-to-agave-validator-binary>
+```
+
+For XDP zero-copy mode (`--xdp-zero-copy`), additional capabilities are needed:
+
+```bash
+$ sudo setcap 'cap_net_admin,cap_net_raw,cap_bpf,cap_perfmon+eip' <path-to-agave-validator-binary>
+```
+
+---
+
+## 5. Add additional CLI args
 
 Modify your validator startup script by appending the following arguments.
 
-### 4.1. Mainnet arguments
+### 5.1. Mainnet arguments
 
 ```bash
  --rewards-merkle-root-authority H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj \
@@ -186,7 +202,7 @@ Modify your validator startup script by appending the following arguments.
  --rakurai-tip-manager-program-id rKtiPTD7WuCdEEQ2JXWgAmZHHL9iZLc3niCXwtS7wSH
 ```
 
-### 4.2. Testnet arguments
+### 5.2. Testnet arguments
 
 ```bash
  --rewards-merkle-root-authority H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj \
@@ -195,7 +211,7 @@ Modify your validator startup script by appending the following arguments.
  --rakurai-tip-manager-program-id 4qRZaFzf7MvgfBTCP9grb69cCST8UmKHPtkpGAgkJosD
 ```
 
-### 4.3. Optional slot adjustment
+### 5.3. Optional slot adjustment
 
 An **optional** argument adjusts block times within protocol limits. The default value is `10` (390 ms block times). You can set it to a maximum of `50` (350 ms):
 
