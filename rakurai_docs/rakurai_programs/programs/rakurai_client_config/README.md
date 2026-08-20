@@ -39,7 +39,7 @@ This is endpoint config only. Prepaid P2C **subscription SOL** is a [PSA](../rew
 Virtual-priority entries name **tip accounts**. When a transaction (or bundle) tips that account, the scheduler uses a **configured percent of that tip amount** as extra virtual priority — so the txn can be ordered higher without changing the SOL that actually moved.
 
 - `key` — tip-account pubkey (Rakurai tip PDA or a registered custom tip account)
-- `value` — percent of that tip used for virtual priority (for example `0.1` = 10% of the tip)
+- `value` — fraction of that tip used for virtual priority; must be in `[0.0, 1.0]` (for example `0.1` = 10% of the tip)
 
 ---
 

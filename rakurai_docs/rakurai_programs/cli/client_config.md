@@ -91,7 +91,7 @@ Each file has all three sections. See [`examples/validator_config.json`](./examp
     "sets": [
       {
         "name": "vp-main-1",
-        "url": [{ "key": "<PUBKEY>", "value": 10.0 }]
+        "url": [{ "key": "<PUBKEY>", "value": 0.1 }]
       }
     ]
   }
@@ -102,7 +102,7 @@ Each file has all three sections. See [`examples/validator_config.json`](./examp
 |---------|--------|
 | Block engine | `url`, `max_bundles`, `period_ms`, `max_bundle_burst` (`0` = unlimited / treat burst as `max_bundles` when quota is set). Scheduler **receives bundles** from these URLs. |
 | P2C | `url` only. Scheduler **sends** packed txns here for arbitrage / backrun (point of no return; no front-running). See [Post-pack confirmations](../../transaction_inclusion/post_pack_confirmations.md). |
-| Virtual priority | `key` (tip-account pubkey), `value` (percent of that tip used to virtually prioritize the txn) |
+| Virtual priority | `key` (tip-account pubkey), `value` (fraction of that tip in `[0.0, 1.0]`; e.g. `0.1` = 10%) |
 
 `name` is truncated to 32 bytes. Omit `--config-file` on `global init` to create empty sets, then update with a full file.
 
