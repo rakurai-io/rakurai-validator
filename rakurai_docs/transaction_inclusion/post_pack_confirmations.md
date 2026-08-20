@@ -1,10 +1,10 @@
 # Rakurai Post-Pack Confirmations — Guide
 
-How the validator streams transaction updates to post-pack confirmation endpoints and how searchers and transaction inclusion network respond with bundles.
+How the validator streams transaction updates to post-pack confirmation endpoints and how searchers and TIN partners respond with bundles.
 
-**Audience:** Searchers, transaction inclusion network, traders consuming post-pack confirmations, and validator operators configuring endpoints.
+**Audience:** Searchers, TIN partners, traders consuming post-pack confirmations, and validator operators configuring endpoints.
 
-**Related:** [Tips FAQ](./rakurai_tip_manager_faqs.md) · [Transaction inclusion network](./transaction_inclusion.md)
+**Related:** [Tips FAQ](./rakurai_tip_manager_faqs.md) · [Transaction Inclusion Network (TIN)](./transaction_inclusion.md)
 
 ---
 
@@ -74,9 +74,9 @@ Same as TCA/PSA: if **`block_reward_conversion_enabled`** is on, the validator r
 
 ### 3.1. Who this is for
 
-Searchers and transaction-inclusion services that:
+Searchers and TIN partners that:
 
-- Already pay for the stream (**PSA**)
+- Already fund the **PSA**
 - Capture MEV (backruns / arbitrage) from those confirmations
 - **Share a percentage** of that profit with the validator
 
@@ -173,14 +173,14 @@ Bundle
 
 ## 5. Commands
 
-**Searcher / service (on-chain money paths):**
+**Searcher / TIN partner (on-chain money paths):**
 
 | What | CLI |
 |------|-----|
 | Fund and inspect **PSA** | [`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md) |
 | Report and settle **MCA** | [`rakurai-revshare`](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack) |
 
-**Validator operators** use Admin RPC below to inspect which post-pack endpoints are active and to blocklist services. **Registering** a new endpoint (adding your gRPC URL on-chain) is not done here — share your endpoint with the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official); see [Transaction inclusion network — post-pack setup](./transaction_inclusion.md#31-setup).
+**Validator operators** use Admin RPC below to inspect which post-pack endpoints are active and to blocklist services. **Registering** a new endpoint (adding your gRPC URL on-chain) is not done here — share your endpoint with the Rakurai team on Slack or [Telegram](https://t.me/rakurai_official); see [TIN — post-pack setup](./transaction_inclusion.md#31-setup).
 
 Admin IPC is request/response: keep the socket open briefly so `socat` can read the reply before stdin closes.
 

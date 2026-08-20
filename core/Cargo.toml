@@ -88,7 +88,6 @@ histogram = { workspace = true }
 itertools = { workspace = true }
 reward_distribution = { workspace = true }
 rakurai_activation = { workspace = true }
-rakurai_client_config = { workspace = true }
 jito-protos = { workspace = true }
 lazy-lru = { workspace = true }
 jito-tip-distribution = { workspace = true }

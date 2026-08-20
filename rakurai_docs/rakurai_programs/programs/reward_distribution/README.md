@@ -19,7 +19,7 @@ You do not need to know how the chain works to follow this. Each kind of money h
 
 TCA, PSA, and MCA validator shares, after Rakurai’s commission, are first claimed and credited to the validator identity.
 With **block-reward conversion enabled by default**, the claimed amount is converted into a high-priority block-reward transaction during the validator’s leader turn. The transaction must land within that leader turn; otherwise, it is **dropped and not forwarded to the next leader**.
-**Post-pack users:** pay the stream first (**PSA**), then share backrun profit (**MCA**).
+**Post-pack users:** fund the **PSA** first, then share backrun profit (**MCA**).
 
 Where to click: [P2C subscription](../../cli/p2c_subscription.md) (PSA) · [Partner settlement](../../cli/partner_reward_settlement.md) (TCA / MCA) · [Account layouts](#6-account-layouts) · [View on Solscan](#63-how-to-view-on-chain).
 
@@ -187,7 +187,7 @@ User / consumer steps: [rakurai-p2c](../../cli/p2c_subscription.md). On-chain la
 
 ### Why it exists
 
-After you pay for the stream (**PSA**), [post-pack](../../../transaction_inclusion/post_pack_confirmations.md) sends you transactions at the **point of no return** (too late for anyone to front-run). You can **backrun** (trade after them). That extra profit sits in **your** wallet.
+After you fund the **PSA**, [post-pack](../../../transaction_inclusion/post_pack_confirmations.md) sends you transactions at the **point of no return** (too late for anyone to front-run). You can **backrun** (trade after them). That extra profit sits in **your** wallet.
 
 The deal is: you **share that profit** with the validator. The MCA is the account that receives the shared amount so Rakurai can take commission and pay the validator.
 
@@ -200,8 +200,6 @@ The deal is: you **share that profit** with the validator. The MCA is the accoun
 5. Rakurai’s commission is taken; the **remainder** is paid to the **validator identity** (**block-reward conversion** on by default)
 
 If you do not report and send within about **two epochs**, post-pack priority for your service stops.
-
-This is **sharing profit**. Paying for the stream itself is PSA (above).
 
 Partner steps: [rakurai-revshare](../../cli/partner_reward_settlement.md) (`Mev-share`). On-chain layout: [TCA / MCA struct](#6-account-layouts).
 

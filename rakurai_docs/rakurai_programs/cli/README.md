@@ -1,8 +1,8 @@
 # Rakurai CLIs
 
-Command-line tools for Rakurai validator operators and transaction-inclusion partners.
+Command-line tools for Rakurai validator operators and TIN partners.
 
-**Audience:** Validator operators, transaction-landing services, and post-pack partners.
+**Audience:** Validator operators, transaction-landing services, and post-pack user.
 
 ---
 

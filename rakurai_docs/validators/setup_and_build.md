@@ -173,7 +173,7 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:<path_to_rakurai-validator>/target/relea
 
 ---
 
-### 4. Grant capabilities for XDP (Linux-only)
+## 4. Grant capabilities for XDP (Linux-only)
 
 XDP transmit is enabled on Linux by default and requires extra capabilities. After building, grant them to the validator binary:
 
