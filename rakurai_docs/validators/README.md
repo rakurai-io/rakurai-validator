@@ -23,8 +23,8 @@ Documentation for running and operating a Rakurai-Solana validator node.
 
 Validators may also need:
 
-- [Post-pack confirmations](../transaction_inclusion/post_pack_confirmations.md) — Admin RPC; **PSA** (pay for the stream) then **MCA** (share backrun profit)
-- [Transaction inclusion](../transaction_inclusion/transaction_inclusion.md) — Block engine and post-pack overview
+- [Post-pack confirmations](../transaction_inclusion/post_pack_confirmations.md) — Admin RPC; **PSA** (P2C Subscription Account) then **MCA** (share backrun profit)
+- [Transaction inclusion network](../transaction_inclusion/transaction_inclusion.md) — Block engine and post-pack overview
 - [Tips FAQ](../transaction_inclusion/rakurai_tip_manager_faqs.md) — How tips work on Rakurai nodes
 - [P2C Subscription CLI](../rakurai_programs/cli/p2c_subscription.md) — Top up **PSA** prepaid subscription (`rakurai-p2c`)
 - [Partner Tip and MevShare Revenue Settlement CLI](../rakurai_programs/cli/partner_reward_settlement.md) — Partner TCA/MCA inspect and settle (`rakurai-revshare`)

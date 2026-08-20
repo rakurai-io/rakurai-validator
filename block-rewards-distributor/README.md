@@ -99,7 +99,7 @@ Uploads Merkle roots to on-chain Reward Collection Accounts.
 
 **Important:** Only the merkle root upload authority specified in the Reward Collection Account (RCA) can upload the merkle root. Ensure the keypair provided matches the `merkle_root_upload_authority` field in the RCA. 
 
-If you set the `--rewards-merkle-root-authority` to Rakurai's address (`H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`), Rakurai will automatically distribute rewards. See [Rakurai validator setup — additional CLI args](../rakurai_docs/validators/setup_and_build.md#4-add-additional-cli-args) for more details.
+If you set the `--rewards-merkle-root-authority` to Rakurai's address (`H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`), Rakurai will automatically distribute rewards. See [Rakurai validator setup — additional CLI args](../rakurai_docs/validators/setup_and_build.md#5-add-additional-cli-args) for more details.
 
 **Usage:**
 ```bash
@@ -149,7 +149,7 @@ claim-rewards \
 
 The distribution behavior is controlled by a JSON configuration file. See `.example.distribution_config.json` for a complete example.
 
-**Important Timing Note:** If the merkle root upload authority in your Reward Collection Account (RCA) is set to Rakurai (`H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`) and you want to use custom distribution configuration, you **must** share your distribution config before the epoch ends. This is because rewards from epoch X are distributed in epoch X+1, so your configuration must be provided before epoch X ends to be applied to those rewards. See [Rakurai validator setup — additional CLI args](../rakurai_docs/validators/setup_and_build.md#4-add-additional-cli-args) for details on setting the merkle root authority.
+**Important Timing Note:** If the merkle root upload authority in your Reward Collection Account (RCA) is set to Rakurai (`H21wFgN53ghjDq5N9QhraAiPn1tRVYkobySj55unXLEj`) and you want to use custom distribution configuration, you **must** share your distribution config before the epoch ends. This is because rewards from epoch X are distributed in epoch X+1, so your configuration must be provided before epoch X ends to be applied to those rewards. See [Rakurai validator setup — additional CLI args](../rakurai_docs/validators/setup_and_build.md#5-add-additional-cli-args) for details on setting the merkle root authority.
 
 ### Configuration Structure
 

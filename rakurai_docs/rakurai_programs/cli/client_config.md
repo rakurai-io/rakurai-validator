@@ -51,11 +51,13 @@ Same pattern for a new **block engine** or **virtual-priority** set. To add a UR
 
 | Account | Who | Meaning |
 |---------|-----|---------|
-| **Global** | Manager | Defaults for every validator |
-| **Validator** (per `--vote`) | Manager | Live overlay for one vote |
+| **Global** | Manager | Defaults + size caps for every validator |
+| **Validator** (per `--vote`) | Manager | Live overlay + size caps (proposals use these) |
 | **Proposal** | Operator → manager approve/reject | Draft; live unchanged until approve |
 
 Effective config the node uses = **global ∪ validator** (by set name). Validator optional. `union` prints that merge.
+
+Size caps (`ConfigLimits::V1`) live on global/validator/proposal PDAs (≤ absolute safety max). Init: `global init` → `validator init`. Proposals snapshot validator limits on submit/update.
 
 ---
 
@@ -128,9 +130,12 @@ Always pass a **full** `--config-file` on update / submit.
 
 ```sh
 rakurai-client-config global init --config-file cli/examples/validator_config.json
+# Optional caps on init (defaults shown):
+#   --max-url-len 256 --max-sets-per-section 16 --max-urls-per-set 8 --max-vp-entries-per-set 64
 rakurai-client-config global show
 # Edit the printed JSON (current + new), save, then:
 rakurai-client-config global update --config-file /tmp/global-current-plus-new.json
+rakurai-client-config global set-limits --max-url-len 256 --max-sets-per-section 16
 rakurai-client-config global close
 ```
 
@@ -139,12 +144,13 @@ rakurai-client-config global close
 ```sh
 rakurai-client-config validator init --vote <VOTE_PUBKEY> --operator <OPERATOR_PUBKEY>
 rakurai-client-config validator set-operator --vote <VOTE_PUBKEY> --operator <OPERATOR_PUBKEY>
+rakurai-client-config validator set-limits --vote <VOTE_PUBKEY> --max-url-len 256
 rakurai-client-config validator show --vote <VOTE_PUBKEY>
 rakurai-client-config validator update --vote <VOTE_PUBKEY> --config-file /tmp/validator-current-plus-new.json
 rakurai-client-config validator close --vote <VOTE_PUBKEY>
 ```
 
-`validator init` copies **then-current global**. Later global edits do not rewrite existing validator PDAs.
+`validator init` copies **then-current global** config **and limits**. Later global edits do not rewrite existing validator PDAs.
 
 ### Proposal (operator → manager)
 

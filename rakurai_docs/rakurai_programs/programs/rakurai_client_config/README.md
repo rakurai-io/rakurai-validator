@@ -76,9 +76,24 @@ Same rule for **removing** or **editing** a set: start from current, change that
 
 | Layer | PDA seeds | Who writes | Purpose |
 |-------|-----------|------------|---------|
-| **Global** | `global-validator-config` | **Manager** | Network-wide defaults |
-| **Validator** | `validator-config` + vote | **Manager** | Live per-vote overlay (copied from global at `init_validator`) |
-| **Proposal** | `validator-proposal` + vote | **Operator** draft → **Manager** approve/reject | Does not change live config until approve |
+| **Global** | `global-validator-config` | **Manager** | Network-wide defaults + `ConfigLimits` |
+| **Validator** | `validator-config` + vote | **Manager** | Live per-vote overlay + `ConfigLimits` (copied from global at `init_validator`) |
+| **Proposal** | `validator-proposal` + vote | **Operator** draft → **Manager** approve/reject | Draft config + snapshotted `ConfigLimits` (from validator at propose/update) |
+
+### 4.1. ConfigLimits (size caps)
+
+Versioned enum (`ConfigLimits::V1(ConfigLimitsV1)`), stored on **Global**, **Validator**, and **Proposal**.
+
+| Field | Default | Absolute safety max |
+|-------|---------|---------------------|
+| `max_url_len` | 256 | 1024 |
+| `max_sets_per_section` | 16 | 64 |
+| `max_urls_per_set` | 8 | 32 |
+| `max_vp_entries_per_set` | 64 | 255 |
+
+- Init order: `global init` → `validator init`.
+- Global / validator / proposal writes use that account’s `limits`.
+- Manager can change Global/Validator caps via `update_global_limits` / `update_validator_limits` (must be non-zero, ≤ absolute max, and still fit the current payload).
 
 **Effective config** for a vote:
 

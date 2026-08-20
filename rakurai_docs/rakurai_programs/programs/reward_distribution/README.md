@@ -74,7 +74,7 @@ At the final slot of each epoch, the following process takes place:
 
 ## 2.2. Reward Distribution — Free and Automated by Rakurai
 
-- Set the Merkle root authority to [Rakurai](../../../validators/setup_and_build.md#4-add-additional-cli-args) for fully automated reward distribution.
+- Set the Merkle root authority to [Rakurai](../../../validators/setup_and_build.md#5-add-additional-cli-args) for fully automated reward distribution.
 - Keep it yourself if you want to run distribution manually.
 
 When set to **Rakurai**, Rakurai will automatically:

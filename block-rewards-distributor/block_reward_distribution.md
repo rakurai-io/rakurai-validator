@@ -15,7 +15,7 @@ Solana's staking protocol distributes **inflation / voting rewards** to stakers 
 Rakurai introduces an opt-in feature that lets any validator running Rakurai share block rewards with stakers. The flow is:
 
 1. Configure how much of each block reward the validator retains (via the [**Rakurai Activation Account**](../rakurai_docs/rakurai_programs/programs/rakurai_activation/README.md)).
-2. Accumulate the staker share on-chain in a per-epoch [**Reward Collection Account (RCA)**](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#2-how-it-works) throughout the epoch.
+2. Accumulate the staker share on-chain in a per-epoch [**Reward Collection Account (RCA)**](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#2-rca--block-rewards-for-stakers) throughout the epoch.
 3. At epoch end, compute stake-weighted allocations off-chain (optionally adjusted via [custom distribution config](#6-customize-distribution-optional)), upload a Merkle root on-chain, and execute staker claims. When Merkle root authority is delegated to Rakurai, Rakurai runs the full claim process on behalf of stakers.
 
 ### 1.3. Free for Rakurai validators
@@ -83,30 +83,30 @@ Verify your settings anytime with [`rakurai-activation show`](../rakurai_docs/ra
 
 The updated commission applies:
 
-- From the **current epoch**, if no [RCA](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#31-rewardcollectionaccount-account-initialization) has been created for the current epoch yet.
+- From the **current epoch**, if no [RCA](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#211-rewardcollectionaccount-account-initialization) has been created for the current epoch yet.
 - From the **next epoch**, if an RCA for the current epoch already exists.
 
 ### 4.3. Configure the Rakurai client (node operator)
 
-The Rakurai Solana client must be configured with the correct [CLI arguments](../rakurai_docs/validators/setup_and_build.md#4-add-additional-cli-args) so it can:
+The Rakurai Solana client must be configured with the correct [CLI arguments](../rakurai_docs/validators/setup_and_build.md#5-add-additional-cli-args) so it can:
 
 - Initialize the per-epoch RCA on your first leader turn.
 - Transfer staker rewards into the RCA on every subsequent leader turn.
 - Set `reward_merkle_root_authority` — the account allowed to upload the Merkle root after the epoch ends.
 
-Set this authority to [**Rakurai**](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#4-reward-distribution-free-and-automated-by-rakurai) for fully automated distribution, or keep it yourself if you prefer to run distribution manually.
+Set this authority to [**Rakurai**](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#22-reward-distribution--free-and-automated-by-rakurai) for fully automated distribution, or keep it yourself if you prefer to run distribution manually.
 
 ---
 
 ## 5. Epoch lifecycle
 
-Once commission is below 100%, the following happens every epoch. Full details are in the [epoch flow](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#3-epoch-flow).
+Once commission is below 100%, the following happens every epoch. Full details are in the [epoch flow](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#21-epoch-flow).
 
-1. **RCA initialization** — On the first leader turn, the Rakurai client creates a per-epoch [Reward Collection Account (RCA)](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#31-rewardcollectionaccount-account-initialization).
-2. **Per-turn accumulation** — On every leader turn, the staker share of the previous turn's block reward is transferred into the RCA; validator and block-builder commissions are retained separately. See [per-turn transfers](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#32-per-turn-transfers).
-3. **Post-epoch distribution** — At the final slot, a stake snapshot is taken, a Merkle tree is built off-chain (allocations can be adjusted via [custom distribution config](#6-customize-distribution-optional)), the root is uploaded on-chain, and staker claims are executed. When Merkle root authority is delegated to Rakurai, Rakurai runs the claim process on behalf of stakers. See [post-epoch staker distribution](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#33-post-epoch-staker-distribution).
+1. **RCA initialization** — On the first leader turn, the Rakurai client creates a per-epoch [Reward Collection Account (RCA)](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#211-rewardcollectionaccount-account-initialization).
+2. **Per-turn accumulation** — On every leader turn, the staker share of the previous turn's block reward is transferred into the RCA; validator and block-builder commissions are retained separately. See [per-turn transfers](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#212-per-turn-transfers).
+3. **Post-epoch distribution** — At the final slot, a stake snapshot is taken, a Merkle tree is built off-chain (allocations can be adjusted via [custom distribution config](#6-customize-distribution-optional)), the root is uploaded on-chain, and staker claims are executed. When Merkle root authority is delegated to Rakurai, Rakurai runs the claim process on behalf of stakers. See [post-epoch staker distribution](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#213-post-epoch-staker-distribution).
 
-When `reward_merkle_root_authority` is set to Rakurai, steps 1–3 are fully automated (0% distribution fee). See [Reward Distribution — Free and Automated by Rakurai](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#4-reward-distribution-free-and-automated-by-rakurai).
+When `reward_merkle_root_authority` is set to Rakurai, steps 1–3 are fully automated (0% distribution fee). See [Reward Distribution — Free and Automated by Rakurai](../rakurai_docs/rakurai_programs/programs/reward_distribution/README.md#22-reward-distribution--free-and-automated-by-rakurai).
 
 ---
 

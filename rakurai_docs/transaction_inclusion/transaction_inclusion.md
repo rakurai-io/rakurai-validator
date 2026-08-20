@@ -1,8 +1,10 @@
-# Rakurai Transaction Inclusion — Guide
+# Rakurai Transaction Inclusion Network (TIN) — Guide
 
 Bundles, virtual prioritization, and post-pack confirmations for landing transactions on Rakurai validators.
 
 **Audience:** Block engines, searchers, and partners integrating transaction landing with Rakurai.
+
+**Related:** [Tips FAQ](./rakurai_tip_manager_faqs.md) · [Post-pack confirmations](./post_pack_confirmations.md)
 
 ---
 
@@ -116,7 +118,7 @@ https://sample-server.com:20000
 
 Rakurai will add its partners' gRPC endpoints on-chain so you can receive updates from Rakurai nodes that have opted in.
 
-Using post-pack has **two money paths** — **PSA first** (pay for the stream), **then MCA** (share backrun profit). See [Post-pack — PSA then MCA](./post_pack_confirmations.md#4-two-money-paths-psa-then-mca).
+Using post-pack has **two money paths** — **PSA first** (P2C Subscription Account), **then MCA** (share backrun profit). See [Post-pack confirmations](./post_pack_confirmations.md#1-what-are-post-pack-confirmations).
 
 1. **[PSA](../rakurai_programs/programs/reward_distribution/README.md#4-psa--prepaid-fee-to-use-post-pack)** — top up the prepaid subscription ([`rakurai-p2c`](../rakurai_programs/cli/p2c_subscription.md)). If it runs dry, the stream stops.
 2. **[MCA](../rakurai_programs/programs/reward_distribution/README.md#5-mca--sharing-post-pack-backrun-profit)** — after each epoch, report and send your backrun share ([`rakurai-revshare`](../rakurai_programs/cli/partner_reward_settlement.md#mca-setup-post-pack)). You must hold the MCA report key.

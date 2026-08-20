@@ -72,7 +72,7 @@ Partners may register a custom tip account (or post-pack flow) so their transact
 2. **Settle** by transferring SOL into the MCA (`transfer`).
 3. Claim/distribution is handled by the configured manager (not this CLI).
 
-See [Post-epoch stage: record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
+See [Post-epoch stage: record and settle](../../transaction_inclusion/post_pack_confirmations.md#34-after-the-epoch).
 
 > **Note:** If a service does not record and settle within 2 epochs, post-pack access and MCA prioritization stop after a two-epoch grace period.
 
@@ -164,7 +164,7 @@ Use `--revenue-kind Mev-share` for MCA. Results are ordered by epoch.
 
 Records MevShare revenue on the MCA ledger for the **current cluster epoch**. Calls `record_revenue_v1`. Updates the on-chain ledger only — **no SOL is moved**.
 
-**Why it is required for MCA:** unlike TCA, the validator does not record MevShare during leader turns. Post-pack revenue stays in your accounts until you report the owed share once per epoch. Without `record-revenue`, there is nothing to settle and claim. See [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
+**Why it is required for MCA:** unlike TCA, the validator does not record MevShare during leader turns. Post-pack revenue stays in your accounts until you report the owed share once per epoch. Without `record-revenue`, there is nothing to settle and claim. See [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#34-after-the-epoch).
 
 Requires `--revenue-kind Mev-share`. When post-pack is enabled, Rakurai creates your MCA; you must hold its **`record_authority`** and pass that keypair as `--keypair` (shown by `get-account` as `Record auth`).
 
@@ -274,8 +274,8 @@ See [Reward Distribution](../programs/reward_distribution/README.md). P2C **subs
 
 ### 5.2. Post-pack (MCA)
 
-1. Complete post-pack integration with Rakurai — top up **[PSA](../../transaction_inclusion/post_pack_confirmations.md#5-psa--pay-to-use-the-stream)** first, then Rakurai creates your MCA and assigns `--revenue-name` and `record_authority` (you must hold that keypair) — see [MCA](../../transaction_inclusion/post_pack_confirmations.md#6-mca--share-backrun-profit).
-2. After the epoch ends, run `record-revenue --revenue-kind Mev-share --amount <LAMPORTS>` with the MCA `record_authority` keypair (per validator) — see [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#64-after-the-epoch).
+1. Complete post-pack integration with Rakurai — top up **[PSA](../../transaction_inclusion/post_pack_confirmations.md#2-psa--p2c-subscription-account)** first, then Rakurai creates your MCA and assigns `--revenue-name` and `record_authority` (you must hold that keypair) — see [MCA](../../transaction_inclusion/post_pack_confirmations.md#3-mca--share-backrun-profit).
+2. After the epoch ends, run `record-revenue --revenue-kind Mev-share --amount <LAMPORTS>` with the MCA `record_authority` keypair (per validator) — see [post-epoch record and settle](../../transaction_inclusion/post_pack_confirmations.md#34-after-the-epoch).
 3. Confirm with `get-all-accounts` / `get-all-pending-records --revenue-kind Mev-share`.
 4. Run `transfer --revenue-kind Mev-share` for one vault, or `transfer-all --revenue-kind Mev-share` for all pending settlements.
 5. Keep the transaction signatures for reconciliation.

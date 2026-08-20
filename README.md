@@ -35,7 +35,7 @@ Rakurai nodes function like standard Solana validators but include performance e
 | Section                                                               | Description                                                                                                  |
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
 | [Validators](./rakurai_docs/validators/README.md)                     | Setup, operation, upgrades, binary attestation, and Geyser integration for Rakurai validators.               |
-| [Transaction Inclusion](./rakurai_docs/transaction_inclusion/README.md) | Integrate with Rakurai transaction inclusion, bundle support, virtual priority, and post-pack confirmations. |
+| [Transaction Inclusion Network](./rakurai_docs/transaction_inclusion/README.md) | Integrate with Rakurai transaction inclusion network, bundle support, virtual priority, and post-pack confirmations. |
 | [Programs](./rakurai_docs/rakurai_programs/README.md)                 | Documentation for Rakurai on-chain programs and protocol components.                                         |
 
 ## 3. Contacts
