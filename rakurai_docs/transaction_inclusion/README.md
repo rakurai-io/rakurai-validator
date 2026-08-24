@@ -1,8 +1,8 @@
-# TIN - Transaction Inclusion Network
+# TIN — Transaction Inclusion Network
 
 Documentation for searchers, block engines, and partners integrating with Rakurai validators.
 
-**Audience:** Transaction landing services, MEV searchers, and partners sending bundles or consuming post-pack confirmations.
+**Audience:** TIN partners, MEV searchers, and traders sending bundles or consuming post-pack confirmations.
 
 ---
 
