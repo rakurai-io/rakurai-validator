@@ -33,8 +33,8 @@ use {
     },
     solana_signature::Signature,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
-    solana_transaction::TransactionError,
     solana_svm_timings::wallclock_timestamp_nanos,
+    solana_transaction::TransactionError,
     std::{
         collections::{HashMap, VecDeque},
         str::FromStr,
@@ -124,7 +124,7 @@ pub fn jito_tip_accounts_map() -> HashMap<Pubkey, f64> {
 unsafe extern "C" {
     #[allow(improper_ctypes)]
     #[allow(unused)]
-    fn fetch_bundle_tip(transaction: &RuntimeTransactionView) -> u64;
+    fn fetch_bundle_tip(transaction: &RuntimeTransactionView, is_primary: bool) -> u64;
 }
 
 pub struct BundleStorageEntry {
@@ -584,7 +584,7 @@ impl BundleStorage {
                 let tip_amount;
                 #[cfg(feature = "build_validator")]
                 unsafe {
-                    tip_amount = fetch_bundle_tip(transaction_state.transaction())
+                    tip_amount = fetch_bundle_tip(transaction_state.transaction(), is_primary)
                 };
                 #[cfg(not(feature = "build_validator"))]
                 {
@@ -659,10 +659,7 @@ impl BundleStorage {
                 self.transaction_view_state_container
                     .remove_by_id(*container_id);
             }
-            return mark_drop(
-                bundle_id_to_stats,
-                BundleStorageError::DuplicateTransaction,
-            );
+            return mark_drop(bundle_id_to_stats, BundleStorageError::DuplicateTransaction);
         }
 
         #[cfg(feature = "build_validator")]
