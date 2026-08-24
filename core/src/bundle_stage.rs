@@ -20,12 +20,12 @@ use {
             bundle_storage::{BundleStorage, BundleStorageEntry, BundleStorageError},
         },
         gui::{
+            GUI_TXN_BANK_IDX_BUNDLE, GuiCoreMetrics, GuiTxnScheduleInfo,
             metrics::GuiTxnTpuSource,
             slot_txn::{
-                capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
-                GuiTxnEvent,
+                GuiTxnBatchPayload, GuiTxnEvent, capture_gui_txn_tx_metadata,
+                gui_commit_details_for_batch,
             },
-            GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_BUNDLE,
         },
         packet_bundle::VerifiedPacketBundle,
         proxy::block_engine_stage::{BlockBuilderFeeInfo, BlockEngineConfig},
@@ -269,10 +269,16 @@ impl BundleStageLoopMetrics {
         self.process_buffered_bundles_elapsed_us += count;
     }
 
-    fn maybe_report(&mut self, report_interval_ms: u64, gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>) {
+    fn maybe_report(
+        &mut self,
+        report_interval_ms: u64,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) {
         if self.last_report.elapsed().as_millis() >= report_interval_ms as u128 && self.has_data() {
             if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
-                if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleStage(self.clone())) {
+                if let Err(err) =
+                    gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleStage(self.clone()))
+                {
                     warn!("failed to send BundleStage gui metrics: {err}");
                 }
             }
@@ -610,7 +616,10 @@ impl BundleExecutionStats {
 
     pub fn mark_dropped(&mut self, reason: BundleDropReason) {
         // Do not overwrite a terminal state if already set.
-        if matches!(self.outcome, BundleOutcome::Executed | BundleOutcome::Dropped) {
+        if matches!(
+            self.outcome,
+            BundleOutcome::Executed | BundleOutcome::Dropped
+        ) {
             return;
         }
         self.outcome = BundleOutcome::Dropped;
@@ -885,8 +894,10 @@ impl BundleStage {
         let mut bundle_id_to_stats: HashMap<String, BundleExecutionStats> = HashMap::new();
         let mut prev_decision = BufferedPacketsDecision::Hold;
         let mut turn_started = false;
+        let mut is_primary = false;
 
         while !exit.load(Ordering::Relaxed) {
+            is_primary = !is_primary;
             if bundle_storage.unprocessed_bundles_len(true) > 0
                 || bundle_storage.unprocessed_bundles_len(false) > 0
                 || last_metrics_update.elapsed() >= SLOT_BOUNDARY_CHECK_PERIOD
@@ -910,6 +921,7 @@ impl BundleStage {
                         &bundle_lifecycle_dump_enabled,
                         &gui_core_metrics_sender,
                         &gui_txn_event_sender,
+                        is_primary,
                     ));
                 bundle_stage_metrics.increment_process_buffered_bundles_elapsed_us(
                     process_buffered_packets_time_us,
@@ -1072,6 +1084,7 @@ impl BundleStage {
         bundle_lifecycle_dump_enabled: &AtomicBool,
         gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
         gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
+        is_primary: bool,
     ) {
         let (decision, _, _) = decision_maker.make_consume_or_forward_decision();
 
@@ -1114,6 +1127,7 @@ impl BundleStage {
                     bundle_id_to_stats,
                     gui_core_metrics_sender,
                     gui_txn_event_sender,
+                    is_primary,
                 );
             }
             // BufferedPacketsDecision::Forward means the leader is slot is far away.
@@ -1145,6 +1159,7 @@ impl BundleStage {
         bundle_id_to_stats: &mut HashMap<String, BundleExecutionStats>,
         gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
         gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
+        _is_primary: bool,
     ) {
         // Changing this to 1 to avoid locking a larger batch of bundles
         const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
@@ -1295,9 +1310,10 @@ impl BundleStage {
         bundle_id_to_stats: &mut HashMap<String, BundleExecutionStats>,
         gui_core_metrics_sender: &Option<Sender<GuiCoreMetrics>>,
         gui_txn_event_sender: &Option<Sender<GuiTxnEvent>>,
+        is_primary: bool,
     ) {
         // Changing this to 1 to avoid locking a larger batch of bundles
-        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(32).unwrap();
+        const BUNDLE_WINDOW_SIZE: NonZeroUsize = NonZeroUsize::new(10).unwrap();
 
         let mut bundles = VecDeque::with_capacity(BUNDLE_WINDOW_SIZE.get());
 
@@ -1338,7 +1354,9 @@ impl BundleStage {
         // - Any bundle that gets popped must be destoryed
         // - Any bundle that gets locked with the bundle account locker shall be destroyed
         // Fill window for primary fully, then secondary (same logic each time).
-        for is_primary in [true, false] {
+        // for is_primary in [true, false] {
+        let mut num_bundles_processed = 0;
+        loop {
             let mut bundles_to_redump = Vec::new();
             // Always ensure the window is filled with bundles, breaking out when the bundle deque is full or no more bundles are available to pop
             while bundles.len() < BUNDLE_WINDOW_SIZE.get() {
@@ -1459,6 +1477,7 @@ impl BundleStage {
                     consume_worker_metrics,
                     gui_txn_event_sender.as_ref(),
                 );
+                num_bundles_processed += 1;
                 let _ = bundle_account_locker.unlock_bundle(&bundle.transactions, bank);
                 match result {
                     Ok(output) => {
@@ -1486,7 +1505,7 @@ impl BundleStage {
                             &bundle.bundle_id,
                             Err(BundleDropReason::TipError),
                         );
-                        // continue;
+                        continue;
                     }
                     Err(BundleExecutionError::ErrorFiltered) => {
                         finalize_bundle_stats(
@@ -1494,9 +1513,14 @@ impl BundleStage {
                             &bundle.bundle_id,
                             Err(BundleDropReason::ErrorFiltered),
                         );
-                        // continue;
+                        continue;
                     }
                 }
+                if is_primary == false && num_bundles_processed >= 2 {
+                    break;
+                }
+            } else {
+                break;
             };
             consume_worker_metrics.maybe_report_and_reset(false, gui_core_metrics_sender.as_ref());
         }
@@ -1581,9 +1605,9 @@ impl BundleStage {
             SmallVec::from_elem(max_age, initialize_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&initialize_tip_program_transactions, bank);
         let arrival_timestamp_nanos = gui_txn_event_sender
-        .is_some()
-        .then(wallclock_timestamp_nanos)
-        .unwrap_or(0);
+            .is_some()
+            .then(wallclock_timestamp_nanos)
+            .unwrap_or(0);
         let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &initialize_tip_program_transactions,
@@ -1648,9 +1672,9 @@ impl BundleStage {
             SmallVec::from_elem(max_age, crank_tip_program_transactions.len());
         let _ = bundle_account_locker.lock_bundle(&crank_tip_program_transactions, bank);
         let arrival_timestamp_nanos = gui_txn_event_sender
-        .is_some()
-        .then(wallclock_timestamp_nanos)
-        .unwrap_or(0);
+            .is_some()
+            .then(wallclock_timestamp_nanos)
+            .unwrap_or(0);
         let mut output = consumer.process_and_record_aged_transactions(
             bank,
             &crank_tip_program_transactions,
