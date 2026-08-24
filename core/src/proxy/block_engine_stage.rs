@@ -65,12 +65,26 @@ use {
 const CONNECTION_TIMEOUT_S: u64 = 10;
 const CONNECTION_BACKOFF_S: u64 = 5;
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockEngineEntry {
     pub url: String,
     pub uuid: String,
     #[serde(default)]
     pub bundle_rate_limit: BlockEngineBundleRateLimit,
+}
+
+impl Default for BlockEngineEntry {
+    fn default() -> Self {
+        Self {
+            url: String::default(),
+            uuid: String::default(),
+            bundle_rate_limit: BlockEngineBundleRateLimit {
+                max_bundles: 500,
+                period_ms: 1000,
+                max_bundle_burst: 2000,
+            },
+        }
+    }
 }
 
 pub fn parse_block_engine_entry(value: &str) -> Result<BlockEngineEntry, String> {
@@ -1850,6 +1864,7 @@ mod tests {
             None,
             false,
             &mut stats,
+            None,
         );
         assert_eq!(admitted.len(), 5);
         assert_eq!(stats.num_bundles, 5);
@@ -1872,6 +1887,7 @@ mod tests {
             Some(limiter.as_ref()),
             false,
             &mut stats,
+            None,
         );
         assert_eq!(admitted.len(), 1);
         assert_eq!(stats.num_bundles, 1);
@@ -1895,6 +1911,7 @@ mod tests {
             Some(limiter.as_ref()),
             false,
             &mut stats,
+            None,
         );
         assert!(admitted.is_empty());
         assert_eq!(stats.num_bundles, 0);
