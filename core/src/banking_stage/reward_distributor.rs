@@ -738,18 +738,15 @@ impl RewardDistributor {
             .feature_set
             .is_active(&agave_feature_set::static_instruction_limit::ID);
 
-        let serialized_transaction = {
-            let transaction = VersionedTransaction::from(tx);
-            bincode::serialize(&transaction).unwrap()
-        };
+        let serialized_transaction = bincode::serialize(&VersionedTransaction::from(tx)).ok()?;
         let sanitize_config = solana_runtime_transaction::sanitize_config::sanitize_config(
             enable_static_instruction_limit,
         );
         let transaction = SanitizedTransactionView::try_new_sanitized(
-            Arc::clone(&Arc::new(serialized_transaction)),
+            Arc::new(serialized_transaction),
             &sanitize_config,
         )
-        .unwrap();
+        .ok()?;
 
         let static_runtime_transaction =
             RuntimeTransaction::<SanitizedTransactionView<SharedBytes>>::try_new(
@@ -759,18 +756,12 @@ impl RewardDistributor {
             )
             .ok()?;
 
-        let dynamic_runtime_transaction =
-            RuntimeTransaction::<ResolvedTransactionView<SharedBytes>>::try_new(
-                static_runtime_transaction,
-                None,
-                &ReservedAccountKeys::empty_key_set(),
-            );
-
-        if dynamic_runtime_transaction.is_ok() {
-            Some(dynamic_runtime_transaction.unwrap())
-        } else {
-            None
-        }
+        RuntimeTransaction::<ResolvedTransactionView<SharedBytes>>::try_new(
+            static_runtime_transaction,
+            None,
+            &ReservedAccountKeys::empty_key_set(),
+        )
+        .ok()
     }
 
     fn check_txn_status(&mut self) {
@@ -1496,11 +1487,11 @@ impl RewardDistributor {
                     sent += 1;
                 }
                 None => {
-                    warn!(
+                    self.warning_log(format!(
                         "reward_distributor block_reward_conversion_p2c_escrow failed to build txn \
                          kind={share_kind} uuid={uuid:?} epoch={} pda={p2c_sub_pda}",
                         entry.epoch
-                    );
+                    ));
                 }
             }
         }
@@ -1725,11 +1716,11 @@ impl RewardDistributor {
                     sent += 1;
                 }
                 None => {
-                    warn!(
+                    self.warning_log(format!(
                         "reward_distributor block_reward_conversion failed to build txn \
                          kind={share_kind} uuid={uuid:?} epoch={} pda={revenue_share_pubkey}",
                         entry.epoch
-                    );
+                    ));
                 }
             }
         }
@@ -1862,11 +1853,11 @@ impl RewardDistributor {
                     sent += 1;
                 }
                 None => {
-                    warn!(
+                    self.warning_log(format!(
                         "reward_distributor block_reward_conversion_v1 failed to build txn \
                          kind={share_kind} uuid={uuid:?} epoch={} pda={revenue_share_pubkey}",
                         entry.epoch
-                    );
+                    ));
                 }
             }
         }
@@ -2130,6 +2121,12 @@ impl RewardDistributor {
             return false;
         }
         let Some(runtime_tx) = self.create_runtime_transaction(bank, instructions) else {
+            self.warning_log(format!(
+                "reward_distributor dispatch_rakurai_op failed to build txn \
+                 kind={kind} instructions={:?} extra={}",
+                instructions.len(),
+                extra
+            ));
             return false;
         };
         if track_rewards {
