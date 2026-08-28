@@ -92,7 +92,7 @@ use {
     },
     solana_sdk_ids::system_program,
     solana_signature::Signature,
-    solana_signer::Signer,
+    // solana_signer::Signer,
     solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::{svm_message::SVMStaticMessage, svm_transaction::SVMTransaction},
     solana_transaction::{Transaction, sanitized::MessageHash, versioned::VersionedTransaction},
@@ -924,29 +924,29 @@ impl RewardDistributor {
 
     fn send_transaction(
         &self,
-        txn_kind: String,
-        bank: &Bank,
+        _txn_kind: String,
+        _bank: &Bank,
         runtime_tx: RuntimeTransaction<ResolvedTransactionView<SharedBytes>>,
     ) {
-        let simulation_result = bank.simulate_transaction_unchecked(&runtime_tx, false);
+        // let simulation_result = bank.simulate_transaction_unchecked(&runtime_tx, false);
 
-        if let Err(err) = simulation_result.result {
-            let txn_info = format!(
-                "signature={},txn_info={:?}",
-                runtime_tx.signature(),
-                txn_kind
-            );
-            self.warning_log(format!(
-                "reward_distributor epoch={},slot={},simulation=false,error={:?},txn={:?},vote_acc={},identity={}",
-                bank.epoch(),
-                bank.slot(),
-                err,
-                txn_info,
-                self.distribution_config.vote_account.to_string(),
-                self.cluster_info.keypair().pubkey().to_string(),
-            ));
-            return;
-        }
+        // if let Err(err) = simulation_result.result {
+        //     let txn_info = format!(
+        //         "signature={},txn_info={:?}",
+        //         runtime_tx.signature(),
+        //         txn_kind
+        //     );
+        //     self.warning_log(format!(
+        //         "reward_distributor epoch={},slot={},simulation=false,error={:?},txn={:?},vote_acc={},identity={}",
+        //         bank.epoch(),
+        //         bank.slot(),
+        //         err,
+        //         txn_info,
+        //         self.distribution_config.vote_account.to_string(),
+        //         self.cluster_info.keypair().pubkey().to_string(),
+        //     ));
+        //     return;
+        // }
         let transaction_state = TransactionState::new_with_ingress(
             runtime_tx,
             MaxAge::MAX,
