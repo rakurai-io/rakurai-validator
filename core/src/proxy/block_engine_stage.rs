@@ -35,7 +35,7 @@ use {
     solana_keypair::Keypair,
     solana_perf::packet::{BytesPacket, PacketBatch},
     solana_pubkey::Pubkey,
-    solana_runtime::{bank::Bank, bank_forks::BankForks},
+    solana_runtime::{bank::Bank, bank_forks::SharableBanks},
     solana_signer::Signer,
     std::{
         collections::{HashMap, HashSet, hash_map::Entry},
@@ -44,7 +44,7 @@ use {
         ops::AddAssign,
         str::FromStr,
         sync::{
-            Arc, Mutex, RwLock,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicU8, Ordering},
         },
         thread::{self, Builder, JoinHandle},
@@ -294,7 +294,7 @@ impl BlockEngineStage {
         block_engine_config: Arc<ArcSwap<BlockEngineConfig>>,
         secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
         blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
-        bank_forks: Arc<RwLock<BankForks>>,
+        sharable_banks: SharableBanks,
         // Channel that bundles get piped through.
         bundle_tx: Sender<Vec<PacketBundle>>,
         // The keypair stored here is used to sign auth challenges.
@@ -345,7 +345,7 @@ impl BlockEngineStage {
             tasks.spawn(Self::manage_secondary_urls(
                 secondary_entries.clone(),
                 blocklisted_uuids.clone(),
-                bank_forks,
+                sharable_banks.clone(),
                 cluster_info.clone(),
                 bundle_tx.clone(),
                 packet_tx.clone(),
@@ -395,7 +395,7 @@ impl BlockEngineStage {
     async fn manage_secondary_urls(
         secondary_entries: Arc<ArcSwap<Vec<BlockEngineEntry>>>,
         blocklisted_uuids: Arc<ArcSwap<Vec<String>>>,
-        bank_forks: Arc<RwLock<BankForks>>,
+        sharable_banks: SharableBanks,
         cluster_info: Arc<ClusterInfo>,
         bundle_tx: Sender<Vec<PacketBundle>>,
         packet_tx: Sender<PacketBatch>,
@@ -420,12 +420,11 @@ impl BlockEngineStage {
                 _ = check_interval.tick() => {
                     let admin_entries = secondary_entries.load().as_ref().clone();
                     let blocklist = blocklisted_uuids.load().as_ref().clone();
-                    let onchain_entries = bank_forks.read().ok().and_then(|bank_forks_guard| {
+                    let onchain_entries =
                         load_secondary_block_engine_entries_from_bank(
-                            &bank_forks_guard.working_bank(),
+                            &sharable_banks.working(),
                             &vote_account,
-                        )
-                    });
+                        );
                     let new_entries = merged_secondary_block_engine_entries(
                         &admin_entries,
                         onchain_entries,

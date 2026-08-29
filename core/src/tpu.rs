@@ -413,7 +413,7 @@ impl Tpu {
             block_engine_config.clone(),
             secondary_block_engine_entries,
             block_engine_uuid_blocklist,
-            bank_forks.clone(),
+            bank_forks.read().unwrap().sharable_banks(),
             unverified_bundle_sender,
             cluster_info.clone(),
             sigverify_stage_sender.clone(),

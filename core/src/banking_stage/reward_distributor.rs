@@ -81,7 +81,7 @@ use {
     solana_pubkey::Pubkey,
     solana_runtime::{
         bank::Bank,
-        bank_forks::BankForks,
+        bank_forks::{BankForks, SharableBanks},
         leader_schedule_utils::{
             first_of_consecutive_leader_slots, last_of_consecutive_leader_slots,
         },
@@ -92,7 +92,6 @@ use {
     },
     solana_sdk_ids::system_program,
     solana_signature::Signature,
-    // solana_signer::Signer,
     solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::{svm_message::SVMStaticMessage, svm_transaction::SVMTransaction},
     solana_transaction::{Transaction, sanitized::MessageHash, versioned::VersionedTransaction},
@@ -280,6 +279,7 @@ pub struct RewardDistributor {
     cluster_info: Arc<ClusterInfo>,
     blockstore: Arc<Blockstore>,
     bank_forks: Arc<RwLock<BankForks>>,
+    sharable_banks: SharableBanks,
     rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus,
     distribution_config: RewardDistributionConfig,
     shared_decision: (Arc<RwLock<DecisionState>>, Arc<AtomicBool>),
@@ -316,7 +316,8 @@ impl RewardDistributor {
         Self {
             cluster_info,
             blockstore,
-            bank_forks,
+            bank_forks: bank_forks.clone(),
+            sharable_banks: bank_forks.read().unwrap().sharable_banks(),
             rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus::NotDeducted,
             distribution_config,
             shared_decision,
@@ -765,40 +766,37 @@ impl RewardDistributor {
     }
 
     fn check_txn_status(&mut self) {
-        let bank_forks_r = self.bank_forks.read();
-        if bank_forks_r.is_ok() {
-            let working_bank = bank_forks_r.unwrap().working_bank();
-            let current_slot = working_bank.slot();
+        let working_bank = self.sharable_banks.working();
+        let current_slot = working_bank.slot();
 
-            self.txns_history.retain(|_sig, history| {
-                let is_root = self.blockstore.is_root(history.send_slot);
-                if !is_root {
-                    return true;
-                }
+        self.txns_history.retain(|_sig, history| {
+            let is_root = self.blockstore.is_root(history.send_slot);
+            if !is_root {
+                return true;
+            }
 
-                let within_range = current_slot <= history.send_slot + 150;
-                if !within_range {
-                    return true;
-                }
-                let stats_cache_r = working_bank.status_cache.read();
-                let status = if stats_cache_r.is_ok() {
-                    stats_cache_r.unwrap().get_status(
-                        &history.message_hash,
-                        &history.blockhash,
-                        &working_bank.ancestors,
-                    )
-                } else {
-                    None
-                };
+            let within_range = current_slot <= history.send_slot + 150;
+            if !within_range {
+                return true;
+            }
+            let stats_cache_r = working_bank.status_cache.read();
+            let status = if stats_cache_r.is_ok() {
+                stats_cache_r.unwrap().get_status(
+                    &history.message_hash,
+                    &history.blockhash,
+                    &working_bank.ancestors,
+                )
+            } else {
+                None
+            };
 
-                let has_status = status.is_some();
-                if has_status {
-                    return false;
-                } else {
-                    return true;
-                }
-            });
-        }
+            let has_status = status.is_some();
+            if has_status {
+                return false;
+            } else {
+                return true;
+            }
+        });
     }
 
     pub fn change_tip_receiver_instruction(
@@ -2205,7 +2203,7 @@ impl RewardDistributor {
             if decision != prev_decision {
                 match &decision {
                     BufferedPacketsDecision::Consume(bank_start) => {
-                        let root_bank = self.bank_forks.read().unwrap().root_bank();
+                        let root_bank = self.sharable_banks.root();
                         if let Ok(mut shared_bank_update) = self.shared_bank_update.write() {
                             *shared_bank_update = LatestBankPair::new(
                                 root_bank.clone(),
@@ -2215,8 +2213,8 @@ impl RewardDistributor {
                         previous_slot = bank_start.working_bank.slot();
                     }
                     _ => {
-                        let root_bank = self.bank_forks.read().unwrap().root_bank();
-                        let working_bank = self.bank_forks.read().unwrap().working_bank();
+                        let root_bank = self.sharable_banks.root();
+                        let working_bank = self.sharable_banks.working();
                         if let Ok(mut shared_bank_update) = self.shared_bank_update.write() {
                             *shared_bank_update =
                                 LatestBankPair::new(root_bank.clone(), working_bank.clone());
@@ -2225,15 +2223,15 @@ impl RewardDistributor {
                     }
                 }
             } else if Self::is_slot_changed(&slot, &mut previous_slot) {
-                if let Ok(bank_forks_read_lock) = self.bank_forks.read() {
-                    let root_bank = bank_forks_read_lock.root_bank();
-                    let working_bank = bank_forks_read_lock.working_bank();
-                    if let Ok(mut shared_bank_update) = self.shared_bank_update.write() {
-                        *shared_bank_update =
-                            LatestBankPair::new(root_bank.clone(), working_bank.clone());
-                    }
-                    previous_slot = working_bank.slot();
+                // if let Ok(bank_forks_read_lock) = self.bank_forks.read() {
+                let root_bank = self.sharable_banks.root();
+                let working_bank = self.sharable_banks.working();
+                if let Ok(mut shared_bank_update) = self.shared_bank_update.write() {
+                    *shared_bank_update =
+                        LatestBankPair::new(root_bank.clone(), working_bank.clone());
                 }
+                previous_slot = working_bank.slot();
+                // }
             }
 
             // Update the switching point flag when in forwarding because it only changes during forwarding decision
@@ -2313,18 +2311,18 @@ impl RewardDistributor {
                 BufferedPacketsDecision::ForwardAndHold => {
                     self.read_rewards_and_check_txn_history(&mut slot_rewards, &mut buffered_slots);
 
-                    let bank_forks_r = self.bank_forks.read();
-                    if bank_forks_r.is_ok() {
-                        let current_slot = bank_forks_r.unwrap().working_bank().slot();
-                        self.txns_history.retain(|_, history| {
-                            if current_slot > history.send_slot + 150 {
-                                self.accumulated_reward += history.rewards;
-                                false
-                            } else {
-                                true
-                            }
-                        });
-                    }
+                    // let bank_forks_r = self.bank_forks.read();
+                    // if bank_forks_r.is_ok() {
+                    let current_slot = self.sharable_banks.working().slot();
+                    self.txns_history.retain(|_, history| {
+                        if current_slot > history.send_slot + 150 {
+                            self.accumulated_reward += history.rewards;
+                            false
+                        } else {
+                            true
+                        }
+                    });
+                    // }
                     turn_started = false;
                 }
 
