@@ -689,3 +689,4 @@ solana-reward-info = { path = "solana-sdk/reward-info" }
 solana-time-utils = { path = "solana-sdk/time-utils" }
 solana-transaction = { path = "solana-sdk/transaction" }
 parking_lot_core = { path = "parking_lot/core" }
+dashmap = { path = "dashmap" } 
