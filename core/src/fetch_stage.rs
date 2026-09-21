@@ -2,7 +2,7 @@
 
 use {
     crate::result::{Error, Result},
-    crossbeam_channel::{RecvTimeoutError, TrySendError, unbounded},
+    crossbeam_channel::{Sender, RecvTimeoutError, TrySendError, unbounded},
     solana_clock::{DEFAULT_TICKS_PER_SLOT, HOLD_TRANSACTIONS_SLOT_OFFSET},
     solana_packet::PacketFlags,
     solana_perf::{
@@ -12,8 +12,10 @@ use {
     solana_poh::poh_recorder::PohRecorder,
     solana_streamer::{
         evicting_sender::EvictingSender,
+        quic::{GuiStreamerMetrics, GuiStreamerReceiveStats},
         streamer::{self, PacketBatchReceiver, PacketBatchSender, StreamerReceiveStats},
     },
+    crate::gui::GuiCoreMetrics,
     std::{
         net::UdpSocket,
         sync::{
@@ -47,12 +49,26 @@ impl ForwardingStats {
         }
     }
 
-    fn maybe_report_and_reset(&mut self) {
-        if self.last_report.elapsed() < Self::REPORT_INTERVAL {
+    fn maybe_report_and_reset(
+        &mut self,
+        report_interval: Duration,
+        gui_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) {
+        if self.last_report.elapsed() < report_interval {
             return;
         }
 
         if !self.is_empty() {
+            if let Some(gui_metrics_sender) = gui_metrics_sender {
+                if let Err(err) = gui_metrics_sender.try_send(GuiCoreMetrics::FetchStageForwardDropped(self.num_packets_dropped as u64)) {
+                    warn!("failed to send FetchStageForwardDropped gui metrics: {err}");
+                }
+            }
+            if let Some(gui_metrics_sender) = gui_metrics_sender {
+                if let Err(err) = gui_metrics_sender.try_send(GuiCoreMetrics::FetchStageForwardDiscard(self.num_packets_discarded as u64)) {
+                    warn!("failed to send FetchStageForwardDiscard gui metrics: {err}");
+                }
+            }
             datapoint_info!(
                 "fetch_stage-forwards",
                 ("num_packets_sent", self.num_packets_sent, i64),
@@ -79,6 +95,8 @@ impl FetchStage {
         exit: Arc<AtomicBool>,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> (Self, PacketBatchReceiver, PacketBatchReceiver) {
         let (sender, receiver) = unbounded();
         let (vote_sender, vote_receiver) =
@@ -93,6 +111,8 @@ impl FetchStage {
                 forward_receiver,
                 poh_recorder,
                 coalesce,
+                gui_core_metrics_sender,
+                gui_streamer_metrics_sender,
             ),
             receiver,
             vote_receiver,
@@ -107,6 +127,8 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> Self {
         let tpu_vote_sockets = tpu_vote_sockets.into_iter().map(Arc::new).collect();
         Self::new_multi_socket(
@@ -117,6 +139,8 @@ impl FetchStage {
             forward_receiver,
             poh_recorder,
             coalesce,
+            gui_core_metrics_sender,
+            gui_streamer_metrics_sender,
         )
     }
 
@@ -176,10 +200,22 @@ impl FetchStage {
         forward_receiver: PacketBatchReceiver,
         poh_recorder: &Arc<RwLock<PohRecorder>>,
         coalesce: Option<Duration>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_streamer_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
     ) -> Self {
         let recycler: PacketBatchRecycler = Recycler::new();
 
         let tpu_vote_stats = Arc::new(StreamerReceiveStats::new("tpu_vote_receiver"));
+        let tpu_vote_stats_report_interval_ms = if gui_streamer_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
+        let forwarding_stats_report_interval = if gui_streamer_metrics_sender.is_some() {
+            Duration::from_millis(50)
+        } else {
+            ForwardingStats::REPORT_INTERVAL
+        };
         let tpu_vote_threads: Vec<_> = tpu_vote_sockets
             .into_iter()
             .enumerate()
@@ -221,7 +257,7 @@ impl FetchStage {
                             _ => error!("{e:?}"),
                         }
                     }
-                    stats.maybe_report_and_reset();
+                    stats.maybe_report_and_reset(forwarding_stats_report_interval, gui_core_metrics_sender.as_ref());
                 }
             })
             .unwrap();
@@ -230,8 +266,20 @@ impl FetchStage {
             .name("solFetchStgMetr".to_string())
             .spawn(move || {
                 loop {
-                    sleep(Duration::from_secs(1));
+                    sleep(Duration::from_millis(tpu_vote_stats_report_interval_ms));
 
+                    if let Some(gui_metrics_sender) = &gui_streamer_metrics_sender {
+                        if let Err(err) = gui_metrics_sender.try_send(GuiStreamerMetrics::Udp(GuiStreamerReceiveStats {
+                            name: tpu_vote_stats.name,
+                            packets_count: tpu_vote_stats.packets_count.load(Ordering::Relaxed),
+                            packet_batches_count: tpu_vote_stats.packet_batches_count.load(Ordering::Relaxed),
+                            full_packet_batches_count: tpu_vote_stats.full_packet_batches_count.load(Ordering::Relaxed),
+                            max_channel_len: tpu_vote_stats.max_channel_len.load(Ordering::Relaxed),
+                            num_packets_dropped: tpu_vote_stats.num_packets_dropped.load(Ordering::Relaxed),
+                        })) {
+                            warn!("failed to send Udp gui metrics: {err}");
+                        }
+                    }
                     tpu_vote_stats.report();
 
                     if exit.load(Ordering::Relaxed) {

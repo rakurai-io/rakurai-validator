@@ -41,13 +41,38 @@
 //!
 use std::{fmt, time::SystemTime};
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum FieldValue {
+    I64(i64),
+    F64(f64),
+    Bool(bool),
+    Str(String),
+}
+
+impl FieldValue {
+    pub(crate) fn len(&self) -> usize {
+        self.to_string().len()
+    }
+}
+
+impl fmt::Display for FieldValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FieldValue::I64(v) => write!(f, "{v}i"),
+            FieldValue::F64(v) => write!(f, "{v}"),
+            FieldValue::Bool(v) => write!(f, "{v}"),
+            FieldValue::Str(v) => write!(f, "\"{}\"", v.replace('"', "\\\"")),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct DataPoint {
     pub name: &'static str,
     pub timestamp: SystemTime,
     /// tags are eligible for group-by operations.
     pub tags: Vec<(&'static str, String)>,
-    pub fields: Vec<(&'static str, String)>,
+    pub fields: Vec<(&'static str, FieldValue)>,
 }
 
 impl DataPoint {
@@ -66,23 +91,22 @@ impl DataPoint {
     }
 
     pub fn add_field_str(&mut self, name: &'static str, value: &str) -> &mut Self {
-        self.fields
-            .push((name, format!("\"{}\"", value.replace('\"', "\\\""))));
+        self.fields.push((name, FieldValue::Str(value.to_string())));
         self
     }
 
     pub fn add_field_bool(&mut self, name: &'static str, value: bool) -> &mut Self {
-        self.fields.push((name, value.to_string()));
+        self.fields.push((name, FieldValue::Bool(value)));
         self
     }
 
     pub fn add_field_i64(&mut self, name: &'static str, value: i64) -> &mut Self {
-        self.fields.push((name, value.to_string() + "i"));
+        self.fields.push((name, FieldValue::I64(value)));
         self
     }
 
     pub fn add_field_f64(&mut self, name: &'static str, value: f64) -> &mut Self {
-        self.fields.push((name, value.to_string()));
+        self.fields.push((name, FieldValue::F64(value)));
         self
     }
 }
@@ -205,6 +229,8 @@ macro_rules! datapoint_trace {
 
 #[cfg(test)]
 mod test {
+    use super::FieldValue;
+
     #[test]
     fn test_datapoint() {
         datapoint_debug!("name", ("field name", "test", String));
@@ -242,13 +268,13 @@ mod test {
         );
         assert_eq!(point.name, "name");
         assert_eq!(point.tags.len(), 0);
-        assert_eq!(point.fields[0], ("i64", "1i".to_string()));
+        assert_eq!(point.fields[0], ("i64", FieldValue::I64(1)));
         assert_eq!(
             point.fields[1],
-            ("String", "\"string space string\"".to_string())
+            ("String", FieldValue::Str("string space string".to_string()))
         );
-        assert_eq!(point.fields[2], ("f64", "12.34".to_string()));
-        assert_eq!(point.fields[3], ("bool", "true".to_string()));
+        assert_eq!(point.fields[2], ("f64", FieldValue::F64(12.34)));
+        assert_eq!(point.fields[3], ("bool", FieldValue::Bool(true)));
     }
 
     #[test]
@@ -277,13 +303,16 @@ mod test {
         );
         assert_eq!(point.name, "name");
         assert_eq!(point.tags.len(), 0);
-        assert_eq!(point.fields[0], ("some_i64", "1i".to_string()));
+        assert_eq!(point.fields[0], ("some_i64", FieldValue::I64(1)));
         assert_eq!(
             point.fields[1],
-            ("some_String", "\"string space string\"".to_string())
+            (
+                "some_String",
+                FieldValue::Str("string space string".to_string())
+            )
         );
-        assert_eq!(point.fields[2], ("some_f64", "12.34".to_string()));
-        assert_eq!(point.fields[3], ("some_bool", "true".to_string()));
+        assert_eq!(point.fields[2], ("some_f64", FieldValue::F64(12.34)));
+        assert_eq!(point.fields[3], ("some_bool", FieldValue::Bool(true)));
         assert_eq!(point.fields.len(), 4);
     }
 
@@ -340,13 +369,13 @@ mod test {
             ("bool", true, bool)
         );
         assert_eq!(point.name, "name");
-        assert_eq!(point.fields[0], ("i64", "1i".to_string()));
+        assert_eq!(point.fields[0], ("i64", FieldValue::I64(1)));
         assert_eq!(
             point.fields[1],
-            ("String", "\"string space string\"".to_string())
+            ("String", FieldValue::Str("string space string".to_string()))
         );
-        assert_eq!(point.fields[2], ("f64", "12.34".to_string()));
-        assert_eq!(point.fields[3], ("bool", "true".to_string()));
+        assert_eq!(point.fields[2], ("f64", FieldValue::F64(12.34)));
+        assert_eq!(point.fields[3], ("bool", FieldValue::Bool(true)));
         assert_eq!(point.tags[0], ("tag1", "tag-value-1".to_string()));
         assert_eq!(point.tags[1], ("tag2", "tag-value-2".to_string()));
         assert_eq!(point.tags[2], ("tag3", "tag-value-3".to_string()));

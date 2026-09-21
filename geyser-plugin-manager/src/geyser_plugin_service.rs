@@ -8,6 +8,7 @@ use {
         geyser_plugin_manager::{GeyserPluginManager, GeyserPluginManagerRequest},
         slot_status_notifier::SlotStatusNotifierImpl,
         slot_status_observer::SlotStatusObserver,
+        tick_notifier::TickNotifierImpl,
         transaction_notifier::TransactionNotifierImpl,
     },
     arc_swap::ArcSwap,
@@ -48,6 +49,7 @@ pub struct GeyserPluginService {
     entry_notifier: Option<EntryNotifierArc>,
     block_metadata_notifier: Option<BlockMetadataNotifierArc>,
     slot_status_notifier: Option<SlotStatusNotifier>,
+    tick_notifier: Option<Arc<TickNotifierImpl>>,
 }
 
 impl GeyserPluginService {
@@ -150,6 +152,13 @@ impl GeyserPluginService {
                 None
             };
 
+        let tick_notifier: Option<Arc<TickNotifierImpl>> =
+            if entry_or_block_footer_notifications_enabled {
+                Some(Arc::new(TickNotifierImpl::new(plugin_manager.clone())))
+            } else {
+                None
+            };
+
         let (slot_status_observer, block_metadata_notifier, slot_status_notifier): (
             Option<SlotStatusObserver>,
             Option<BlockMetadataNotifierArc>,
@@ -191,6 +200,7 @@ impl GeyserPluginService {
             entry_notifier,
             block_metadata_notifier,
             slot_status_notifier,
+            tick_notifier,
         })
     }
 
@@ -234,6 +244,10 @@ impl GeyserPluginService {
 
     pub fn get_slot_status_notifier(&self) -> Option<SlotStatusNotifier> {
         self.slot_status_notifier.clone()
+    }
+
+    pub fn get_tick_notifier(&self) -> Option<Arc<TickNotifierImpl>> {
+        self.tick_notifier.clone()
     }
 
     pub fn join(self) -> thread::Result<()> {

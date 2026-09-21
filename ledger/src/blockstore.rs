@@ -346,6 +346,7 @@ impl SwitchBlockLock {
 }
 
 // ledger window
+#[repr(C)]
 pub struct Blockstore {
     ledger_path: PathBuf,
     db: Arc<Rocks>,

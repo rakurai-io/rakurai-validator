@@ -29,6 +29,7 @@ const MAX_UNFINALIZED_SLOTS: u64 = 128;
 type UnfinalizedPrioritizationFees = BTreeMap<Slot, HashMap<BankId, PrioritizationFee>>;
 
 #[derive(Debug, Default)]
+#[repr(C)]
 struct PrioritizationFeeCacheMetrics {
     // Count of transactions that successfully updated each slot's prioritization fee cache.
     successful_transaction_update_count: AtomicU64,
@@ -136,6 +137,7 @@ impl PrioritizationFeeCacheMetrics {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 enum CacheServiceUpdate {
     TransactionUpdate {
         slot: Slot,
@@ -155,6 +157,7 @@ enum CacheServiceUpdate {
 /// A separate internal thread `service_thread` handles additional tasks when a bank is frozen,
 /// and collecting stats and reporting metrics.
 #[derive(Debug)]
+#[repr(C)]
 pub struct PrioritizationFeeCache {
     cache: Arc<RwLock<BTreeMap<Slot, PrioritizationFee>>>,
     service_thread: Option<JoinHandle<()>>,

@@ -1,6 +1,7 @@
 svm/tests/example-programs/*/Cargo.lock
 farf/
 target/
+build*
 /solana-release/
 /solana-release.tar.bz2
 /solana-metrics/
@@ -15,7 +16,10 @@ dist/
 /test-ledger/
 
 **/*.rs.bk
-.cargo
+.cargo/*
+!.cargo/config.toml
+# Local cargo home / offline cache (never commit)
+.cargo-cache/
 
 /config/
 
@@ -49,3 +53,4 @@ log-*/
 **/cargo-*-bpf-child-script-*.sh
 
 .env
+.cursor

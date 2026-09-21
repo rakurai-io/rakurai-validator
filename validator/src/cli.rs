@@ -22,6 +22,7 @@ use {
         },
     },
     solana_clock::Slot,
+    solana_core::banking_trace::BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT,
     solana_epoch_schedule::MINIMUM_SLOTS_PER_EPOCH,
     solana_faucet::faucet::{self, FAUCET_PORT},
     solana_gossip::cluster_info::DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS,
@@ -90,7 +91,6 @@ pub fn app<'a>(version: &'a str, default_args: &'a DefaultArgs) -> App<'a, 'a> {
         .subcommand(commands::shred::shred_retransmit_receiver_command(
             default_args,
         ));
-
     commands::run::add_args(app, default_args)
         .args(&thread_args(&default_args.thread_args))
         .args(&get_deprecated_arguments())
@@ -175,14 +175,6 @@ fn deprecated_arguments() -> Vec<DeprecatedArg> {
             )
             .conflicts_with("accounts_db_write_cache_limit"),
         replaced_by: "accounts-db-write-cache-limit",
-    );
-    add_arg!(
-        // deprecated in v4.3.0
-        Arg::with_name("disable_banking_trace")
-            .long("disable-banking-trace")
-            .conflicts_with("banking_trace_dir_byte_limit")
-            .takes_value(false)
-            .help("Disables the banking trace. No-op, banking trace is disabled by default."),
     );
     add_arg!(
         // deprecated in v4.0.0
@@ -393,7 +385,7 @@ impl DefaultArgs {
             tpu_max_streams_per_ms: DEFAULT_MAX_STREAMS_PER_MS.to_string(),
             num_quic_endpoints: DEFAULT_QUIC_ENDPOINTS.to_string(),
             num_votor_endpoints: DEFAULT_NUM_VOTOR_QUIC_ENDPOINTS.to_string(),
-            banking_trace_dir_byte_limit: 0.to_string(),
+            banking_trace_dir_byte_limit: BANKING_TRACE_DIR_DEFAULT_BYTE_LIMIT.to_string(),
             block_production_pacing_fill_time_millis: BankingStage::default_fill_time_millis()
                 .to_string(),
             thread_args: DefaultThreadArgs::default(),
@@ -964,6 +956,23 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
         )
         .args(&pub_sub_config::args(/*test_validator:*/ true))
         .arg(commands::bam::argument())
+        .arg(
+            Arg::with_name("block_engine_url")
+                .long("block-engine-url")
+                .help("Block engine url.  Set to empty string to disable block engine connection.")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("secondary_block_engines_urls")
+                .long("secondary-block-engines-urls")
+                .value_name("URL,UUID")
+                .help(
+                    "Specify extra block engine entries to receive bundles from. \
+                    Each value must be url,uuid. May be specified multiple times.",
+                )
+                .takes_value(true)
+                .multiple(true),
+        )
 }
 
 pub struct DefaultTestArgs {

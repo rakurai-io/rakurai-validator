@@ -34,6 +34,7 @@ pub(crate) const MAX_DUPLICATE_SHREDS: DuplicateShredIndex = 512;
     )
 )]
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, SchemaWrite, SchemaRead)]
+#[repr(C)]
 pub struct DuplicateShred {
     pub(crate) from: Pubkey,
     pub(crate) wallclock: u64,

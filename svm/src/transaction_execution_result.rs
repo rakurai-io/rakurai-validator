@@ -37,6 +37,8 @@ pub struct TransactionExecutionDetails {
     /// deltas related to total account data size changes for this transaction.
     /// NOTE: set to None IFF `status` is not `Ok`.
     pub accounts_deltas: Option<AccountsDeltas>,
+    /// Tip-account balance increase caused by this transaction (raw, before commission).
+    pub tips: u64,
 }
 
 impl TransactionExecutionDetails {

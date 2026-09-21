@@ -104,7 +104,7 @@ impl ProgressTracker {
 
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset());
+                .for_each(|metrics| metrics.maybe_report_and_reset(false, None));
 
             self.wait_for_next_progress_boundary();
         }

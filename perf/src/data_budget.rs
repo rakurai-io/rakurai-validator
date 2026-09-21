@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 #[derive(Default)]
+#[repr(C)]
 pub struct DataBudget {
     // Amount of bytes we have in the budget to send.
     bytes: AtomicUsize,

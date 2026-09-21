@@ -1012,11 +1012,13 @@ impl ReplayStage {
                     &mut latest_validator_votes_for_frozen_banks,
                     &mut duplicate_slots_to_repair,
                     &mut purge_repair_slot_counter,
+                    &poh_recorder,
                     (!migration_status.is_alpenglow_enabled()).then_some(&mut tbft_structs),
                     &my_pubkey,
                     &vote_account,
                     &mut replay_timing,
                     &footer_certs_sender,
+                    &leader_schedule_cache,
                 );
                 let did_complete_bank = !new_frozen_slots.is_empty();
                 replay_active_banks_time.stop();
@@ -3036,6 +3038,19 @@ impl ReplayStage {
         replay_stats: &RwLock<ReplaySlotStats>,
         replay_progress: &RwLock<ConfirmationProgress>,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        tick_notifier: Option<
+            Arc<
+                dyn Fn(
+                        solana_clock::Slot,
+                        u64,
+                        &solana_entry::poh::PohEntry,
+                        Option<&solana_pubkey::Pubkey>,
+                        u32,
+                    ) + Send
+                    + Sync,
+            >,
+        >,
+        leader_schedule_cache: &LeaderScheduleCache,
     ) -> result::Result<usize, BlockstoreProcessorError> {
         let mut w_replay_stats = replay_stats.write().unwrap();
         let mut w_replay_progress = replay_progress.write().unwrap();
@@ -3059,6 +3074,8 @@ impl ReplayStage {
             Some(finalization_cert_sender),
             false,
             process_active_banks_context.migration_status.as_ref(),
+            tick_notifier,
+            Some(leader_schedule_cache),
         )?;
         let tx_count_after = w_replay_progress.num_txs;
         let tx_count = tx_count_after - tx_count_before;
@@ -3706,6 +3723,8 @@ impl ReplayStage {
         process_active_banks_context: &ProcessActiveBanksContext,
         bank_replay_result_tracker: BankReplayResultTracker,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> (ReplaySlotFromBlockstore, Option<u64>) {
         let BankReplayResultTracker {
             mut replay_result,
@@ -3752,6 +3771,13 @@ impl ReplayStage {
             }
         }
 
+        // Performance optimization: Clone the tick_notifier Arc without holding the lock.
+        // See comment in replay_active_banks_concurrently for details.
+        let tick_notifier = {
+            let poh_recorder_guard = poh_recorder.read().unwrap();
+            poh_recorder_guard.tick_notifier()
+        };
+
         let mut replay_blockstore_time = Measure::start("replay_blockstore_into_bank");
         let blockstore_result = Self::replay_blockstore_into_bank(
             my_shred_version,
@@ -3760,6 +3786,8 @@ impl ReplayStage {
             &replay_stats,
             &replay_progress,
             finalization_cert_sender,
+            tick_notifier,
+            leader_schedule_cache,
         );
         replay_blockstore_time.stop();
         replay_result.replay_result = Some(blockstore_result);
@@ -3778,6 +3806,8 @@ impl ReplayStage {
         bank_replay_result_trackers: Vec<BankReplayResultTracker>,
         replay_timing: &mut ReplayLoopTiming,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        poh_recorder: &RwLock<PohRecorder>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> Vec<ReplaySlotFromBlockstore> {
         match &process_active_banks_context.replay_mode {
             // Skip the overhead of the threadpool if there is only one bank to play
@@ -3800,6 +3830,8 @@ impl ReplayStage {
                                         process_active_banks_context,
                                         bank_replay_result_tracker,
                                         finalization_cert_sender,
+                                        poh_recorder,
+                                        leader_schedule_cache,
                                     );
                                 if let Some(replay_blockstore_us) = replay_blockstore_us {
                                     longest_replay_time_us
@@ -3828,6 +3860,8 @@ impl ReplayStage {
                         process_active_banks_context,
                         bank_replay_result_tracker,
                         finalization_cert_sender,
+                        poh_recorder,
+                        leader_schedule_cache,
                     );
                     if let Some(replay_blockstore_us) = replay_blockstore_us {
                         replay_timing.replay_blockstore_us += replay_blockstore_us;
@@ -4315,11 +4349,13 @@ impl ReplayStage {
         latest_validator_votes_for_frozen_banks: &mut LatestValidatorVotesForFrozenBanks,
         duplicate_slots_to_repair: &mut DuplicateSlotsToRepair,
         purge_repair_slot_counter: &mut PurgeRepairSlotCounter,
+        poh_recorder: &RwLock<PohRecorder>,
         tbft_structs: Option<&mut TowerBFTStructures>,
         my_pubkey: &Pubkey,
         vote_account: &Pubkey,
         replay_timing: &mut ReplayLoopTiming,
         finalization_cert_sender: &Sender<SmallVec<[Certificate; 2]>>,
+        leader_schedule_cache: &Arc<LeaderScheduleCache>,
     ) -> Vec<Slot> /* completed slots */ {
         let bank_replay_result_trackers = Self::prepare_active_banks_for_replay(
             process_active_banks_context,
@@ -4339,6 +4375,8 @@ impl ReplayStage {
             bank_replay_result_trackers,
             replay_timing,
             finalization_cert_sender,
+            poh_recorder,
+            leader_schedule_cache,
         );
 
         // Process replay results.

@@ -50,6 +50,7 @@ const CRDS_GOSSIP_PRUNE_STAKE_THRESHOLD_PCT: f64 = 0.15;
 const CRDS_GOSSIP_PRUNE_MIN_INGRESS_NODES: usize = 2;
 const CRDS_GOSSIP_PUSH_ACTIVE_SET_SIZE: usize = CRDS_GOSSIP_PUSH_FANOUT + 3;
 
+#[repr(C)]
 pub struct CrdsGossipPush {
     /// Active set of validators for push
     active_set: RwLock<PushActiveSet>,

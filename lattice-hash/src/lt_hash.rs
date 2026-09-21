@@ -9,6 +9,7 @@ use {
 // - Do not derive Copy because this type is large and copying will not be fast/free.
 // - Do not derive Default because hashes do not have a meaningful "default".
 #[derive(Debug, Eq, PartialEq, Clone)]
+#[repr(C)]
 pub struct LtHash(pub [u16; LtHash::NUM_ELEMENTS]);
 
 impl LtHash {

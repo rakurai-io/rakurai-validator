@@ -6,8 +6,10 @@ use {
         scheduler_messages::MaxAge,
     },
     crate::{
+        banking_stage::house_keeper::{AggregatedTxError, TxOutputStatus},
         bundle_stage::bundle_account_locker::BundleAccountLocker,
-        proxy::block_engine_stage::BlockBuilderFeeInfo, tip_manager::TipManager,
+        proxy::block_engine_stage::BlockBuilderFeeInfo,
+        tip_manager::TipManager,
     },
     arc_swap::ArcSwap,
     smallvec::SmallVec,
@@ -34,6 +36,7 @@ use {
     },
     solana_transaction_error::TransactionError,
     solana_vote::vote_parser,
+    solana_svm_timings::wallclock_timestamp_nanos,
     std::{num::Saturating, sync::Arc},
 };
 
@@ -82,6 +85,11 @@ pub struct ProcessTransactionBatchOutput {
     // Amount of time spent running the cost model
     pub(crate) cost_model_us: u64,
     pub execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput,
+    // Per-transaction requested compute units (programs execution cost), aligned with input `txs`.
+    pub compute_units_requested: Vec<u32>,
+    /// Per-tx wall-clock nanos at start of consume-side processing (GUI microblock start).
+    /// Empty when GUI capture is disabled.
+    pub microblock_start_timestamps_nanos: Vec<i64>,
 }
 
 pub struct ExecuteAndCommitTransactionsOutput {
@@ -169,6 +177,7 @@ pub struct Consumer {
     committer: Committer,
     transaction_recorder: TransactionRecorder,
     log_messages_bytes_limit: Option<usize>,
+    capture_gui_timestamps: bool,
 }
 
 impl Consumer {
@@ -176,11 +185,13 @@ impl Consumer {
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         log_messages_bytes_limit: Option<usize>,
+        capture_gui_timestamps: bool,
     ) -> Self {
         Self {
             committer,
             transaction_recorder,
             log_messages_bytes_limit,
+            capture_gui_timestamps,
         }
     }
 
@@ -215,7 +226,7 @@ impl Consumer {
                 Err(err) => Err(err),
             });
 
-        let mut output = self.process_and_record_transactions_with_pre_results(
+        let (mut output, _) = self.process_and_record_transactions_with_pre_results(
             bank,
             txs,
             check_results,
@@ -245,7 +256,10 @@ impl Consumer {
         flags: &ExecutionFlags,
         bundle_account_locker: Option<&BundleAccountLocker>,
         revert_on_error: bool,
-    ) -> ProcessTransactionBatchOutput {
+    ) -> (
+        ProcessTransactionBatchOutput,
+        Option<(Vec<usize>, Vec<usize>)>,
+    ) {
         self.process_and_record_aged_transactions_with_policy(
             bank,
             txs,
@@ -267,9 +281,18 @@ impl Consumer {
         bundle_account_locker: Option<&BundleAccountLocker>,
         revert_on_error: bool,
         admission_results: Option<SmallVec<[Result<(), TransactionError>; 1]>>,
-    ) -> ProcessTransactionBatchOutput {
+    ) -> (
+        ProcessTransactionBatchOutput,
+        Option<(Vec<usize>, Vec<usize>)>,
+    ) {
+        let mut microblock_start_timestamps_nanos = Vec::new();
         if let Some(results) = admission_results {
-            return self.process_and_record_transactions_with_pre_results(
+            if self.capture_gui_timestamps {
+                let mb_start_timestamp = wallclock_timestamp_nanos();
+                microblock_start_timestamps_nanos.resize(txs.len(), mb_start_timestamp);
+            }
+            let (mut output, cu_err_indexes) = 
+            self.process_and_record_transactions_with_pre_results(
                 bank,
                 txs,
                 results.into_iter(),
@@ -278,26 +301,49 @@ impl Consumer {
                 bundle_account_locker,
                 revert_on_error,
             );
+            output.microblock_start_timestamps_nanos = microblock_start_timestamps_nanos;
+            return (output, cu_err_indexes);
         }
         // Need to filter out transactions since they were sanitized earlier.
         // This means that the transaction may cross and epoch boundary (not allowed),
         //  or account lookup tables may have been closed.
-        let pre_results = txs.iter().zip(max_ages).map(|(tx, max_age)| {
-            bank.resanitize_transaction_minimally(
-                tx,
-                max_age.sanitized_epoch,
-                max_age.alt_invalidation_slot,
-            )
-        });
-        self.process_and_record_transactions_with_pre_results(
-            bank,
-            txs,
-            pre_results,
-            None,
-            flags,
-            bundle_account_locker,
-            revert_on_error,
-        )
+        let pre_results: Vec<_> = if self.capture_gui_timestamps {
+            microblock_start_timestamps_nanos.reserve(txs.len());
+            txs.iter()
+                .zip(max_ages)
+                .map(|(tx, max_age)| {
+                    microblock_start_timestamps_nanos.push(wallclock_timestamp_nanos());
+                    bank.resanitize_transaction_minimally(
+                        tx,
+                        max_age.sanitized_epoch,
+                        max_age.alt_invalidation_slot,
+                    )
+                })
+                .collect()
+        } else {
+            txs.iter()
+                .zip(max_ages)
+                .map(|(tx, max_age)| {
+                    bank.resanitize_transaction_minimally(
+                        tx,
+                        max_age.sanitized_epoch,
+                        max_age.alt_invalidation_slot,
+                    )
+                })
+                .collect()
+        };
+        let (mut output, cu_err_indexes) =
+            self.process_and_record_transactions_with_pre_results(
+                bank,
+                txs,
+                pre_results.into_iter(),
+                None,
+                flags,
+                bundle_account_locker,
+                revert_on_error,
+            );
+        output.microblock_start_timestamps_nanos = microblock_start_timestamps_nanos;
+        (output, cu_err_indexes)
     }
 
     fn process_and_record_transactions_with_pre_results(
@@ -309,7 +355,10 @@ impl Consumer {
         flags: &ExecutionFlags,
         bundle_account_locker: Option<&BundleAccountLocker>,
         revert_on_error: bool,
-    ) -> ProcessTransactionBatchOutput {
+    ) -> (
+        ProcessTransactionBatchOutput,
+        Option<(Vec<usize>, Vec<usize>)>,
+    ) {
         let (
             (transaction_qos_cost_results, cost_model_throttled_transactions_count),
             cost_model_us,
@@ -325,6 +374,36 @@ impl Consumer {
             }
             None => QosService::select_and_accumulate_transaction_costs(bank, txs, pre_results),
         });
+
+        // Per-tx requested CU (programs execution cost) for the GUI.
+        let compute_units_requested: Vec<u32> = if self.capture_gui_timestamps {
+            transaction_qos_cost_results
+                .iter()
+                .map(|result| match result {
+                    Ok(cost) => cost.programs_execution_cost() as u32,
+                    Err(_) => 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut cu_account_err_indexes = Vec::with_capacity(64);
+        let mut cu_block_err_indexes = Vec::with_capacity(64);
+
+        for (i, transaction_qos_cost_result) in transaction_qos_cost_results.iter().enumerate() {
+            if let Err(err) = transaction_qos_cost_result {
+                match err {
+                    TransactionError::WouldExceedMaxAccountCostLimit => {
+                        cu_account_err_indexes.push(i);
+                    }
+                    TransactionError::WouldExceedMaxBlockCostLimit => {
+                        cu_block_err_indexes.push(i);
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Only lock accounts for those transactions are selected for the block;
         // Once accounts are locked, other threads cannot encode transactions that will modify the
@@ -403,11 +482,16 @@ impl Consumer {
             txs.len(),
         );
 
-        ProcessTransactionBatchOutput {
-            cost_model_throttled_transactions_count,
-            cost_model_us,
-            execute_and_commit_transactions_output,
-        }
+        (
+            ProcessTransactionBatchOutput {
+                cost_model_throttled_transactions_count,
+                cost_model_us,
+                execute_and_commit_transactions_output,
+                compute_units_requested,
+                microblock_start_timestamps_nanos: Vec::new(),
+            },
+            Some((cu_account_err_indexes, cu_block_err_indexes)),
+        )
     }
 
     fn execute_and_commit_transactions_locked(
@@ -513,6 +597,10 @@ impl Consumer {
                     all_or_nothing: flags.all_or_nothing,
                     strict_nonce_size_check: true,
                     drop_noop_transactions: true,
+                    capture_gui_timestamps: self.capture_gui_timestamps,
+                    tip_accounts: self
+                        .capture_gui_timestamps
+                        .then(|| crate::bundle_stage::bundle_storage::jito_tip_accounts()),
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
@@ -615,6 +703,51 @@ impl Consumer {
                 },
             ));
 
+            // -----------------------------------------------------------------------------
+            // TX Output Status Reporting
+            //
+            // This block sends the status of failed transactions to the HouseKeeper
+            // (or side-car/OMS) via `output_tx_signature_sender`. Only transactions
+            // that fail with non-retryable errors are reported. Retryable errors
+            // such as AccountInUse or exceeding cost limits are ignored.
+            //
+            // See the "tx_io_check_readme.md" for details on how these
+            // tx_out_signature messages are recorded and analyzed:
+            //   <repo-root>/tx_io_check_readme.md
+            //
+            // The reported TxOutputStatus includes the transaction signature and
+            // the aggregated error type. This enables end-to-end auditing of
+            // transaction processing, ensuring no silent failures are missed.
+            // -----------------------------------------------------------------------------
+            if let Some(output_tx_signature_sender) = &self.committer.output_tx_signature_sender {
+                let sanitized_transactions = batch.sanitized_transactions();
+
+                let _ = processing_results
+                    .iter()
+                    .zip(sanitized_transactions.iter())
+                    .for_each(|(processing_result, tx)| {
+                        if let Err(error) = processing_result {
+                            match error {
+                                TransactionError::AccountInUse
+                                | TransactionError::WouldExceedMaxBlockCostLimit
+                                | TransactionError::WouldExceedMaxVoteCostLimit
+                                | TransactionError::WouldExceedMaxAccountCostLimit
+                                | TransactionError::WouldExceedAccountDataBlockLimit => {
+                                    // do nothing for retries
+                                }
+                                _ => {
+                                    let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                                        signature: tx.signature().to_string(),
+                                        status: Err(AggregatedTxError::ConventionalErrorCode(
+                                            error.clone(),
+                                        )),
+                                    });
+                                }
+                            }
+                        }
+                    });
+            }
+
             // retryable indexes are expected to be sorted - in this case the
             // `extend` can cause that assumption to be violated.
             retryable_transaction_indexes.sort_unstable();
@@ -626,6 +759,57 @@ impl Consumer {
                 execute_and_commit_timings,
                 error_counters,
             };
+        }
+
+        // -----------------------------------------------------------------------------
+        // TX Output Status Reporting
+        //
+        // This block sends the status of failed transactions to the HouseKeeper
+        // (or side-car/OMS) via `output_tx_signature_sender`. Only transactions
+        // that fail with non-retryable errors are reported. Retryable errors
+        // such as AccountInUse or exceeding cost limits are ignored.
+        //
+        // See the "tx_io_check_readme.md" for details on how these
+        // tx_out_signature messages are recorded and analyzed:
+        //   <repo-root>/tx_io_check_readme.md
+        //
+        // The reported TxOutputStatus includes the transaction signature and
+        // the aggregated error type. This enables end-to-end auditing of
+        // transaction processing, ensuring no silent failures are missed.
+        // -----------------------------------------------------------------------------
+        if let Some(output_tx_signature_sender) = &self.committer.output_tx_signature_sender {
+            let sanitized_transactions = batch.sanitized_transactions();
+
+            let _ = processing_results
+                .iter()
+                .zip(sanitized_transactions.iter())
+                .for_each(|(processing_result, tx)| match processing_result {
+                    Ok(_) => {
+                        let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                            signature: tx.signature().to_string(),
+                            status: Ok(()),
+                        });
+                    }
+                    Err(error) => {
+                        match error {
+                            TransactionError::AccountInUse
+                            | TransactionError::WouldExceedMaxBlockCostLimit
+                            | TransactionError::WouldExceedMaxVoteCostLimit
+                            | TransactionError::WouldExceedMaxAccountCostLimit
+                            | TransactionError::WouldExceedAccountDataBlockLimit => {
+                                // do nothing for retries
+                            }
+                            _ => {
+                                let _ = output_tx_signature_sender.try_send(TxOutputStatus {
+                                    signature: tx.signature().to_string(),
+                                    status: Err(AggregatedTxError::ConventionalErrorCode(
+                                        error.clone(),
+                                    )),
+                                });
+                            }
+                        }
+                    }
+                });
         }
 
         let (commit_time_us, commit_transaction_statuses) =
@@ -791,7 +975,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(transaction_status_sender, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
 
         TestFrame {
             mint_keypair,
@@ -816,7 +1000,7 @@ mod tests {
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
         let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
         consumer.process_and_record_transactions(
             &bank,
             &transactions,
@@ -1198,6 +1382,7 @@ mod tests {
                         loaded_accounts_data_size,
                         result: _,
                         fee_payer_post_balance: _,
+                        ..
                     } => (
                         *compute_units,
                         CostModel::calculate_loaded_accounts_data_size_cost(
@@ -1902,7 +2087,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let consumer = Consumer::new(committer, recorder.clone(), None);
+        let consumer = Consumer::new(committer, recorder.clone(), None, false);
 
         let process_transactions_summary = consumer.process_and_record_transactions(
             &bank,
@@ -1971,6 +2156,7 @@ mod tests {
             cost_model_throttled_transactions_count: _cost_model_throttled_transactions_count,
             cost_model_us: _cost_model_us,
             execute_and_commit_transactions_output,
+            ..
         } = execute_transactions_for_test(bank, transactions, BundleAccountLocker::default(), true);
 
         assert_eq!(

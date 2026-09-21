@@ -8,10 +8,11 @@ use {crate::banking_stage::scheduler_messages::MaxAge, solana_pubkey::Pubkey};
 /// When a transaction finishes processing it may be retryable. If it is
 /// retryable, the transaction is added back into the Option. If it si not
 /// retryable, the state is dropped.
-pub(crate) struct TransactionState<Tx> {
+#[derive(Clone)]
+pub struct TransactionState<Tx> {
     /// If `Some`, the transaction is available for scheduling.
     /// If `None`, the transaction is currently scheduled or being processed.
-    transaction: Option<Tx>,
+    pub transaction: Option<Tx>,
     /// Tracks information on the maximum age the transaction's pre-processing
     /// is valid for. This includes sanitization features, as well as resolved
     /// address lookups.
@@ -22,29 +23,63 @@ pub(crate) struct TransactionState<Tx> {
     cost: u64,
     /// Nonce address, if this is a validated nonce transaction.
     nonce_address: Option<Pubkey>,
+    /// Wall-clock nanos when the packet was first received (0 if unset).
+    arrival_timestamp_nanos: i64,
+    /// Source IPv4 of the packet as a big-endian `u32` (0 if unset/non-IPv4).
+    source_ipv4: u32,
 }
 
 impl<Tx> TransactionState<Tx> {
     /// Creates a new `TransactionState` in the `Unprocessed` state.
-    pub(crate) fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
+    pub fn new(transaction: Tx, max_age: MaxAge, priority: u64, cost: u64) -> Self {
+        Self::new_with_ingress(transaction, max_age, priority, cost, 0, 0)
+    }
+
+    pub fn new_with_ingress(
+        transaction: Tx,
+        max_age: MaxAge,
+        priority: u64,
+        cost: u64,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+    ) -> Self {
         Self {
             transaction: Some(transaction),
             max_age,
             priority,
             cost,
             nonce_address: None,
+            arrival_timestamp_nanos,
+            source_ipv4,
         }
+    }
+
+    pub fn arrival_timestamp_nanos(&self) -> i64 {
+        self.arrival_timestamp_nanos
+    }
+
+    pub fn source_ipv4(&self) -> u32 {
+        self.source_ipv4
+    }
+
+    pub(crate) fn set_ingress_metadata(
+        &mut self,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
+    ) {
+        self.arrival_timestamp_nanos = arrival_timestamp_nanos;
+        self.source_ipv4 = source_ipv4;
     }
 
     /// Return the priority of the transaction.
     /// This is *not* the same as the `compute_unit_price` of the transaction.
     /// The priority is used to order transactions for processing.
-    pub(crate) fn priority(&self) -> u64 {
+    pub fn priority(&self) -> u64 {
         self.priority
     }
 
     /// Return the cost of the transaction.
-    pub(crate) fn cost(&self) -> u64 {
+    pub fn cost(&self) -> u64 {
         self.cost
     }
 
@@ -58,7 +93,7 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction has already been scheduled.
-    pub(crate) fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge) {
+    pub fn take_transaction_for_scheduling(&mut self) -> (Tx, MaxAge) {
         let tx = self
             .transaction
             .take()
@@ -71,7 +106,7 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction is not pending.
-    pub(crate) fn retry_transaction(&mut self, transaction: Tx) {
+    pub fn retry_transaction(&mut self, transaction: Tx) {
         assert!(
             self.transaction.replace(transaction).is_none(),
             "transaction is pending"
@@ -82,7 +117,7 @@ impl<Tx> TransactionState<Tx> {
     ///
     /// # Panics
     /// This method will panic if the transaction is in the `Pending` state.
-    pub(crate) fn transaction(&self) -> &Tx {
+    pub fn transaction(&self) -> &Tx {
         self.transaction
             .as_ref()
             .expect("transaction is not pending")
@@ -92,6 +127,10 @@ impl<Tx> TransactionState<Tx> {
     /// the nonce transaction is fully validated.
     pub(crate) fn set_nonce_address(&mut self, nonce_address: Option<Pubkey>) {
         self.nonce_address = nonce_address;
+    }
+
+    pub fn max_age(&self) -> MaxAge {
+        self.max_age
     }
 }
 

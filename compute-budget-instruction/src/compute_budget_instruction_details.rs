@@ -16,8 +16,8 @@ use {
 };
 
 #[cfg_attr(test, derive(Eq, PartialEq))]
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
+// #[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
+#[derive(Debug, Clone)]
 struct MigrationBuiltinFeatureCounter {
     // The vector of counters, matching the size of the static vector MIGRATION_FEATURE_IDS,
     // each counter representing the number of times its corresponding feature ID is
@@ -34,8 +34,8 @@ impl Default for MigrationBuiltinFeatureCounter {
 }
 
 #[cfg_attr(test, derive(Eq, PartialEq))]
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Default, Debug)]
+// #[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
+#[derive(Default, Debug, Clone)]
 pub struct ComputeBudgetInstructionDetails {
     // compute-budget instruction details:
     // the first field in tuple is instruction index, second field is the unsanitized value set by user

@@ -8,12 +8,22 @@ use {
             TransactionResult,
         },
     },
-    crate::banking_stage::consumer::{ExecutionFlags, RetryableIndex},
+    crate::{
+        banking_stage::consumer::{ExecutionFlags, RetryableIndex},
+        gui::{
+            GuiCoreMetrics,
+            slot_txn::{
+                GuiTxnBatchPayload, GuiTxnEvent, capture_gui_txn_tx_metadata,
+                gui_commit_details_for_batch,
+            },
+        },
+    },
     crossbeam_channel::{Receiver, SendError, Sender, TryRecvError},
     jito_protos::proto::bam_types::TransactionCommittedResult,
     solana_poh::poh_recorder::{LeaderState, SharedLeaderState},
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm_timings::{ExecuteGuiTimestamps, wallclock_timestamp_nanos},
     solana_time_utils::AtomicInterval,
     std::{
         marker::PhantomData,
@@ -54,6 +64,7 @@ pub(crate) struct ConsumeWorker<Tx> {
 
     shared_leader_state: SharedLeaderState,
     metrics: Arc<ConsumeWorkerMetrics>,
+    gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
 }
 
 impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
@@ -64,6 +75,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
         consumer: Consumer,
         consumed_sender: Sender<FinishedConsumeWork<Tx>>,
         shared_leader_state: SharedLeaderState,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self {
             exit,
@@ -72,6 +84,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             consumed_sender,
             shared_leader_state,
             metrics: Arc::new(ConsumeWorkerMetrics::new(id)),
+            gui_txn_event_sender,
         }
     }
 
@@ -149,7 +162,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             return self.retry(work);
         }
         let admission_results = work.admission.take().map(|(_, results)| results);
-        let output = self
+        let (mut output, cu_err_indexes) = self
             .consumer
             .process_and_record_aged_transactions_with_policy(
                 bank,
@@ -163,8 +176,56 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 work.revert_on_error,
                 admission_results,
             );
+        let microblock_end_timestamp_nanos = self
+            .gui_txn_event_sender
+            .is_some()
+            .then(wallclock_timestamp_nanos);
         self.metrics.update_for_consume(&output);
         self.metrics.has_data.store(true, Ordering::Relaxed);
+
+        if let Some(sender) = self.gui_txn_event_sender.as_ref() {
+            if !work.gui_schedule_info.is_empty() {
+                let microblock_end_timestamp_nanos =
+                    microblock_end_timestamp_nanos.expect("gui sender enabled");
+                for (info, ts) in work
+                    .gui_schedule_info
+                    .iter_mut()
+                    .zip(output.microblock_start_timestamps_nanos.iter().copied())
+                {
+                    info.microblock_start_timestamp_nanos = ts;
+                }
+                let mut gui_timestamps_per_tx = output
+                    .execute_and_commit_transactions_output
+                    .execute_and_commit_timings
+                    .execute_timings
+                    .gui_timestamps_per_tx
+                    .clone();
+                gui_timestamps_per_tx.resize(
+                    work.gui_schedule_info.len(),
+                    ExecuteGuiTimestamps::default(),
+                );
+                let commit_details = gui_commit_details_for_batch(
+                    &output
+                        .execute_and_commit_transactions_output
+                        .commit_transactions_result,
+                    work.gui_schedule_info.len(),
+                );
+                let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(&work.transactions);
+                if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+                    slot: bank.slot(),
+                    gui_timestamps_per_tx,
+                    microblock_end_timestamp_nanos,
+                    // Clone so FinishedConsumeWork still has ingress metadata for retry
+                    gui_schedule_info: work.gui_schedule_info.clone(),
+                    compute_units_requested: std::mem::take(&mut output.compute_units_requested),
+                    commit_details,
+                    signatures,
+                    is_simple_vote,
+                })) {
+                    warn!("failed to send TxnBatch gui event: {err}");
+                }
+            }
+        }
 
         let extra_info = work
             .respond_with_extra_info
@@ -176,6 +237,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                 .execute_and_commit_transactions_output
                 .retryable_transaction_indexes,
             extra_info,
+            cu_err_indexes,
         })?;
         Ok(ProcessingStatus::Processed)
     }
@@ -213,6 +275,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
                     loaded_accounts_data_size,
                     fee_payer_post_balance,
                     result,
+                    ..
                 } => {
                     processed_results.push(TransactionResult::Committed(
                         TransactionCommittedResult {
@@ -278,6 +341,7 @@ impl<Tx: TransactionWithMeta> ConsumeWorker<Tx> {
             work,
             retryable_indexes,
             extra_info,
+            cu_err_indexes: None,
         })?;
         Ok(ProcessingStatus::Processed)
     }
@@ -564,10 +628,11 @@ pub(crate) mod external {
                     false,
                 );
 
-                self.metrics.update_for_consume(&output);
+                self.metrics.update_for_consume(&output.0);
                 self.metrics.has_data.store(true, Ordering::Relaxed);
 
                 let Ok(commit_results) = output
+                    .0
                     .execute_and_commit_transactions_output
                     .commit_transactions_result
                 else {
@@ -1494,7 +1559,7 @@ pub(crate) mod external {
             let recorder = TransactionRecorder::new(record_sender);
             let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
             let committer = Committer::new(None, replay_vote_sender, None);
-            let consumer = Consumer::new(committer, recorder, None);
+            let consumer = Consumer::new(committer, recorder, None, false);
             let shared_leader_state = SharedLeaderState::new(0, None, None);
             let exit = Arc::new(AtomicBool::new(false));
 
@@ -1632,12 +1697,16 @@ pub(crate) mod external {
                             0,
                             solana_transaction::InstructionError::Custom(0),
                         )),
+                        fee_details: FeeDetails::default(),
+                        tips: 0,
                     },
                     CommitTransactionDetails::Committed {
                         compute_units: 10,
                         loaded_accounts_data_size: 2048,
                         fee_payer_post_balance: 2_000_000,
                         result: Ok(()),
+                        fee_details: FeeDetails::default(),
+                        tips: 0,
                     },
                     CommitTransactionDetails::NotCommitted(
                         TransactionError::InsufficientFundsForFee,
@@ -2624,6 +2693,7 @@ fn backoff(idle_duration: Duration, sleep_duration: &Duration) -> Duration {
 /// These are atomic, and intended to be reported by the scheduling thread
 /// since the consume worker thread is sleeping unless there is work to be
 /// done.
+#[repr(C)]
 pub struct ConsumeWorkerMetrics {
     id: String,
     interval: AtomicInterval,
@@ -2636,14 +2706,28 @@ pub struct ConsumeWorkerMetrics {
 
 impl ConsumeWorkerMetrics {
     /// Report and reset metrics iff the interval has elapsed and the worker did some work.
-    pub fn maybe_report_and_reset(&self) {
+    pub fn maybe_report_and_reset(
+        &self,
+        bam_controller: bool,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) {
         const REPORT_INTERVAL_MS: u64 = 20;
         if self.interval.should_update(REPORT_INTERVAL_MS)
             && self.has_data.swap(false, Ordering::Relaxed)
         {
-            self.count_metrics.report_and_reset(&self.id);
-            self.timing_metrics.report_and_reset(&self.id);
-            self.error_metrics.report_and_reset(&self.id);
+            if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                if let Err(err) = gui_core_metrics_sender
+                    .try_send(GuiCoreMetrics::ConsumeWorker(self.count_metrics.clone()))
+                {
+                    warn!("failed to send ConsumeWorker gui metrics: {err}");
+                }
+            }
+            self.count_metrics
+                .report_and_reset(&self.id, bam_controller);
+            self.timing_metrics
+                .report_and_reset(&self.id, bam_controller);
+            self.error_metrics
+                .report_and_reset(&self.id, bam_controller);
         }
     }
 
@@ -2668,6 +2752,7 @@ impl ConsumeWorkerMetrics {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+            ..
         }: &ProcessTransactionBatchOutput,
     ) {
         self.count_metrics
@@ -2759,6 +2844,7 @@ impl ConsumeWorkerMetrics {
             account_loaded_twice,
             account_not_found,
             blockhash_not_found,
+            nonce_account_not_found,
             blockhash_too_old,
             call_chain_too_deep,
             already_processed,
@@ -2797,6 +2883,9 @@ impl ConsumeWorkerMetrics {
         self.error_metrics
             .blockhash_not_found
             .fetch_add(blockhash_not_found.0, Ordering::Relaxed);
+        self.error_metrics
+            .nonce_account_not_found
+            .fetch_add(nonce_account_not_found.0, Ordering::Relaxed);
         self.error_metrics
             .blockhash_too_old
             .fetch_add(blockhash_too_old.0, Ordering::Relaxed);
@@ -2857,22 +2946,84 @@ impl ConsumeWorkerMetrics {
     }
 }
 
-#[derive(Default)]
-struct ConsumeWorkerCountMetrics {
+#[repr(C)]
+pub struct ConsumeWorkerCountMetrics {
     max_queue_len: AtomicU64,
     num_messages_processed: AtomicU64,
-    transactions_attempted_processing_count: AtomicU64,
-    processed_transactions_count: AtomicU64,
-    processed_with_successful_result_count: AtomicU64,
+    pub transactions_attempted_processing_count: AtomicU64,
+    pub processed_transactions_count: AtomicU64,
+    pub processed_with_successful_result_count: AtomicU64,
     retryable_transaction_count: AtomicUsize,
     retryable_expired_bank_count: AtomicUsize,
     cost_model_throttled_transactions_count: AtomicU64,
+    min_prioritization_fees: AtomicU64,
+    max_prioritization_fees: AtomicU64,
+}
+
+impl Clone for ConsumeWorkerCountMetrics {
+    fn clone(&self) -> Self {
+        Self {
+            max_queue_len: AtomicU64::new(self.max_queue_len.load(Ordering::Relaxed)),
+            num_messages_processed: AtomicU64::new(
+                self.num_messages_processed.load(Ordering::Relaxed),
+            ),
+            transactions_attempted_processing_count: AtomicU64::new(
+                self.transactions_attempted_processing_count
+                    .load(Ordering::Relaxed),
+            ),
+            processed_transactions_count: AtomicU64::new(
+                self.processed_transactions_count.load(Ordering::Relaxed),
+            ),
+            processed_with_successful_result_count: AtomicU64::new(
+                self.processed_with_successful_result_count
+                    .load(Ordering::Relaxed),
+            ),
+            retryable_transaction_count: AtomicUsize::new(
+                self.retryable_transaction_count.load(Ordering::Relaxed),
+            ),
+            retryable_expired_bank_count: AtomicUsize::new(
+                self.retryable_expired_bank_count.load(Ordering::Relaxed),
+            ),
+            cost_model_throttled_transactions_count: AtomicU64::new(
+                self.cost_model_throttled_transactions_count
+                    .load(Ordering::Relaxed),
+            ),
+            min_prioritization_fees: AtomicU64::new(
+                self.min_prioritization_fees.load(Ordering::Relaxed),
+            ),
+            max_prioritization_fees: AtomicU64::new(
+                self.max_prioritization_fees.load(Ordering::Relaxed),
+            ),
+        }
+    }
+}
+
+impl Default for ConsumeWorkerCountMetrics {
+    fn default() -> Self {
+        Self {
+            max_queue_len: AtomicU64::default(),
+            num_messages_processed: AtomicU64::default(),
+            transactions_attempted_processing_count: AtomicU64::default(),
+            processed_transactions_count: AtomicU64::default(),
+            processed_with_successful_result_count: AtomicU64::default(),
+            retryable_transaction_count: AtomicUsize::default(),
+            retryable_expired_bank_count: AtomicUsize::default(),
+            cost_model_throttled_transactions_count: AtomicU64::default(),
+            min_prioritization_fees: AtomicU64::new(u64::MAX),
+            max_prioritization_fees: AtomicU64::default(),
+        }
+    }
 }
 
 impl ConsumeWorkerCountMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_counts"
+        } else {
+            "banking_stage_worker_counts"
+        };
         let datapoint = create_datapoint!(
-            @point "banking_stage_worker_counts",
+            @point name,
             "id" => id,
             ("max_queue_len", self.max_queue_len.swap(0, Ordering::Relaxed), i64),
             (
@@ -2914,11 +3065,12 @@ impl ConsumeWorkerCountMetrics {
                 i64
             ),
         );
-        solana_metrics::submit(datapoint, log::Level::Trace);
+        solana_metrics::submit(datapoint, log::Level::Info);
     }
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTimingMetrics {
     cost_model_us: AtomicU64,
     load_execute_us: AtomicU64,
@@ -2932,9 +3084,14 @@ struct ConsumeWorkerTimingMetrics {
 }
 
 impl ConsumeWorkerTimingMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_timing"
+        } else {
+            "banking_stage_worker_timing"
+        };
         let datapoint = create_datapoint!(
-            @point "banking_stage_worker_timing",
+            @point name,
             "id" => id,
             (
                 "cost_model_us",
@@ -2974,11 +3131,12 @@ impl ConsumeWorkerTimingMetrics {
                 i64
             ),
         );
-        solana_metrics::submit(datapoint, log::Level::Trace);
+        solana_metrics::submit(datapoint, log::Level::Info);
     }
 }
 
 #[derive(Default)]
+#[repr(C)]
 struct ConsumeWorkerTransactionErrorMetrics {
     total: AtomicUsize,
     account_in_use: AtomicUsize,
@@ -2986,6 +3144,7 @@ struct ConsumeWorkerTransactionErrorMetrics {
     account_loaded_twice: AtomicUsize,
     account_not_found: AtomicUsize,
     blockhash_not_found: AtomicUsize,
+    nonce_account_not_found: AtomicUsize,
     blockhash_too_old: AtomicUsize,
     call_chain_too_deep: AtomicUsize,
     already_processed: AtomicUsize,
@@ -3007,9 +3166,14 @@ struct ConsumeWorkerTransactionErrorMetrics {
 }
 
 impl ConsumeWorkerTransactionErrorMetrics {
-    fn report_and_reset(&self, id: &str) {
+    fn report_and_reset(&self, id: &str, bam_controller: bool) {
+        let name = if bam_controller {
+            "bam_banking_stage_worker_error_metrics"
+        } else {
+            "banking_stage_worker_error_metrics"
+        };
         let datapoint = create_datapoint!(
-            @point "banking_stage_worker_error_metrics",
+            @point name,
             "id" => id,
             ("total", self.total.swap(0, Ordering::Relaxed), i64),
             (
@@ -3035,6 +3199,11 @@ impl ConsumeWorkerTransactionErrorMetrics {
             (
                 "blockhash_not_found",
                 self.blockhash_not_found.swap(0, Ordering::Relaxed),
+                i64
+            ),
+            (
+                "nonce_account_not_found",
+                self.nonce_account_not_found.swap(0, Ordering::Relaxed),
                 i64
             ),
             (
@@ -3119,7 +3288,7 @@ impl ConsumeWorkerTransactionErrorMetrics {
                 i64
             ),
         );
-        solana_metrics::submit(datapoint, log::Level::Trace);
+        solana_metrics::submit(datapoint, log::Level::Info);
     }
 }
 
@@ -3249,8 +3418,8 @@ mod tests {
         let recorder = TransactionRecorder::new(record_sender);
 
         let (replay_vote_sender, replay_vote_receiver) = bounded(1024);
-        let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let committer = Committer::new(None, replay_vote_sender, None, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 
         let cluster_info = {
@@ -3271,6 +3440,7 @@ mod tests {
             consumer,
             consumed_sender,
             shared_leader_state.clone(),
+            None, // gui_txn_event_sender
         );
 
         (
@@ -3381,6 +3551,7 @@ mod tests {
             respond_with_extra_info: complete_bank,
             max_schedule_slot: None,
             admission,
+            gui_schedule_info: Vec::new(),
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3508,6 +3679,7 @@ mod tests {
             respond_with_extra_info: false,
             max_schedule_slot: None,
             admission: None,
+            gui_schedule_info: Vec::new(),
         };
         consume_sender.send(work).unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3567,6 +3739,7 @@ mod tests {
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
                 admission: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 
@@ -3637,6 +3810,7 @@ mod tests {
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
                 admission: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 
@@ -3650,6 +3824,7 @@ mod tests {
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
                 admission: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
         let consumed = consumed_receiver.recv().unwrap();
@@ -3796,6 +3971,7 @@ mod tests {
                 respond_with_extra_info: false,
                 max_schedule_slot: None,
                 admission: None,
+                gui_schedule_info: Vec::new(),
             })
             .unwrap();
 

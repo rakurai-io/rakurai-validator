@@ -7,6 +7,7 @@ use {
     crossbeam_channel::{Receiver, Sender},
     log::*,
     rayon::{ThreadPool, prelude::*},
+    serde::{Deserialize, Serialize},
     smallvec::SmallVec,
     solana_address::Address,
     solana_cost_model::shred_limit::DEFAULT_MAX_DATA_SHREDS_PER_SLOT,
@@ -41,7 +42,9 @@ pub type MaxDataShredsLen = BincodeLen<MAX_DATA_SHREDS_SIZE>;
 /// hash was computed by the world's fastest processor at that time. The hash chain is both
 /// a Verifiable Delay Function (VDF) and a Proof of Work (not to be confused with Proof of
 /// Work consensus!)
-#[derive(Debug, Default, PartialEq, Eq, Clone, SchemaWrite, SchemaRead)]
+///
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, SchemaWrite, SchemaRead)]
+#[repr(C)]
 pub struct Entry {
     /// The number of hashes since the previous Entry ID.
     pub num_hashes: u64,

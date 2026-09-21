@@ -38,6 +38,7 @@ use {
     },
 };
 
+#[repr(C)]
 pub struct QuicPool {
     connections: Vec<Arc<Quic>>,
     endpoint: Arc<QuicLazyInitializedEndpoint>,
@@ -89,6 +90,7 @@ impl Drop for QuicPool {
     }
 }
 
+#[repr(C)]
 pub struct QuicConfig {
     // Arc to prevent having to copy the struct
     client_certificate: RwLock<Arc<QuicClientCertificate>>,
@@ -175,6 +177,7 @@ impl QuicConfig {
     }
 }
 
+#[repr(C)]
 pub struct Quic(Arc<QuicClient>);
 impl BaseClientConnection for Quic {
     type BlockingClientConnection = BlockingQuicClientConnection;
@@ -203,6 +206,7 @@ impl BaseClientConnection for Quic {
     }
 }
 
+#[repr(C)]
 pub struct QuicConnectionManager {
     connection_config: QuicConfig,
 }

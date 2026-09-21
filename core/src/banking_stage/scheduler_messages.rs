@@ -1,5 +1,5 @@
 use {
-    crate::banking_stage::consumer::RetryableIndex,
+    crate::{banking_stage::consumer::RetryableIndex, gui::GuiTxnScheduleInfo},
     jito_protos::proto::bam_types::TransactionCommittedResult,
     smallvec::SmallVec,
     solana_clock::{Epoch, Slot},
@@ -40,7 +40,6 @@ pub struct MaxAge {
     pub alt_invalidation_slot: Slot,
 }
 
-#[cfg(test)]
 impl MaxAge {
     pub const MAX: Self = Self {
         sanitized_epoch: Epoch::MAX,
@@ -61,6 +60,7 @@ pub struct ConsumeWork<Tx> {
     /// Admission bank and cost results, taken when settled or returned for release.
     #[allow(clippy::type_complexity)]
     pub admission: Option<(Arc<Bank>, SmallVec<[CostResult<()>; 1]>)>,
+    pub gui_schedule_info: Vec<GuiTxnScheduleInfo>,
 }
 
 /// Message: [Worker -> Scheduler]
@@ -69,6 +69,7 @@ pub struct FinishedConsumeWork<Tx> {
     pub work: ConsumeWork<Tx>,
     pub retryable_indexes: Vec<RetryableIndex>,
     pub extra_info: Option<FinishedConsumeWorkExtraInfo>,
+    pub cu_err_indexes: Option<(Vec<usize>, Vec<usize>)>,
 }
 
 #[derive(Debug)]

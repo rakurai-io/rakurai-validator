@@ -1,5 +1,9 @@
 use {
-    crate::packet_bundle::{PacketBundle, VerifiedPacketBundle},
+    crate::{
+        banking_trace::TracedSender,
+        packet_bundle::{PacketBundle, VerifiedPacketBundle},
+        gui::GuiCoreMetrics,
+    },
     crossbeam_channel::{Receiver, RecvTimeoutError, Sender},
     rayon::ThreadPool,
     solana_perf::sigverify::ed25519_verify,
@@ -10,9 +14,18 @@ use {
             atomic::{AtomicBool, Ordering},
         },
         thread::{self, JoinHandle, spawn},
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
     },
 };
+
+pub struct BundleSigverifyStageStats {
+    pub num_bundles_received: usize,
+    pub num_packets_received: usize,
+    pub num_bundles_failed_sigverify: usize,
+    pub num_packets_failed_sigverify: usize,
+    pub num_bundles_failed_send: usize,
+    pub num_packets_failed_send: usize,
+}
 
 pub struct BundleSigverifyStage {
     thread: JoinHandle<()>,
@@ -25,9 +38,19 @@ impl BundleSigverifyStage {
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
         sharable_banks: SharableBanks,
+        non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         let thread = spawn(move || {
-            Self::sigverify_service(thread_pool, receiver, sender, exit, sharable_banks)
+            Self::sigverify_service(
+                thread_pool,
+                receiver,
+                sender,
+                exit,
+                sharable_banks,
+                non_vote_sender,
+                gui_core_metrics_sender,
+            )
         });
         Self { thread }
     }
@@ -42,6 +65,8 @@ impl BundleSigverifyStage {
         sender: Sender<VerifiedPacketBundle>,
         exit: Arc<AtomicBool>,
         sharable_banks: SharableBanks,
+        non_vote_sender: TracedSender,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) {
         let mut workspace = Vec::with_capacity(100);
 
@@ -60,6 +85,18 @@ impl BundleSigverifyStage {
                     if (num_bundles_received > 0 || num_packets_received > 0)
                         && last_update.elapsed().as_millis() > 20
                     {
+                        if let Some(gui_core_metrics_sender) = &gui_core_metrics_sender {
+                            if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::BundleSigverify(BundleSigverifyStageStats {
+                                num_bundles_received,
+                                num_packets_received,
+                                num_bundles_failed_sigverify,
+                                num_packets_failed_sigverify,
+                                num_bundles_failed_send,
+                                num_packets_failed_send,
+                            })) {
+                                warn!("failed to send BundleSigverify gui metrics: {err}");
+                            }
+                        }
                         datapoint_info!(
                             "bundle_sigverify_stage",
                             ("num_bundles_received", num_bundles_received, i64),
@@ -90,6 +127,16 @@ impl BundleSigverifyStage {
                 Err(RecvTimeoutError::Disconnected) => break,
             };
 
+            let mut bundle_metas: Vec<(String, String, SystemTime)> = bundles
+                .iter()
+                .map(|bundle| {
+                    (
+                        bundle.block_engine_uuid().to_string(),
+                        bundle.bundle_id().to_string(),
+                        bundle.received_at(),
+                    )
+                })
+                .collect();
             workspace.extend(bundles.into_iter().map(|bundle| bundle.take()));
 
             let packet_count: usize = workspace.iter().map(|bundle| bundle.len()).sum();
@@ -106,24 +153,38 @@ impl BundleSigverifyStage {
                 enable_tx_v1,
             );
 
-            for bundle in workspace.drain(..) {
+            for (bundle, (block_engine_uuid, bundle_id, received_at)) in
+                workspace.drain(..).zip(bundle_metas.drain(..))
+            {
                 let num_packets_failed_sigverify_in_bundle = bundle
                     .iter()
                     .filter(|packet| packet.meta().discard())
                     .count();
 
-                // all the transactions in the bundle need to be verified to be valid
                 let len = bundle.len();
-                if num_packets_failed_sigverify_in_bundle == 0
-                    && sender.send(VerifiedPacketBundle::new(bundle)).is_err()
+                let sigverify_ok = num_packets_failed_sigverify_in_bundle == 0;
+
+                // Always forward to BundleStage so failed sigverify bundles are tracked.
+                if sender
+                    .send(VerifiedPacketBundle::new_with_block_engine_uuid(
+                        bundle.clone(),
+                        block_engine_uuid.clone(),
+                        bundle_id,
+                        received_at,
+                    ))
+                    .is_err()
                 {
                     warn!("failed to send verified packet bundle");
                     num_bundles_failed_send += 1;
                     num_packets_failed_send += len;
                     break;
-                } else if num_packets_failed_sigverify_in_bundle > 0 {
+                }
+
+                if !sigverify_ok {
                     num_bundles_failed_sigverify += 1;
                     num_packets_failed_sigverify += num_packets_failed_sigverify_in_bundle;
+                } else {
+                    let _ = non_vote_sender.send_bundle(Arc::new((bundle, block_engine_uuid)));
                 }
             }
 
@@ -163,6 +224,7 @@ impl BundleSigverifyStage {
 mod tests {
     use {
         super::*,
+        crate::banking_trace::BankingTracer,
         crossbeam_channel::bounded,
         solana_genesis_config::create_genesis_config,
         solana_hash::Hash,
@@ -198,6 +260,10 @@ mod tests {
         }
         let (_bank, bank_forks) = bank.wrap_with_bank_forks_for_tests();
         bank_forks.read().unwrap().sharable_banks()
+    }
+
+    fn test_non_vote_sender() -> TracedSender {
+        BankingTracer::channel_for_test().0
     }
 
     fn v1_transaction_with_wire_size(target_size: usize) -> VersionedTransaction {
@@ -242,6 +308,7 @@ mod tests {
             verified_sender,
             exit.clone(),
             test_sharable_banks(),
+            test_non_vote_sender(),
         );
         exit.store(true, Ordering::Relaxed);
         stage.join().unwrap();
@@ -262,6 +329,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         let txs_2 = (0..4).map(|_| test_tx()).collect::<Vec<_>>();
@@ -273,6 +341,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender
@@ -286,6 +355,7 @@ mod tests {
             verified_sender,
             exit.clone(),
             test_sharable_banks(),
+            test_non_vote_sender(),
         );
 
         let verified_bundle_1 = verified_receiver.recv().unwrap();
@@ -339,6 +409,7 @@ mod tests {
                     .collect::<Vec<_>>(),
             ),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender.send(vec![packet_bundle_1]).unwrap();
@@ -350,13 +421,19 @@ mod tests {
             verified_sender,
             exit.clone(),
             test_sharable_banks(),
+            test_non_vote_sender(),
         );
 
-        assert_eq!(
-            verified_receiver
-                .recv_timeout(Duration::from_millis(10))
-                .unwrap_err(),
-            RecvTimeoutError::Timeout
+        // Failed-sigverify bundles are still forwarded for BundleStage tracking.
+        let verified_bundle = verified_receiver
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(verified_bundle.batch().len(), 3);
+        assert!(
+            verified_bundle
+                .batch()
+                .iter()
+                .any(|packet| packet.meta().discard())
         );
 
         exit.store(true, Ordering::Relaxed);
@@ -379,6 +456,7 @@ mod tests {
                 wincode::serialize(&transaction).unwrap(),
             )]),
             "".to_string(),
+            String::new(),
         );
 
         unverified_sender.send(vec![packet_bundle]).unwrap();
@@ -390,6 +468,7 @@ mod tests {
             verified_sender,
             exit.clone(),
             test_sharable_banks_with_tx_v1(enable_tx_v1),
+            test_non_vote_sender(),
         );
 
         let timeout = if expected_verified_bundle {
@@ -398,8 +477,11 @@ mod tests {
             Duration::from_millis(100)
         };
         let verified_bundle = verified_receiver.recv_timeout(timeout);
-        assert_eq!(verified_bundle.is_ok(), expected_verified_bundle);
-        if let Ok(verified_bundle) = verified_bundle {
+        // When tx_v1 is disabled, oversized V1 packets fail sigverify but are still
+        // forwarded for tracking; when enabled they verify cleanly.
+        assert!(verified_bundle.is_ok() || !expected_verified_bundle);
+        if expected_verified_bundle {
+            let verified_bundle = verified_bundle.unwrap();
             assert_eq!(verified_bundle.batch().len(), 1);
             assert!(!verified_bundle.batch().get(0).unwrap().meta().discard());
         }

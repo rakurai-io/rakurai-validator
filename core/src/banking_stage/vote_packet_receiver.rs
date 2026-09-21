@@ -13,6 +13,7 @@ use {
     solana_perf::packet::bytes::Bytes,
     solana_pubkey::Pubkey,
     solana_runtime_transaction::sanitize_config::sanitize_config,
+    solana_svm_timings::wallclock_timestamp_nanos,
     std::{
         collections::HashSet,
         num::Saturating,
@@ -24,16 +25,19 @@ use {
 pub struct VotePacketReceiver {
     banking_packet_receiver: BankingPacketReceiver,
     filter_keys: Arc<HashSet<Pubkey>>,
+    capture_gui_timestamps: bool,
 }
 
 impl VotePacketReceiver {
     pub fn new(
         banking_packet_receiver: BankingPacketReceiver,
         filter_keys: Arc<HashSet<Pubkey>>,
+        capture_gui_timestamps: bool,
     ) -> Self {
         Self {
             banking_packet_receiver,
             filter_keys,
+            capture_gui_timestamps,
         }
     }
 
@@ -133,6 +137,11 @@ impl VotePacketReceiver {
     ) {
         stats.num_packets_received += packet_batch.len();
 
+        let capture_gui_timestamps = self.capture_gui_timestamps;
+        let batch_arrival_timestamp_nanos = capture_gui_timestamps
+            .then(wallclock_timestamp_nanos)
+            .unwrap_or(0);
+
         for packet in packet_batch.iter() {
             let Some(packet_data) = packet.data(..) else {
                 continue;
@@ -142,14 +151,28 @@ impl VotePacketReceiver {
                 packet_bytes(packet, packet_data),
                 sanitize_config,
             ) {
-                Ok(packet) => {
-                    if self.should_filter_packet(&packet) {
+                Ok(view) => {
+                    if self.should_filter_packet(&view) {
                         stats.packet_stats.filtered_account_key_count += 1;
                         continue;
                     }
 
+                    let source_ipv4 = if capture_gui_timestamps {
+                        match packet.meta().addr {
+                            std::net::IpAddr::V4(v4) => u32::from(v4),
+                            std::net::IpAddr::V6(_) => 0,
+                        }
+                    } else {
+                        0
+                    };
+
                     stats.num_buffered_packets += 1;
-                    let vote_insertion_metrics = vote_storage.insert_packet(vote_source, packet);
+                    let vote_insertion_metrics = vote_storage.insert_packet(
+                        vote_source,
+                        view,
+                        batch_arrival_timestamp_nanos,
+                        source_ipv4,
+                    );
                     slot_metrics_tracker.accumulate_vote_insertion_metrics(&vote_insertion_metrics);
                     stats.dropped_packets_count += vote_insertion_metrics.total_dropped_packets();
                 }
@@ -296,7 +319,7 @@ mod tests {
             .send(Arc::new(PacketBatch::from(vec![vote_packet])))
             .unwrap();
 
-        let mut receiver = VotePacketReceiver::new(receiver, filter_keys);
+        let mut receiver = VotePacketReceiver::new(receiver, filter_keys, false);
         let genesis_config =
             genesis_utils::create_genesis_config_with_vote_accounts(100, &[keypairs], vec![200])
                 .genesis_config;

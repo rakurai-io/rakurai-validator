@@ -29,11 +29,11 @@ use {
 /// from user input. They should never be zero.
 /// Any difference in the prioritization is negligible for
 /// the current transaction costs.
-pub(crate) fn calculate_priority_and_cost<Tx: TransactionMeta + SVMStaticMessage>(
+pub fn calculate_priority_and_cost<Tx: TransactionMeta + SVMStaticMessage>(
     bank: &Bank,
     transaction: &Tx,
     transaction_configuration: &TransactionConfiguration,
-) -> (u64, u64) {
+) -> (u64, u64, u64) {
     let cost = CostModel::calculate_cost_for_executed_transaction(
         transaction,
         u64::from(transaction_configuration.compute_unit_limit),
@@ -62,6 +62,7 @@ pub(crate) fn calculate_priority_and_cost<Tx: TransactionMeta + SVMStaticMessage
             .saturating_mul(MULTIPLIER)
             .saturating_div(cost.saturating_add(1)),
         cost,
+        reward,
     )
 }
 
@@ -81,7 +82,7 @@ pub(crate) fn calculate_priority_from_bytes(bank: &Bank, data: &[u8]) -> Option<
     let transaction_configuration = runtime_tx
         .transaction_configuration(&bank.feature_set)
         .ok()?;
-    let (priority, _cost) =
+    let (priority, _cost, _reward) =
         calculate_priority_and_cost(bank, &runtime_tx, &transaction_configuration);
 
     Some(priority)
@@ -185,7 +186,7 @@ mod tests {
         let transaction_configuration = runtime_tx
             .transaction_configuration(&bank.feature_set)
             .unwrap();
-        let (from_typed, _cost) =
+        let (from_typed, _cost, _reward) =
             calculate_priority_and_cost(&bank, &runtime_tx, &transaction_configuration);
 
         assert_eq!(from_bytes, from_typed);

@@ -15,11 +15,13 @@ const NUM_PUSH_ACTIVE_SET_ENTRIES: usize = 25;
 // The entry represents set of gossip nodes to actively
 // push to for crds values belonging to the bucket.
 #[derive(Default)]
+#[repr(C)]
 pub(crate) struct PushActiveSet([PushActiveSetEntry; NUM_PUSH_ACTIVE_SET_ENTRIES]);
 
 // Keys are gossip nodes to push messages to.
 // Values are which origins the node has pruned.
 #[derive(Default)]
+#[repr(C)]
 struct PushActiveSetEntry(IndexMap</*node:*/ Pubkey, /*origins:*/ ConcurrentBloom<Pubkey>>);
 
 impl PushActiveSet {

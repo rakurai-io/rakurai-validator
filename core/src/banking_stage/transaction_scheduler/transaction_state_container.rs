@@ -46,10 +46,11 @@ use {
 ///
 /// The container maintains a fixed capacity. If the queue is full when pushing
 /// a new transaction, the lowest priority transaction will be dropped.
-pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
+#[derive(Clone)]
+pub struct TransactionStateContainer<Tx: TransactionWithMeta> {
     capacity: usize,
-    priority_queue: BTreeSet<TransactionPriorityId>,
-    id_to_transaction_state: Slab<BatchIdOrTransactionState<Tx>>,
+    pub priority_queue: BTreeSet<TransactionPriorityId>,
+    pub id_to_transaction_state: Slab<BatchIdOrTransactionState<Tx>>,
     held_transactions: Vec<TransactionPriorityId>,
     nonces_in_use: HashMap<Pubkey, TransactionPriorityId, PubkeyHasherBuilder>,
     // `BamReceiveAndBuffer::prevalidate_batches` rejects `AtomicTxnBatch`es with
@@ -57,21 +58,31 @@ pub(crate) struct TransactionStateContainer<Tx: TransactionWithMeta> {
     batch_id_to_transaction_ids: IntMap<usize, SmallVec<[TransactionId; MAX_PACKETS_PER_BUNDLE]>>,
 }
 
-struct BatchInfo {
+#[derive(Clone)]
+pub struct BatchInfo {
     priority: u64,
     revert_on_error: bool,
     max_schedule_slot: u64,
     seq_id: u32,
 }
 
-enum BatchIdOrTransactionState<Tx: TransactionWithMeta> {
+#[derive(Clone)]
+pub enum BatchIdOrTransactionState<Tx: TransactionWithMeta> {
     Batch(BatchInfo),
     TransactionState(TransactionState<Tx>),
 }
 
-pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
+pub trait StateContainer<Tx: TransactionWithMeta> {
+    // fn insert_new_transaction(
+    //     &mut self,
+    //     transaction: Tx,
+    //     max_age: crate::banking_stage::scheduler_messages::MaxAge,
+    //     priority: u64,
+    //     cost: u64,
+    // ) -> (bool, Option<Vec<String>>);
+
     /// Create a new `TransactionStateContainer` with the given capacity.
-    fn with_capacity(capacity: usize) -> Self;
+    fn with_capacity(capacity: usize, pre_allocate_buffer: bool) -> Self;
 
     fn queue_size(&self) -> usize;
 
@@ -80,8 +91,14 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     /// Returns true if the queue is empty.
     fn is_empty(&self) -> bool;
 
+    fn capacity(&self) -> usize;
+
+    fn len(&self) -> usize;
+
     /// Get the top transaction id in the priority queue.
     fn pop(&mut self) -> Option<TransactionPriorityId>;
+
+    fn peek_max(&mut self) -> Option<TransactionPriorityId>;
 
     /// Get mutable transaction state by id.
     fn get_mut_transaction_state(&mut self, id: TransactionId)
@@ -134,7 +151,7 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
     fn push_ids_into_queue(
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize;
+    ) -> (usize, Option<Vec<String>>);
 
     /// Hold the tarnsaction until the next flush (next slot).
     fn hold_transaction(&mut self, priority_id: TransactionPriorityId);
@@ -172,7 +189,23 @@ pub(crate) trait StateContainer<Tx: TransactionWithMeta> {
 pub(crate) const EXTRA_CAPACITY: usize = 1;
 
 impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<Tx> {
-    fn with_capacity(capacity: usize) -> Self {
+    // fn insert_new_transaction(
+    //     &mut self,
+    //     transaction: Tx,
+    //     max_age: crate::banking_stage::scheduler_messages::MaxAge,
+    //     priority: u64,
+    //     cost: u64,
+    // ) -> (bool, Option<Vec<String>>) {
+    //     let transaction_id =
+    //         self.insert_map_only(TransactionState::new(transaction, max_age, priority, cost));
+    //     let priority_id = TransactionPriorityId::new(priority, transaction_id);
+
+    //     let (num_dropped, num_dropped_signatures) =
+    //         self.push_ids_into_queue(std::iter::once(priority_id));
+    //     (num_dropped > 0, num_dropped_signatures)
+    // }
+
+    fn with_capacity(capacity: usize, _pre_allocate_buffer: bool) -> Self {
         Self {
             capacity,
             priority_queue: BTreeSet::new(),
@@ -198,8 +231,24 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
         self.priority_queue.is_empty()
     }
 
+    fn capacity(&self) -> usize {
+        self.id_to_transaction_state.capacity()
+    }
+
+    fn len(&self) -> usize {
+        self.id_to_transaction_state.len()
+    }
+
     fn pop(&mut self) -> Option<TransactionPriorityId> {
         self.priority_queue.pop_last()
+    }
+
+    fn peek_max(&mut self) -> Option<TransactionPriorityId> {
+        if let Some(priority_id) = self.priority_queue.last() {
+            Some(*priority_id)
+        } else {
+            None
+        }
     }
 
     fn get_mut_transaction_state(
@@ -248,7 +297,7 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
     fn push_ids_into_queue(
         &mut self,
         priority_ids: impl Iterator<Item = TransactionPriorityId>,
-    ) -> usize {
+    ) -> (usize, Option<Vec<String>>) {
         for id in priority_ids {
             self.priority_queue.insert(id);
         }
@@ -262,12 +311,34 @@ impl<Tx: TransactionWithMeta> StateContainer<Tx> for TransactionStateContainer<T
             .len()
             .saturating_sub(self.capacity);
 
-        for _ in 0..num_dropped {
-            let priority_id = self.priority_queue.pop_first().expect("queue is not empty");
-            self.remove_state(priority_id.id);
-        }
+        let dropped_tx_signatures = if num_dropped > 0 {
+            let mut dropped_tx_signatures = vec![];
+            for _ in 0..num_dropped {
+                let priority_id = self.priority_queue.pop_first().expect("queue is not empty");
 
-        num_dropped
+                let tx_signature = self.id_to_transaction_state.get(priority_id.id).and_then(
+                    |entry| match entry {
+                        BatchIdOrTransactionState::TransactionState(state) => state
+                            .transaction()
+                            .signatures()
+                            .first()
+                            .map(|signature| signature.to_string()),
+                        _ => None,
+                    },
+                );
+
+                if let Some(signature) = tx_signature {
+                    dropped_tx_signatures.push(signature);
+                }
+
+                self.remove_state(priority_id.id);
+            }
+            Some(dropped_tx_signatures)
+        } else {
+            None
+        };
+
+        (num_dropped, dropped_tx_signatures)
     }
 
     fn hold_transaction(&mut self, priority_id: TransactionPriorityId) {
@@ -407,15 +478,17 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
         max_age: crate::banking_stage::scheduler_messages::MaxAge,
         priority: u64,
         cost: u64,
-    ) -> bool {
+    ) -> (bool, Option<Vec<String>>) {
         let transaction_id =
             self.insert_map_only(TransactionState::new(transaction, max_age, priority, cost));
         let priority_id = TransactionPriorityId::new(priority, transaction_id);
 
-        self.push_ids_into_queue(std::iter::once(priority_id)) > 0
+        let (num_dropped, num_dropped_signatures) =
+            self.push_ids_into_queue(std::iter::once(priority_id));
+        (num_dropped > 0, num_dropped_signatures)
     }
 
-    fn get_vacant_map_entry(&mut self) -> VacantEntry<'_, BatchIdOrTransactionState<Tx>> {
+    pub fn get_vacant_map_entry(&mut self) -> VacantEntry<'_, BatchIdOrTransactionState<Tx>> {
         assert!(self.id_to_transaction_state.len() < self.id_to_transaction_state.capacity());
         self.id_to_transaction_state.vacant_entry()
     }
@@ -446,7 +519,7 @@ impl<Tx: TransactionWithMeta> TransactionStateContainer<Tx> {
     }
 }
 
-pub(crate) type RuntimeTransactionView = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
+pub type RuntimeTransactionView = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
 pub(crate) type TransactionViewState = TransactionState<RuntimeTransactionView>;
 pub(crate) type TransactionViewStateContainer = TransactionStateContainer<RuntimeTransactionView>;
 
@@ -504,7 +577,7 @@ mod tests {
 
     #[test]
     fn test_is_empty() {
-        let mut container = TransactionStateContainer::with_capacity(1);
+        let mut container = TransactionStateContainer::with_capacity(1, false);
         assert!(container.is_empty());
 
         push_to_container(&mut container, 1);
@@ -513,7 +586,7 @@ mod tests {
 
     #[test]
     fn test_priority_queue_capacity() {
-        let mut container = TransactionStateContainer::with_capacity(1);
+        let mut container = TransactionStateContainer::with_capacity(1, false);
         push_to_container(&mut container, 5);
 
         assert_eq!(container.priority_queue.len(), 1);
@@ -534,7 +607,7 @@ mod tests {
 
     #[test]
     fn test_get_mut_transaction_state() {
-        let mut container = TransactionStateContainer::with_capacity(5);
+        let mut container = TransactionStateContainer::with_capacity(5, false);
         push_to_container(&mut container, 5);
 
         let existing_id = 3;
@@ -550,7 +623,7 @@ mod tests {
 
     #[test]
     fn test_view_push_ids_to_queue() {
-        let mut container = TransactionViewStateContainer::with_capacity(2);
+        let mut container = TransactionViewStateContainer::with_capacity(2, false);
 
         let reserved_addresses = HashSet::default();
         let packet_parser = |data, priority, cost| {

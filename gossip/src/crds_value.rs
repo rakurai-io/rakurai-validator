@@ -35,6 +35,7 @@ use {
     )
 )]
 #[derive(Serialize, Clone, Debug, PartialEq, Eq, SchemaWrite)]
+#[repr(C)]
 pub struct CrdsValue {
     signature: Signature,
     data: CrdsData,
@@ -83,6 +84,7 @@ impl Signable for CrdsValue {
 /// Type of the replicated value
 /// These are labels for values in a record that is associated with `Pubkey`
 #[derive(PartialEq, Hash, Eq, Clone, Debug)]
+#[repr(C)]
 pub enum CrdsValueLabel {
     Vote(VoteIndex, Pubkey),
     LowestSlot(Pubkey),

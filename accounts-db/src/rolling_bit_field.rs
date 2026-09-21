@@ -7,6 +7,7 @@ use {bv::BitVec, iterators::RollingBitFieldOnesIter, solana_nohash_hasher::IntSe
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Clone)]
+#[repr(C)]
 pub struct RollingBitField {
     max_width: u64,
     min: u64,

@@ -16,11 +16,19 @@ use {
             transaction_scheduler::transaction_state_container::RuntimeTransactionView,
         },
         bundle_stage::bundle_account_locker::BundleAccountLocker,
+        gui::{
+            metrics::GuiTxnTpuSource,
+            slot_txn::{
+                capture_gui_txn_tx_metadata, gui_commit_details_for_batch, GuiTxnBatchPayload,
+                GuiTxnEvent,
+            },
+            GuiCoreMetrics, GuiTxnScheduleInfo, GUI_TXN_BANK_IDX_VOTE,
+        },
     },
     agave_transaction_view::{
         transaction_version::TransactionVersion, transaction_view::SanitizedTransactionView,
     },
-    crossbeam_channel::RecvTimeoutError,
+    crossbeam_channel::{Sender, RecvTimeoutError},
     solana_accounts_db::account_locks::validate_account_locks,
     solana_clock::FORWARD_TRANSACTIONS_TO_LEADER_AT_SLOT_OFFSET,
     solana_measure::{measure::Measure, measure_us},
@@ -34,6 +42,7 @@ use {
     solana_svm::{
         account_loader::TransactionCheckResult, transaction_error_metrics::TransactionErrorMetrics,
     },
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::svm_message::SVMMessage,
     solana_time_utils::timestamp,
     solana_transaction::sanitized::MessageHash,
@@ -63,6 +72,8 @@ pub struct VoteWorker {
     bank_forks: Arc<RwLock<BankForks>>,
     consumer: Consumer,
     bundle_account_locker: BundleAccountLocker,
+    gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+    gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
 }
 
 impl VoteWorker {
@@ -76,6 +87,8 @@ impl VoteWorker {
         bank_forks: Arc<RwLock<BankForks>>,
         consumer: Consumer,
         bundle_account_locker: BundleAccountLocker,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
+        gui_txn_event_sender: Option<Sender<GuiTxnEvent>>,
     ) -> Self {
         Self {
             exit,
@@ -87,12 +100,19 @@ impl VoteWorker {
             bank_forks,
             consumer,
             bundle_account_locker,
+            gui_core_metrics_sender,
+            gui_txn_event_sender,
         }
     }
 
     pub fn run(mut self) {
         let mut banking_stage_stats = BankingStageStats::new();
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::default();
+        let report_interval_ms = if self.gui_core_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
 
         let mut last_metrics_update = Instant::now();
 
@@ -138,7 +158,8 @@ impl VoteWorker {
                     break;
                 }
             }
-            banking_stage_stats.report(1000);
+            banking_stage_stats.report(report_interval_ms, self.gui_core_metrics_sender.as_ref());
+            slot_metrics_tracker.maybe_report_and_reset_interval(self.gui_core_metrics_sender.as_ref());
         }
     }
 
@@ -147,7 +168,7 @@ impl VoteWorker {
         banking_stage_stats: &mut BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) {
-        let (decision, make_decision_us) =
+        let ((decision, _, _), make_decision_us) =
             measure_us!(self.decision_maker.make_consume_or_forward_decision());
         let metrics_action = slot_metrics_tracker.check_leader_slot_boundary(decision.bank());
         slot_metrics_tracker.increment_make_decision_us(make_decision_us);
@@ -159,9 +180,9 @@ impl VoteWorker {
         slot_metrics_tracker.apply_action(metrics_action);
 
         match decision {
-            BufferedPacketsDecision::Consume(bank) => {
+            BufferedPacketsDecision::Consume(bank_start) => {
                 let (_, consume_buffered_packets_us) = measure_us!(self.consume_buffered_packets(
-                    &bank,
+                    &bank_start.working_bank,
                     banking_stage_stats,
                     slot_metrics_tracker,
                 ));
@@ -173,7 +194,13 @@ impl VoteWorker {
                 // load all accounts from address loader;
                 let current_bank = self.bank_forks.read().unwrap().working_bank();
                 self.storage.cache_epoch_boundary_info(&current_bank);
-                self.storage.clear();
+                let (num_dropped_gossip, num_dropped_tpu) = self.storage.clear();
+                banking_stage_stats
+                    .dropped_forward_gossip_packets_count
+                    .fetch_add(num_dropped_gossip as usize, Ordering::Relaxed);
+                banking_stage_stats
+                    .dropped_forward_tpu_packets_count
+                    .fetch_add(num_dropped_tpu as usize, Ordering::Relaxed);
             }
             BufferedPacketsDecision::ForwardAndHold => {
                 // get current working bank from bank_forks, use it to sanitize transaction and
@@ -251,9 +278,10 @@ impl VoteWorker {
         *rebuffered_packet_count += deferred_restore_count;
         let mut all_vote_packets = VecDeque::from(all_vote_packets);
         let mut error_counters: TransactionErrorMetrics = TransactionErrorMetrics::default();
+        let capture_gui = self.gui_txn_event_sender.is_some();
         // Process one vote at a time to avoid over-reserving block CUs during packing.
         // This also keeps each recorded vote batch small, which favors entry/FEC-set packing.
-        while let Some((vote_pubkey, packet)) = all_vote_packets.pop_front() {
+        while let Some((vote_pubkey, packet, source, arrival_nanos, source_ipv4)) = all_vote_packets.pop_front() {
             let Some(sanitized_transaction) =
                 consume_scan_should_process_packet(bank, packet, &mut error_counters)
             else {
@@ -264,10 +292,20 @@ impl VoteWorker {
                 continue;
             };
 
+            // Parallel GUI metadata for this single vote:
+            // `(VoteSource, arrival_nanos, source_ipv4, mb_start_nanos)`.
+            let mb_start = if capture_gui {
+                wallclock_timestamp_nanos()
+            } else {
+                0
+            };
+            let vote_sources = [(source, arrival_nanos, source_ipv4, mb_start)];
+
             let (process_transactions_summary, process_packets_transactions_us) =
                 measure_us!(self.process_packets_transactions(
                     bank,
                     std::slice::from_ref(&sanitized_transaction),
+                    &vote_sources,
                     banking_stage_stats,
                     slot_metrics_tracker,
                 ));
@@ -306,9 +344,12 @@ impl VoteWorker {
                 // vote is processed one at a time, so the only valid retryable index is 0
                 assert_eq!(retryable_vote_indices.as_slice(), &[0]);
 
-                self.storage.reinsert_packets(std::iter::once(
+                self.storage.reinsert_packets(std::iter::once((
                     sanitized_transaction.into_inner_transaction().into_view(),
-                ));
+                    source,
+                    arrival_nanos,
+                    source_ipv4,
+                )));
             } else if let Some(retained_vote) =
                 self.storage.take_deferred_retained_vote(vote_pubkey)
             {
@@ -317,8 +358,11 @@ impl VoteWorker {
             }
 
             if has_reached_end_of_slot(reached_max_poh_height, bank) {
-                self.storage
-                    .reinsert_packets(all_vote_packets.into_iter().map(|(_, vote)| vote));
+                self.storage.reinsert_packets(all_vote_packets.into_iter().map(
+                    |(_pubkey, vote, source, arrival_nanos, source_ipv4)| {
+                        (vote, source, arrival_nanos, source_ipv4)
+                    },
+                ));
                 return true;
             }
         }
@@ -330,6 +374,7 @@ impl VoteWorker {
         &self,
         bank: &Bank,
         sanitized_transactions: &[impl TransactionWithMeta],
+        vote_sources: &[(VoteSource, i64, u32, i64)],
         banking_stage_stats: &BankingStageStats,
         slot_metrics_tracker: &mut LeaderSlotMetricsTracker,
     ) -> ProcessTransactionsSummary {
@@ -338,7 +383,9 @@ impl VoteWorker {
                 &self.consumer,
                 bank,
                 sanitized_transactions,
-                &self.bundle_account_locker
+                &self.bundle_account_locker,
+                self.gui_txn_event_sender.as_ref(),
+                vote_sources,
             ));
         slot_metrics_tracker.increment_process_transactions_us(process_transactions_us);
         banking_stage_stats
@@ -391,18 +438,67 @@ impl VoteWorker {
         bank: &Bank,
         transactions: &[impl TransactionWithMeta],
         bundle_account_locker: &BundleAccountLocker,
+        gui_txn_event_sender: Option<&Sender<GuiTxnEvent>>,
+        vote_sources: &[(VoteSource, i64, u32, i64)],
     ) -> ProcessTransactionsSummary {
-        let process_transaction_batch_output = consumer.process_and_record_transactions(
+        let mut process_transaction_batch_output = consumer.process_and_record_transactions(
             bank,
             transactions,
             bundle_account_locker,
             false,
         );
 
+        if let Some(sender) = gui_txn_event_sender {
+            let microblock_end_timestamp_nanos = wallclock_timestamp_nanos();
+            let output = &process_transaction_batch_output.execute_and_commit_transactions_output;
+            let gui_timestamps_per_tx = output
+                .execute_and_commit_timings
+                .execute_timings
+                .gui_timestamps_per_tx
+                .clone();
+            // Vote path uses a dedicated GUI bank row; mb_start stamped at scan resolve.
+            let schedule_info: Vec<GuiTxnScheduleInfo> = vote_sources
+                .iter()
+                .map(|(source, arrival_nanos, source_ipv4, mb_start)| GuiTxnScheduleInfo {
+                    bank_idx: GUI_TXN_BANK_IDX_VOTE,
+                    microblock_start_timestamp_nanos: *mb_start,
+                    timestamp_arrival_nanos: *arrival_nanos,
+                    source_ipv4: *source_ipv4,
+                    source_tpu: match source {
+                        VoteSource::Gossip => GuiTxnTpuSource::Gossip,
+                        VoteSource::Tpu => GuiTxnTpuSource::Quic,
+                    },
+                    ..GuiTxnScheduleInfo::default()
+                })
+                .collect();
+            if !schedule_info.is_empty() {
+                let commit_details = gui_commit_details_for_batch(
+                    &output.commit_transactions_result,
+                    schedule_info.len(),
+                );
+                let (signatures, is_simple_vote) = capture_gui_txn_tx_metadata(transactions);
+                if let Err(err) = sender.try_send(GuiTxnEvent::TxnBatch(GuiTxnBatchPayload {
+                    slot: bank.slot(),
+                    gui_timestamps_per_tx,
+                    microblock_end_timestamp_nanos,
+                    gui_schedule_info: schedule_info,
+                    compute_units_requested: std::mem::take(
+                        &mut process_transaction_batch_output.compute_units_requested,
+                    ),
+                    commit_details,
+                    signatures,
+                    is_simple_vote,
+                })) {
+                    warn!("failed to send TxnBatch gui event: {err}");
+                }
+            }
+        }
+
         let ProcessTransactionBatchOutput {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+            ..
         } = process_transaction_batch_output;
 
         let ExecuteAndCommitTransactionsOutput {
@@ -545,18 +641,25 @@ mod tests {
             vote_storage::tests::to_sanitized_view,
         },
         crossbeam_channel::{bounded, never},
+        solana_clock::DEFAULT_TICKS_PER_SLOT,
         solana_hash::Hash,
         solana_leader_schedule::SlotLeader,
-        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_ledger::{
+            blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
+            get_tmp_ledger_path_auto_delete,
+        },
         solana_perf::packet::BytesPacket,
         solana_poh::{
-            poh_recorder::{LeaderState, SharedLeaderState},
+            poh_recorder::{create_test_recorder, LeaderState, SharedLeaderState},
             record_channels::record_channels,
         },
+        agave_votor::slot_clock::SharedAlpenglowSlotClock,
+        agave_votor_messages::migration::MigrationStatus,
         solana_svm::account_loader::CheckedTransactionDetails,
         solana_system_transaction as system_transaction,
         solana_vote::vote_transaction::new_tower_sync_transaction,
         solana_vote_program::vote_state::TowerSync,
+        std::time::Instant,
     };
 
     #[test]
@@ -646,8 +749,8 @@ mod tests {
         record_receiver.restart(bank.bank_id());
 
         let (replay_vote_sender, _replay_vote_receiver) = bounded(1024);
-        let committer = Committer::new(None, replay_vote_sender, None);
-        let consumer = Consumer::new(committer, recorder, None);
+        let committer = Committer::new(None, replay_vote_sender, None, None);
+        let consumer = Consumer::new(committer, recorder, None, false);
 
         // Create and process a simple transfer transaction
         let pubkey = solana_pubkey::new_rand();
@@ -664,6 +767,8 @@ mod tests {
             &bank,
             &transactions,
             &BundleAccountLocker::default(),
+            None,
+            &[],
         );
 
         // Assert - Transaction were prcoessed.
@@ -701,20 +806,36 @@ mod tests {
             None,
             None,
         )));
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path())
+            .expect("Expected to be able to open database ledger");
+        let (_exit, poh_recorder, _controller, _recorder, _service, _entry_receiver) =
+            create_test_recorder(bank_a.clone(), Arc::new(blockstore), None, None);
         let mut worker = VoteWorker::new(
             Arc::new(AtomicBool::new(false)),
             CancellationToken::new(),
-            DecisionMaker::new(shared_leader_state.clone()),
-            VotePacketReceiver::new(never(), Arc::default()),
-            VotePacketReceiver::new(never(), Arc::default()),
+            DecisionMaker::new(
+                shared_leader_state.clone(),
+                DEFAULT_TICKS_PER_SLOT,
+                Arc::new(Instant::now()),
+                0,
+                poh_recorder,
+                Arc::new(MigrationStatus::default()),
+                SharedAlpenglowSlotClock::default(),
+            ),
+            VotePacketReceiver::new(never(), Arc::default(), false),
+            VotePacketReceiver::new(never(), Arc::default(), false),
             VoteStorage::new(&bank_a),
             bank_forks,
             Consumer::new(
-                Committer::new(None, bounded(1).0, None),
+                Committer::new(None, bounded(1).0, None, None),
                 solana_poh::transaction_recorder::TransactionRecorder::new(record_sender),
                 None,
+                false,
             ),
             BundleAccountLocker::default(),
+            None,
+            None,
         );
         let mut tower_sync = TowerSync::from(vec![(0, 1)]);
         tower_sync.hash = root_bank.hash();
@@ -730,6 +851,8 @@ mod tests {
         worker.storage.insert_packet(
             VoteSource::Tpu,
             to_sanitized_view(BytesPacket::from_data(vote_a).unwrap()),
+            0,
+            0,
         );
         let mut banking_stage_stats = BankingStageStats::new();
         let mut slot_metrics_tracker = LeaderSlotMetricsTracker::default();
@@ -749,6 +872,8 @@ mod tests {
         worker.storage.insert_packet(
             VoteSource::Tpu,
             to_sanitized_view(BytesPacket::from_data(vote_b).unwrap()),
+            0,
+            0,
         );
 
         // Mirror BankForks::clear_bank() for the replaced bank.

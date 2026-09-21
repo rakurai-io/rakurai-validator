@@ -1,0 +1,2398 @@
+use {
+    super::LikeClusterInfo,
+    crate::{
+        banking_stage::{
+            SchedulerError, SchedulerObj,
+            decision_maker::{BufferedPacketsDecision, DecisionMaker},
+            postpack_confirmation_config::load_cached_uuid_mev_share_groups,
+            scheduler_messages::MaxAge,
+            transaction_scheduler::transaction_state::TransactionState,
+            virtual_priority_config::{
+                CachedUuidTipGroup, TipUuidDelta, load_cached_uuid_tip_groups,
+                snapshot_group_balances, weighted_tip_deltas_from_balances,
+            },
+        },
+        tip_manager::tip_distribution::{ClaimStatus, TipDistributionAccount},
+    },
+    agave_reserved_account_keys::ReservedAccountKeys,
+    agave_transaction_view::{
+        resolved_transaction_view::ResolvedTransactionView,
+        transaction_view::SanitizedTransactionView,
+    },
+    anchor_lang::AccountDeserialize,
+    crossbeam_channel::Sender,
+    rakurai_activation::{
+        sdk::{
+            derive_activation_account_address,
+            derive_config_account_address as derive_activation_config_account_address,
+        },
+        state::{RakuraiActivationAccount, RakuraiActivationConfigAccount},
+    },
+    rakurai_tip_manager::{
+        RAKURAI_REVENUE_NAME, TipManagerConfigAccount,
+        sdk::{
+            derive_rakurai_tip_manager_config_account_address,
+            derive_rakurai_tip_payment_account_pdas, derive_record_authority_address,
+            instruction::{
+                ChangeTipReceiverV2Accounts, ChangeTipReceiverV2Args, change_tip_receiver_v2_ix,
+            },
+        },
+    },
+    reward_distribution::{
+        sdk::{
+            derive_config_account_address, derive_mev_share_collection_account_v1_address,
+            derive_p2c_subscription_address, derive_reward_collection_account_address,
+            derive_tip_collection_account_v1_address, derive_tips_and_mev_share_config_address,
+            instruction::{
+                InitializeRevenueShareAccountV1Accounts, InitializeRevenueShareAccountV1Args,
+                InitializeRewardCollectionAccountArgs, InitializeRewardCollectionAccountV1Accounts,
+                RecordRevenueArgs, RecordRevenueShareAccounts,
+                TransferClientCommissionOnMevCommissionAccounts,
+                TransferClientCommissionOnMevCommissionArgs, TransferStakerRewardsAccounts,
+                TransferStakerRewardsArgs, UpdateEpochConvertedToBlockRewardAccounts,
+                UpdateEpochConvertedToBlockRewardArgs,
+                UpdateP2CEpochConvertedToBlockRewardAccounts,
+                UpdateP2CEpochConvertedToBlockRewardArgs, initialize_revenue_share_account_v1_ix,
+                initialize_reward_collection_account_v1_ix, record_revenue_v1_ix,
+                transfer_client_commission_on_mev_commission_ix, transfer_staker_rewards_ix,
+                update_epoch_converted_to_block_reward_v1_ix,
+                update_p2c_epoch_converted_to_block_reward_ix,
+            },
+        },
+        state::{P2CSubscriptionAccount, RevenueShareAccountV1, RewardCollectionAccount},
+    },
+    solana_account::ReadableAccount,
+    solana_clock::Slot,
+    solana_compute_budget_interface::ComputeBudgetInstruction,
+    solana_gossip::cluster_info::ClusterInfo,
+    solana_hash::Hash,
+    solana_instruction::Instruction,
+    solana_ledger::blockstore::Blockstore,
+    solana_message::Message,
+    solana_perf::packet::bytes::Bytes,
+    solana_pubkey::Pubkey,
+    solana_runtime::{
+        bank::Bank,
+        bank_forks::BankForks,
+        leader_schedule_utils::{
+            first_of_consecutive_leader_slots, last_of_consecutive_leader_slots,
+        },
+    },
+    solana_runtime_transaction::{
+        runtime_transaction::RuntimeTransaction, transaction_meta::TransactionMeta,
+    },
+    solana_sdk_ids::system_program,
+    solana_signature::Signature,
+    solana_signer::Signer,
+    solana_svm_timings::wallclock_timestamp_nanos,
+    solana_svm_transaction::{
+        svm_message::SVMStaticMessage, svm_transaction::SVMStaticTransaction,
+    },
+    solana_transaction::{Transaction, sanitized::MessageHash, versioned::VersionedTransaction},
+    solana_transaction_status::RewardType,
+    std::{
+        collections::HashMap,
+        sync::{
+            Arc, RwLock,
+            atomic::{AtomicBool, Ordering::Relaxed},
+        },
+        time::{Duration, Instant},
+        u64,
+    },
+    thiserror::Error,
+};
+
+#[cfg(feature = "build_validator")]
+use solana_runtime::leader_schedule_utils::leader_slot_index;
+
+#[cfg(feature = "build_validator")]
+use crate::banking_stage::rakurai_enabled;
+
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    pub fn reset_rakurai();
+
+    #[allow(improper_ctypes)]
+    #[allow(improper_ctypes_definitions)]
+    fn enable_tpu_p2c_update(bank: &Bank, vote_account: &Pubkey) -> bool;
+}
+
+#[derive(Clone, Debug)]
+pub struct RakuraiOpTxn {
+    pub txn: Option<RuntimeTransaction<ResolvedTransactionView<Bytes>>>,
+    pub landed: bool,
+    last_send: Instant,
+}
+
+impl Default for RakuraiOpTxn {
+    fn default() -> Self {
+        Self {
+            txn: None,
+            landed: false,
+            last_send: Instant::now(),
+        }
+    }
+}
+
+impl RakuraiOpTxn {
+    pub fn default() -> Self {
+        Default::default()
+    }
+
+    /// Create a new pending transaction
+    pub fn txn(&mut self, txn: RuntimeTransaction<ResolvedTransactionView<Bytes>>) {
+        self.txn = Some(txn);
+        self.last_send = Instant::now();
+    }
+
+    /// Reset state
+    pub fn reset(&mut self) {
+        self.txn = None;
+        self.landed = false;
+    }
+
+    /// Mark transaction as landed and release txn memory
+    pub fn landed(&mut self) {
+        self.txn = None;
+        self.landed = true;
+    }
+}
+
+/// Per-task in-flight txns sent from the reward-distributor consume loop.
+/// Each task is its own transaction and is retried independently until it lands
+/// or the leader turn ends.
+struct RakuraiOpTxnSet {
+    create_rca: RakuraiOpTxn,
+    change_tip_receiver: RakuraiOpTxn,
+    record_ix: RakuraiOpTxn,
+    transfer_staker_rewards: RakuraiOpTxn,
+    mev_commission: RakuraiOpTxn,
+}
+
+impl RakuraiOpTxnSet {
+    fn new() -> Self {
+        Self {
+            create_rca: RakuraiOpTxn::default(),
+            change_tip_receiver: RakuraiOpTxn::default(),
+            record_ix: RakuraiOpTxn::default(),
+            transfer_staker_rewards: RakuraiOpTxn::default(),
+            mev_commission: RakuraiOpTxn::default(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.create_rca.reset();
+        self.change_tip_receiver.reset();
+        self.record_ix.reset();
+        self.transfer_staker_rewards.reset();
+        self.mev_commission.reset();
+    }
+}
+
+#[allow(dead_code)]
+#[derive(Clone)]
+pub struct LatestBankPair {
+    pub root_bank: Arc<Bank>,
+    pub working_bank: Arc<Bank>,
+}
+
+impl LatestBankPair {
+    pub fn new(root_bank: Arc<Bank>, working_bank: Arc<Bank>) -> Self {
+        Self {
+            root_bank,
+            working_bank,
+        }
+    }
+}
+#[derive(Debug, Clone)]
+pub struct TxnsHistory {
+    pub message_hash: Hash,
+    pub blockhash: Hash,
+    pub send_slot: u64,
+    pub rewards: u64,
+}
+
+#[derive(Debug, Clone)]
+#[repr(C)]
+pub struct RewardDistributionConfig {
+    pub rakurai_activation_program_id: Pubkey,
+    pub reward_distribution_program_id: Pubkey,
+    pub rakurai_tip_manager_program_id: Pubkey,
+    pub rewards_merkle_root_authority: Pubkey,
+    pub tip_distribution_program_id: Pubkey,
+    pub vote_account: Pubkey,
+}
+
+impl Default for RewardDistributionConfig {
+    fn default() -> Self {
+        Self {
+            rakurai_activation_program_id: Pubkey::new_unique(),
+            reward_distribution_program_id: Pubkey::new_unique(),
+            rakurai_tip_manager_program_id: Pubkey::new_unique(),
+            rewards_merkle_root_authority: Pubkey::new_unique(),
+            tip_distribution_program_id: Pubkey::new_unique(),
+            vote_account: Pubkey::new_unique(),
+        }
+    }
+}
+
+#[derive(PartialEq, Debug)]
+pub enum RakuraiCommissionOnMevStatus {
+    NotDeducted,
+    Deducted,
+    SkippedThisEpoch,
+    TransactionSent,
+}
+
+#[derive(Clone, Debug)]
+struct TipTurnReport {
+    first_slot: Slot,
+    last_slot: Slot,
+    baseline_slot: Slot,
+    groups: Vec<CachedUuidTipGroup>,
+    // Balances captured from the frozen baseline bank (state entering the turn).
+    start_balances: HashMap<Pubkey, u64>,
+    // Balances captured from the highest frozen leader bank of the turn, once available.
+    end_balances: Option<HashMap<Pubkey, u64>>,
+    end_captured_slot: Option<Slot>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingTipRevenueUpdate {
+    uuid: String,
+    uuid_name: [u8; 32],
+    amount: u64,
+    source_first_slot: Slot,
+    source_last_slot: Slot,
+}
+
+/// Compute-unit limit used for block-reward conversion transactions. Paired with a
+/// compute-unit price of `amount` micro-lamports/CU, this yields a priority fee of exactly
+/// `amount` lamports (since `BLOCK_REWARD_CONVERSION_CU_LIMIT CU * (AMOUNT_MULTIPLICATION_FACTOR * amount ) µlamports/CU / 1_000_000 = amount lamports`).
+const BLOCK_REWARD_CONVERSION_CU_LIMIT: u32 = 10_000;
+const AMOUNT_MULTIPLICATION_FACTOR: u64 = 100;
+
+pub struct RewardDistributor {
+    cluster_info: Arc<ClusterInfo>,
+    blockstore: Arc<Blockstore>,
+    bank_forks: Arc<RwLock<BankForks>>,
+    rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus,
+    distribution_config: RewardDistributionConfig,
+    high_priority_transaction_sender:
+        Option<Sender<SchedulerObj<RuntimeTransaction<ResolvedTransactionView<Bytes>>>>>,
+    txns_history: HashMap<Signature, TxnsHistory>,
+    accumulated_reward: u64,
+    decision_maker: DecisionMaker,
+    shared_bank_update: Arc<RwLock<LatestBankPair>>,
+    input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+    #[allow(unused)]
+    reset_rakurai: Arc<AtomicBool>,
+    forward_to_p2c: Option<Arc<AtomicBool>>,
+    active_tip_turn: Option<TipTurnReport>,
+    pending_tip_reports: Vec<TipTurnReport>,
+    pending_tip_revenue_updates: Vec<PendingTipRevenueUpdate>,
+    pending_tip_revenue_in_flight: Vec<PendingTipRevenueUpdate>,
+}
+
+impl RewardDistributor {
+    pub fn new(
+        cluster_info: Arc<ClusterInfo>,
+        blockstore: Arc<Blockstore>,
+        bank_forks: Arc<RwLock<BankForks>>,
+        distribution_config: RewardDistributionConfig,
+        high_priority_transaction_sender: Option<
+            Sender<SchedulerObj<RuntimeTransaction<ResolvedTransactionView<Bytes>>>>,
+        >,
+        decision_maker: DecisionMaker,
+        shared_bank_update: Arc<RwLock<LatestBankPair>>,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        reset_rakurai: Arc<AtomicBool>,
+        forward_to_p2c: Option<Arc<AtomicBool>>,
+    ) -> Self {
+        Self {
+            cluster_info,
+            blockstore,
+            bank_forks,
+            rakurai_commission_on_mev_commission_stats: RakuraiCommissionOnMevStatus::NotDeducted,
+            distribution_config,
+            high_priority_transaction_sender,
+            txns_history: HashMap::new(),
+            accumulated_reward: 0,
+            decision_maker,
+            shared_bank_update,
+            input_tx_signature_sender,
+            reset_rakurai,
+            forward_to_p2c,
+            active_tip_turn: None,
+            pending_tip_reports: Vec::new(),
+            pending_tip_revenue_updates: Vec::new(),
+            pending_tip_revenue_in_flight: Vec::new(),
+        }
+    }
+
+    pub fn read_rewards(&self, slot: Slot) -> Option<u64> {
+        let bank_forks_r = self.bank_forks.read().ok()?;
+
+        let bank = bank_forks_r.banks().get(&slot)?;
+        if !bank.is_frozen() {
+            return None;
+        }
+
+        let cloned_bank = bank.clone_without_scheduler();
+        let rewards = cloned_bank.rewards.read().ok()?;
+
+        let total = rewards
+            .iter()
+            .filter_map(|(_, reward_info)| {
+                (reward_info.reward_type == RewardType::Fee).then_some(reward_info.lamports)
+            })
+            .sum::<i64>();
+
+        Some(total as u64)
+    }
+
+    pub fn warning_log(&self, msg: String) {
+        let name: &'static str = "rakurai_warning";
+        let datapoint = create_datapoint!(
+            @point name,
+            ("rakurai_warning_log", msg, String),
+        );
+        solana_metrics::submit(datapoint, log::Level::Warn);
+    }
+
+    fn transfer_mev_commission(
+        &mut self,
+        bank: &Bank,
+        rca_pda: Pubkey,
+        tda_pda: Pubkey,
+    ) -> Result<Option<Instruction>, RewardDistributorError> {
+        let (derive_mev_claim_status_pda_address, _bump) = Pubkey::find_program_address(
+            &[
+                ClaimStatus::SEED,
+                &self.distribution_config.vote_account.to_bytes(),
+                &tda_pda.to_bytes(),
+            ],
+            &self.distribution_config.tip_distribution_program_id,
+        );
+        match bank.get_account(&derive_mev_claim_status_pda_address) {
+            None => {
+                // Tip not distributed yet
+                return Ok(None);
+            }
+            Some(account_shared_data) => {
+                let claim_status_account = ClaimStatus::from_account_shared_data(
+                    &account_shared_data,
+                    &self.distribution_config.tip_distribution_program_id,
+                )
+                .ok()
+                .unwrap();
+
+                let account_shared_data = bank
+                    .get_account(&Pubkey::new_from_array(rca_pda.as_array().clone()))
+                    .ok_or(RewardDistributorError::RcaAccountNotFound)?;
+                let mut account_data = account_shared_data.data();
+                let reward_collection_account =
+                    RewardCollectionAccount::try_deserialize(&mut account_data)
+                        .ok()
+                        .ok_or(RewardDistributorError::RcaDeserializationFailed)?;
+
+                let instruction = transfer_client_commission_on_mev_commission_ix(
+                    self.distribution_config.reward_distribution_program_id,
+                    TransferClientCommissionOnMevCommissionArgs {
+                        mev_rewards: claim_status_account.amount,
+                    },
+                    TransferClientCommissionOnMevCommissionAccounts {
+                        reward_collection_account: rca_pda,
+                        client_commission_account: reward_collection_account
+                            .client_commission_account,
+                        system_program: system_program::id(),
+                        signer: self.cluster_info.id(),
+                    },
+                );
+
+                Ok(Some(instruction))
+            }
+        }
+    }
+
+    fn should_deduct_mev_commission(
+        &mut self,
+        bank: &Bank,
+        threshold: u8,
+    ) -> (bool, Option<Pubkey>, Option<Pubkey>) {
+        let epoch = bank.epoch();
+        let epoch_schedule = bank.epoch_schedule();
+        let first_slot = epoch_schedule.get_first_slot_in_epoch(epoch);
+        let last_slot = epoch_schedule.get_last_slot_in_epoch(epoch);
+        let current_slot = bank.slot();
+
+        // ---- Step 2: Check epoch progress
+        let total_slots = last_slot - first_slot;
+        let completed_slots = current_slot - first_slot;
+        let completed_percent = (completed_slots as f64 / total_slots as f64) * 100.0;
+
+        if completed_percent < threshold as f64 {
+            trace!(
+                "Not enough progress yet epoch: {epoch:}, completed_slots: {completed_slots:}, completed_percent: {completed_percent:}"
+            );
+            return (false, None, None);
+        }
+
+        // ---- Step 2: Derive PDA addresses for last epoch
+        let (rca_pda, _) = derive_reward_collection_account_address(
+            &self.distribution_config.reward_distribution_program_id,
+            &self.distribution_config.vote_account,
+            epoch - 1,
+        );
+        let (tda_pda, _) = TipDistributionAccount::find_program_address(
+            &self.distribution_config.tip_distribution_program_id,
+            &self.distribution_config.vote_account,
+            epoch - 1,
+        );
+
+        // ---- Step 3: Check RCA
+        let rca_ok = bank
+            .get_account(&rca_pda)
+            .and_then(|account_shared_data| {
+                let mut account_data = account_shared_data.data();
+                RewardCollectionAccount::try_deserialize(&mut account_data).ok()
+            })
+            .map_or(false, |rca| match rca.client_mev_commission_deducted {
+                None => {
+                    self.rakurai_commission_on_mev_commission_stats =
+                        RakuraiCommissionOnMevStatus::SkippedThisEpoch;
+                    false
+                }
+                Some(0) => true,
+                Some(_) => {
+                    self.rakurai_commission_on_mev_commission_stats =
+                        RakuraiCommissionOnMevStatus::Deducted;
+                    false
+                }
+            });
+
+        if !rca_ok {
+            return (false, Some(rca_pda), Some(tda_pda));
+        }
+
+        // ---- Step 4: Check TDA
+        let tda_ok = bank
+            .get_account(&tda_pda)
+            .and_then(|account_shared_data| {
+                TipDistributionAccount::from_account_shared_data(
+                    &account_shared_data,
+                    &self.distribution_config.tip_distribution_program_id,
+                )
+                .ok()
+            })
+            .map_or(false, |tda| {
+                if tda.validator_commission_bps == 0 {
+                    debug!("TDA has zero commission, skipping MEV commission deduction");
+                    self.rakurai_commission_on_mev_commission_stats =
+                        RakuraiCommissionOnMevStatus::SkippedThisEpoch;
+                    false
+                } else if tda.merkle_root.is_none() {
+                    debug!("TDA has valid commission, proceeding with MEV commission deduction");
+                    false
+                } else {
+                    debug!("TDA has valid commission, proceeding with MEV commission deduction");
+                    true
+                }
+            });
+
+        if !tda_ok {
+            return (false, Some(rca_pda), Some(tda_pda));
+        }
+
+        (true, Some(rca_pda), Some(tda_pda))
+    }
+
+    fn create_transfer_rca_instruction(
+        &mut self,
+        total_rewards: u64,
+        reward_account: Pubkey,
+        bank: &Bank,
+    ) -> Result<Option<Instruction>, RewardDistributorError> {
+        let account_shared_data = bank
+            .get_account(&reward_account)
+            .ok_or(RewardDistributorError::RcaAccountNotFound)?;
+        let mut account_data = account_shared_data.data();
+        let reward_collection_account = RewardCollectionAccount::try_deserialize(&mut account_data)
+            .ok()
+            .ok_or(RewardDistributorError::RcaDeserializationFailed)?;
+
+        if reward_collection_account.block_reward_commission_bps == 10_000
+            && reward_collection_account.client_commission_bps == 0
+        {
+            self.accumulated_reward = 0;
+            return Ok(None);
+        }
+
+        let instruction = transfer_staker_rewards_ix(
+            self.distribution_config.reward_distribution_program_id,
+            TransferStakerRewardsArgs { total_rewards },
+            TransferStakerRewardsAccounts {
+                reward_collection_account: reward_account,
+                client_commission_account: reward_collection_account.client_commission_account,
+                system_program: system_program::id(),
+                signer: self.cluster_info.id(),
+            },
+        );
+
+        Ok(Some(instruction))
+    }
+
+    fn get_reward_collection_pda_status(&mut self, bank: &Bank) -> (bool, Pubkey) {
+        let (pda, _) = derive_reward_collection_account_address(
+            &self.distribution_config.reward_distribution_program_id,
+            &self.distribution_config.vote_account,
+            bank.epoch(),
+        );
+
+        let rca_created = match bank.get_account(&pda) {
+            None => false,
+            Some(account) => {
+                if account.owner() == &self.distribution_config.reward_distribution_program_id {
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        (rca_created, pda)
+    }
+
+    fn initialize_reward_collection_account_instruction(
+        &self,
+        bank: &Bank,
+    ) -> Result<Instruction, RewardDistributorError> {
+        let activation_config_account_pubkey = derive_activation_config_account_address(
+            &self.distribution_config.rakurai_activation_program_id,
+        )
+        .0;
+        let config_account_shared_data = bank
+            .get_account(&activation_config_account_pubkey)
+            .ok_or(RewardDistributorError::RaaConfigAccountNotFound)?;
+        let mut config_account_data = config_account_shared_data.data();
+        let rakurai_activation_config =
+            RakuraiActivationConfigAccount::try_deserialize(&mut config_account_data)
+                .ok()
+                .ok_or(RewardDistributorError::RaaConfigDeserializationFailed)?;
+
+        let activation_account_pubkey = derive_activation_account_address(
+            &self.distribution_config.rakurai_activation_program_id,
+            &self.cluster_info.id(),
+        )
+        .0;
+
+        let account_shared_data = bank
+            .get_account(&activation_account_pubkey)
+            .ok_or(RewardDistributorError::RaaAccountNotFound)?;
+        let mut account_data = account_shared_data.data();
+        let rakurai_activation = RakuraiActivationAccount::try_deserialize(&mut account_data)
+            .ok()
+            .ok_or(RewardDistributorError::RaaDeserializationFailed)?;
+
+        let (reward_collection_account, bump) = derive_reward_collection_account_address(
+            &self.distribution_config.reward_distribution_program_id,
+            &self.distribution_config.vote_account,
+            bank.epoch(),
+        );
+
+        let instruction = initialize_reward_collection_account_v1_ix(
+            self.distribution_config.reward_distribution_program_id,
+            InitializeRewardCollectionAccountArgs {
+                merkle_root_upload_authority: self
+                    .distribution_config
+                    .rewards_merkle_root_authority,
+                block_reward_commission_bps: rakurai_activation.block_reward_commission_bps,
+                client_commission_account: rakurai_activation_config.client_commission_account,
+                client_commission_bps: rakurai_activation.client_commission_bps,
+                bump,
+            },
+            InitializeRewardCollectionAccountV1Accounts {
+                config: derive_config_account_address(
+                    &self.distribution_config.reward_distribution_program_id,
+                )
+                .0,
+                reward_collection_account,
+                validator_vote_account: self.distribution_config.vote_account,
+                signer: self.cluster_info.id(),
+                system_program: system_program::id(),
+                rakurai_activation_account: activation_account_pubkey,
+            },
+        );
+
+        Ok(instruction)
+    }
+
+    fn create_runtime_transaction(
+        &self,
+        bank: &Bank,
+        instructions: &[Instruction],
+    ) -> Option<RuntimeTransaction<ResolvedTransactionView<Bytes>>> {
+        let message = Message::new(&instructions, Some(&self.cluster_info.id()));
+        let tx = Transaction::new(
+            &[self.cluster_info.keypair().clone()],
+            message,
+            bank.last_blockhash(),
+        );
+        let serialized_transaction = bincode::serialize(&VersionedTransaction::from(tx)).ok()?;
+        let sanitize_config = solana_runtime_transaction::sanitize_config::sanitize_config();
+        let transaction = SanitizedTransactionView::try_new_sanitized(
+            Bytes::from(serialized_transaction),
+            &sanitize_config,
+        )
+        .ok()?;
+
+        let static_runtime_transaction =
+            RuntimeTransaction::<SanitizedTransactionView<Bytes>>::try_new(
+                transaction,
+                MessageHash::Compute,
+                None,
+            )
+            .ok()?;
+
+        RuntimeTransaction::<ResolvedTransactionView<Bytes>>::try_new(
+            static_runtime_transaction,
+            None,
+            &ReservedAccountKeys::empty_key_set(),
+        )
+        .ok()
+    }
+
+    fn check_txn_status(&mut self) {
+        let bank_forks_r = self.bank_forks.read();
+        if bank_forks_r.is_ok() {
+            let working_bank = bank_forks_r.unwrap().working_bank();
+            let current_slot = working_bank.slot();
+
+            self.txns_history.retain(|_sig, history| {
+                let is_root = self.blockstore.is_root(history.send_slot);
+                if !is_root {
+                    return true;
+                }
+
+                let within_range = current_slot <= history.send_slot + 150;
+                if !within_range {
+                    return true;
+                }
+                let stats_cache_r = working_bank.status_cache.read();
+                let status = if stats_cache_r.is_ok() {
+                    stats_cache_r.unwrap().get_status(
+                        &history.message_hash,
+                        &history.blockhash,
+                        &working_bank.ancestors,
+                    )
+                } else {
+                    None
+                };
+
+                let has_status = status.is_some();
+                if has_status {
+                    return false;
+                } else {
+                    return true;
+                }
+            });
+        }
+    }
+
+    pub fn change_tip_receiver_instruction(
+        &mut self,
+        bank: &Arc<Bank>,
+        is_tip_receiver_changed: &mut bool,
+    ) -> Result<Option<Vec<Instruction>>, RewardDistributorError> {
+        // Get TipManager config Account
+        let mut instructions = Vec::new();
+        let tip_manager_config_pda = derive_rakurai_tip_manager_config_account_address(
+            &self.distribution_config.rakurai_tip_manager_program_id,
+        );
+        let account_data = bank
+            .get_account(&Pubkey::new_from_array(
+                *tip_manager_config_pda.0.as_array(),
+            ))
+            .ok_or(RewardDistributorError::TipConfigAccountNotFound)?;
+        let tip_manager_config = TipManagerConfigAccount::try_deserialize(&mut account_data.data())
+            .ok()
+            .ok_or(RewardDistributorError::TipConfigDeserializationFailed)?;
+        let tip_accounts = derive_rakurai_tip_payment_account_pdas(
+            &self.distribution_config.rakurai_tip_manager_program_id,
+        );
+
+        // Check if TCA exist else create
+
+        let (tip_collection_account, tip_collection_account_bump) =
+            derive_tip_collection_account_v1_address(
+                &self.distribution_config.reward_distribution_program_id,
+                &RAKURAI_REVENUE_NAME,
+                &self.distribution_config.vote_account,
+            );
+        let tip_collection_pubkey = Pubkey::new_from_array(*tip_collection_account.as_array());
+
+        if !bank
+            .get_account(&tip_collection_pubkey)
+            .is_some_and(|account| {
+                account.owner() == &self.distribution_config.reward_distribution_program_id
+            })
+        {
+            instructions.push(
+                self.create_init_tip_collection_account_ix(
+                    RAKURAI_REVENUE_NAME,
+                    derive_record_authority_address(
+                        &self.distribution_config.rakurai_tip_manager_program_id,
+                    )
+                    .0,
+                    self.cluster_info.id(),
+                    self.distribution_config.vote_account,
+                    self.distribution_config.reward_distribution_program_id,
+                    tip_collection_account,
+                    tip_collection_account_bump,
+                ),
+            );
+        }
+
+        if tip_manager_config.validator_tip_receiver_account != tip_collection_account {
+            *is_tip_receiver_changed = true;
+            let instruction = change_tip_receiver_v2_ix(
+                self.distribution_config.rakurai_tip_manager_program_id,
+                ChangeTipReceiverV2Args,
+                ChangeTipReceiverV2Accounts {
+                    tip_manager_config: tip_manager_config_pda.0,
+                    old_tip_receiver: tip_manager_config.validator_tip_receiver_account,
+                    new_tip_receiver: tip_collection_account,
+                    client_commission_account: tip_manager_config.client_commission_account,
+                    rakurai_tip_account_0: tip_accounts[0].0,
+                    rakurai_tip_account_1: tip_accounts[1].0,
+                    rakurai_tip_account_2: tip_accounts[2].0,
+                    rakurai_tip_account_3: tip_accounts[3].0,
+                    rakurai_tip_account_4: tip_accounts[4].0,
+                    rakurai_tip_account_5: tip_accounts[5].0,
+                    rakurai_tip_account_6: tip_accounts[6].0,
+                    rakurai_tip_account_7: tip_accounts[7].0,
+                    signer: self.cluster_info.id(),
+                    rakurai_activation_account: derive_activation_account_address(
+                        &self.distribution_config.rakurai_activation_program_id,
+                        &self.cluster_info.id(),
+                    )
+                    .0,
+                    reward_distribution_program: self
+                        .distribution_config
+                        .reward_distribution_program_id,
+                    record_authority: derive_record_authority_address(
+                        &self.distribution_config.rakurai_tip_manager_program_id,
+                    )
+                    .0,
+                },
+            );
+
+            instructions.push(instruction);
+        } else {
+            *is_tip_receiver_changed = false;
+        }
+        Ok(Some(instructions))
+    }
+
+    /// Returns `true` if the transaction passed simulation and was handed to the
+    /// high-priority sender. Callers must not treat the op as in-flight on `false`.
+    fn send_transaction(
+        &self,
+        txn_kind: String,
+        bank: &Bank,
+        runtime_tx: RuntimeTransaction<ResolvedTransactionView<Bytes>>,
+    ) -> bool {
+        let simulation_result = bank.simulate_transaction_unchecked(&runtime_tx, false);
+
+        if let Err(err) = simulation_result.result {
+            let txn_info = format!(
+                "signature={},txn_info={:?}",
+                runtime_tx.signature(),
+                txn_kind
+            );
+            self.warning_log(format!(
+                "reward_distributor epoch={},slot={},simulation=false,error={:?},txn={:?},vote_acc={},identity={}",
+                bank.epoch(),
+                bank.slot(),
+                err,
+                txn_info,
+                self.distribution_config.vote_account.to_string(),
+                self.cluster_info.keypair().pubkey().to_string(),
+            ));
+            return false;
+        }
+        let transaction_state = TransactionState::new_with_ingress(
+            runtime_tx,
+            MaxAge::MAX,
+            u64::MAX,
+            150,
+            wallclock_timestamp_nanos(),
+            u32::from(std::net::Ipv4Addr::LOCALHOST),
+        );
+        if let Some(sender) = &self.high_priority_transaction_sender {
+            // -----------------------------------------------------------------------------
+            // TX Input Signature Reporting
+            //
+            // This block sends all incoming transaction signatures (`tx_in_signature`) to
+            // the HouseKeeper via `input_tx_signature_sender`. Each
+            // transaction in the batch is processed to extract its signature. If a
+            // transaction fails deserialization, a serialized packet fallback is used
+            // to still identify the transaction.
+            //
+            // See the "tx_io_check_readme.md" for details on how these
+            // tx_in_signature messages are recorded and analyzed:
+            //   <repo-root>/tx_io_check_readme.md
+            //
+            // Collecting tx_in_signature ensures end-to-end auditing of transaction
+            // entry into the scheduler, enabling detection of missing or censored
+            // transactions and providing full transparency of scheduler behavior.
+            // -----------------------------------------------------------------------------
+            if let Some((input_tx_signature_sender, exit)) = &self.input_tx_signature_sender {
+                if !exit.load(Relaxed) {
+                    let _ = input_tx_signature_sender.try_send(
+                        transaction_state
+                            .transaction()
+                            .signatures()
+                            .first()
+                            .unwrap()
+                            .to_string(),
+                    );
+                }
+            }
+            let _ = sender.send(SchedulerObj {
+                scheduler_work_load: vec![transaction_state],
+            });
+        }
+        true
+    }
+
+    fn read_rewards_and_check_txn_history(
+        &mut self,
+        slot_rewards: &mut HashMap<Slot, u64>,
+        buffered_slots: &mut Vec<u64>,
+    ) {
+        slot_rewards.retain(|slot, reward| {
+            if self.blockstore.is_root(*slot) {
+                self.accumulated_reward += *reward;
+                false
+            } else if self.blockstore.is_skipped(*slot) {
+                false //remove from record if skipped | missing from ledger
+            } else {
+                true //do not remove from record if !(skipped | rooted)
+            }
+        });
+        buffered_slots.retain(|slot| match self.read_rewards(*slot) {
+            Some(reward) => {
+                info!(
+                    "reward_distributor read-rewards-slot={:?},reward={}",
+                    slot, reward
+                );
+                slot_rewards.insert(*slot, reward);
+                false
+            }
+            None => {
+                if self.blockstore.is_skipped(*slot) {
+                    false
+                } else {
+                    true
+                }
+            }
+        });
+
+        if !self.txns_history.is_empty() {
+            self.check_txn_status();
+        }
+    }
+
+    fn is_slot_changed(slot: &u64, previous_slot: &mut u64) -> bool {
+        if slot != previous_slot {
+            *previous_slot = *slot;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Publish root + working banks into `shared_bank_update` for rakurai consumers.
+    fn publish_shared_bank_update(
+        shared_bank_update: &Arc<RwLock<LatestBankPair>>,
+        root_bank: Arc<Bank>,
+        working_bank: Arc<Bank>,
+    ) {
+        if let Ok(mut shared_bank_update) = shared_bank_update.write() {
+            *shared_bank_update = LatestBankPair::new(root_bank, working_bank);
+        }
+    }
+
+    /// Same-slot leader bank recreate (Alpenglow sad FLH / ParentReady parent switch):
+    /// drop in-flight ops that may have landed on the abandoned optimistic bank and redo
+    /// tip-turn / conversions / reward ops on the new bank.
+    fn handle_leader_bank_recreated(
+        &mut self,
+        bank: &Arc<Bank>,
+        rakurai_ops: &mut RakuraiOpTxnSet,
+        tip_turn_to_start: &mut Option<(Arc<Bank>, Slot)>,
+        conversions_to_process: &mut Option<Arc<Bank>>,
+    ) {
+        let slot = bank.slot();
+        info!(
+            "reward_distributor leader bank recreated slot={slot} bank_id={} — resetting ops \
+             to redo on new bank",
+            bank.bank_id()
+        );
+
+        // Record-ix may have been marked landed on the abandoned bank; settle before reset.
+        self.settle_record_ix_tip_revenue_on_forward(&mut rakurai_ops.record_ix);
+        rakurai_ops.reset();
+
+        // Do not enqueue tip-turn (that would finalize early); restart baseline on the new bank.
+        if let Some(report) = self.active_tip_turn.take() {
+            info!(
+                "reward_distributor tip_turn_tracking restarting after bank recreate \
+                 first_slot={} last_slot={} new_slot={slot}",
+                report.first_slot, report.last_slot
+            );
+            *tip_turn_to_start = Some((bank.clone(), report.first_slot));
+        } else if tip_turn_to_start.is_none() && first_of_consecutive_leader_slots(slot) == slot {
+            *tip_turn_to_start = Some((bank.clone(), slot));
+        } else if let Some((_, tip_slot)) = tip_turn_to_start.as_mut() {
+            *tip_turn_to_start = Some((bank.clone(), *tip_slot));
+        }
+
+        *conversions_to_process = Some(bank.clone());
+    }
+
+    /// Returns the highest frozen bank within the leader window `[first_slot, last_slot]`
+    /// that is still retained in `bank_forks`. Used to capture end-of-turn tip balances
+    /// before the root advances and prunes the leader banks.
+    fn highest_frozen_bank_in_window(
+        &self,
+        first_slot: Slot,
+        last_slot: Slot,
+    ) -> Option<(Slot, Arc<Bank>)> {
+        let bank_forks_r = self.bank_forks.read().ok()?;
+        for slot in (first_slot..=last_slot).rev() {
+            if let Some(bank) = bank_forks_r.banks().get(&slot) {
+                if bank.is_frozen() {
+                    return Some((slot, bank.clone_without_scheduler()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Returns the frozen bank at exactly `slot` if it is still retained in `bank_forks`.
+    fn frozen_bank_at(&self, slot: Slot) -> Option<Arc<Bank>> {
+        let bank_forks_r = self.bank_forks.read().ok()?;
+        let bank = bank_forks_r.banks().get(&slot)?;
+        bank.is_frozen().then(|| bank.clone_without_scheduler())
+    }
+
+    fn queue_tip_revenue_updates_from_deltas(
+        &mut self,
+        deltas: Vec<TipUuidDelta>,
+        source_first_slot: Slot,
+        source_last_slot: Slot,
+    ) {
+        for delta in deltas {
+            if delta.amount == 0 || delta.uuid_name == [0u8; 32] {
+                continue;
+            }
+            info!(
+                "reward_distributor tip_turn_delta uuid={:?} weighted_delta_lamports={} \
+                 source_first_slot={source_first_slot} source_last_slot={source_last_slot}",
+                delta.uuid, delta.amount
+            );
+            self.pending_tip_revenue_updates
+                .push(PendingTipRevenueUpdate {
+                    uuid: delta.uuid,
+                    uuid_name: delta.uuid_name,
+                    amount: delta.amount,
+                    source_first_slot,
+                    source_last_slot,
+                });
+        }
+    }
+
+    fn append_pending_tip_revenue_instructions(
+        &mut self,
+        bank: &Bank,
+        instructions: &mut Vec<Instruction>,
+    ) -> Result<Vec<PendingTipRevenueUpdate>, RewardDistributorError> {
+        if self.pending_tip_revenue_updates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut queued_updates = Vec::new();
+        let pending = std::mem::take(&mut self.pending_tip_revenue_updates);
+
+        for update in pending {
+            if update.amount == 0 {
+                continue;
+            }
+
+            let (tip_collection_account, tip_collection_account_bump) =
+                derive_tip_collection_account_v1_address(
+                    &self.distribution_config.reward_distribution_program_id,
+                    &update.uuid_name,
+                    &self.distribution_config.vote_account,
+                );
+            let tip_collection_pubkey = Pubkey::new_from_array(*tip_collection_account.as_array());
+
+            if !bank
+                .get_account(&tip_collection_pubkey)
+                .is_some_and(|account| {
+                    account.owner() == &self.distribution_config.reward_distribution_program_id
+                })
+            {
+                warn!(
+                    "reward_distributor record_revenue initializing: tip collection account \
+                    name={:?} (uuid={:?}) pda={tip_collection_pubkey}",
+                    update.uuid, update.uuid_name
+                );
+                instructions.push(self.create_init_tip_collection_account_ix(
+                    update.uuid_name,
+                    self.cluster_info.id(),
+                    self.cluster_info.id(),
+                    self.distribution_config.vote_account,
+                    self.distribution_config.reward_distribution_program_id,
+                    tip_collection_account,
+                    tip_collection_account_bump,
+                ));
+            }
+
+            let ix = record_revenue_v1_ix(
+                self.distribution_config.reward_distribution_program_id,
+                RecordRevenueArgs {
+                    amount: update.amount,
+                },
+                RecordRevenueShareAccounts {
+                    revenue_share_account: tip_collection_account,
+                    record_authority: self.cluster_info.id(),
+                },
+            );
+            instructions.push(ix);
+            info!(
+                "reward_distributor record_revenue queued uuid={:?} amount={} pda={tip_collection_pubkey} \
+                 source_first_slot={} source_last_slot={}",
+                update.uuid, update.amount, update.source_first_slot, update.source_last_slot,
+            );
+            queued_updates.push(update);
+        }
+
+        Ok(queued_updates)
+    }
+
+    fn restore_unlanded_tip_revenue_updates(&mut self) {
+        if self.pending_tip_revenue_in_flight.is_empty() {
+            return;
+        }
+        let count = self.pending_tip_revenue_in_flight.len();
+        info!("reward_distributor record_revenue restoring {count} unlanded update(s) to pending");
+        for update in &self.pending_tip_revenue_in_flight {
+            info!(
+                "reward_distributor record_revenue restoring uuid={:?} amount={} \
+                 source_first_slot={} source_last_slot={}",
+                update.uuid, update.amount, update.source_first_slot, update.source_last_slot,
+            );
+        }
+        self.pending_tip_revenue_updates
+            .append(&mut self.pending_tip_revenue_in_flight);
+    }
+
+    /// Before leaving Consume (Forward), drop in-flight tip-revenue updates if the record-ix
+    /// txn already landed; otherwise put them back on `pending_tip_revenue_updates`.
+    ///
+    /// Without the landed check, a successful record-ix that confirms after we stop Consume
+    /// would be restored and re-sent on the next leader turn — growing the pending buffer
+    /// and double-recording on-chain.
+    fn settle_record_ix_tip_revenue_on_forward(&mut self, record_ix: &mut RakuraiOpTxn) {
+        if self.pending_tip_revenue_in_flight.is_empty() {
+            return;
+        }
+
+        let landed = record_ix.landed
+            || self.bank_forks.read().ok().is_some_and(|bank_forks| {
+                let bank = bank_forks.working_bank();
+                Self::rakurai_op_landed_on_bank(record_ix, &bank)
+            });
+
+        if landed {
+            let count = self.pending_tip_revenue_in_flight.len();
+            info!(
+                "reward_distributor record_revenue clearing {count} in-flight update(s) on Forward \
+                 (txn landed)"
+            );
+            self.pending_tip_revenue_in_flight.clear();
+            record_ix.landed();
+        } else {
+            self.restore_unlanded_tip_revenue_updates();
+        }
+    }
+
+    fn rakurai_op_landed_on_bank(op: &RakuraiOpTxn, bank: &Bank) -> bool {
+        let Some(runtime_tx) = op.txn.as_ref() else {
+            return op.landed;
+        };
+        // Duplicate detection / AlreadyProcessed uses **message hash**, which is always
+        // written to the status cache. Signature keys are optional and often omitted on
+        // non-RPC validators (`skip_transaction_signatures_in_status_cache`), so
+        // `get_signature_status_with_blockhash` / `has_signature` can miss forever while
+        // simulation still returns AlreadyProcessed.
+        bank.get_committed_transaction_status_and_slot(
+            runtime_tx.message_hash(),
+            runtime_tx.recent_blockhash(),
+        )
+        .is_some()
+    }
+
+    /// Mirrors the legacy scan for TCAV1/MCAV1 revenue-share accounts (`REVENUE_SHARE_V1`).
+    fn process_p2c_escrow_block_reward_conversions_from_chain(&mut self, bank: &Bank) {
+        let current_epoch = bank.epoch();
+
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+        let mut p2c_escrow_group_count = 0usize;
+
+        match load_cached_uuid_mev_share_groups(bank, &self.distribution_config.vote_account) {
+            Some(groups) => {
+                p2c_escrow_group_count = groups.len();
+                for group in groups {
+                    let (p2c_escrow_collection_account, _bump) = derive_p2c_subscription_address(
+                        &self.distribution_config.reward_distribution_program_id,
+                        &group.uuid_name,
+                        &self.distribution_config.vote_account,
+                    );
+                    let (s, w, a) = self.process_p2c_escrow_block_reward_conversions(
+                        bank,
+                        current_epoch,
+                        self.distribution_config.reward_distribution_program_id,
+                        self.distribution_config.vote_account,
+                        self.cluster_info.id(),
+                        &group.uuid,
+                        "p2c_escrow",
+                        p2c_escrow_collection_account,
+                    );
+                    sent += s;
+                    waiting_claim += w;
+                    already_converted += a;
+                }
+            }
+            None => {
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow scan skipped: \
+                     postpack confirmation config unavailable (current_epoch={current_epoch})"
+                );
+            }
+        }
+        info!(
+            "reward_distributor block_reward_conversion_p2c_escrow scan complete current_epoch={current_epoch} \
+             p2c_escrow_uuid_groups={p2c_escrow_group_count} \
+             txn_sent={sent} waiting_claim={waiting_claim} already_converted={already_converted}"
+        );
+    }
+
+    fn process_p2c_escrow_block_reward_conversions(
+        &mut self,
+        bank: &Bank,
+        current_epoch: u64,
+        reward_distribution_program_id: Pubkey,
+        vote_account: Pubkey,
+        identity: Pubkey,
+        uuid: &str,
+        share_kind: &str,
+        p2_escrow_pda: Pubkey,
+    ) -> (usize, usize, usize) {
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+
+        let p2c_sub_pda = Pubkey::new_from_array(*p2_escrow_pda.as_array());
+        let Some(account) = bank.get_account(&p2c_sub_pda) else {
+            return (sent, waiting_claim, already_converted);
+        };
+        if account.owner() != &reward_distribution_program_id {
+            return (sent, waiting_claim, already_converted);
+        }
+        let Ok(p2c_subscription_account) =
+            P2CSubscriptionAccount::try_deserialize(&mut account.data())
+        else {
+            warn!(
+                "reward_distributor block_reward_conversion_p2c_escrow scan: {share_kind} deserialize failed \
+                 uuid={uuid:?} pda={p2c_sub_pda}"
+            );
+            return (sent, waiting_claim, already_converted);
+        };
+
+        if !p2c_subscription_account.block_reward_conversion_enabled {
+            return (sent, waiting_claim, already_converted);
+        }
+
+        for entry in &p2c_subscription_account.ledger.entries {
+            if entry.epoch >= current_epoch {
+                continue;
+            }
+            if entry.block_reward_converted {
+                already_converted += 1;
+                continue;
+            }
+            if entry.amount_due == 0 {
+                continue;
+            }
+
+            if !entry.claimed {
+                waiting_claim += 1;
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow waiting: kind={share_kind} \
+                     uuid={uuid:?} epoch={} claimed=false amount_due={} amount_deducted={} \
+                     pda={p2c_sub_pda}",
+                    entry.epoch, entry.amount_due, entry.amount_deducted
+                );
+                continue;
+            }
+
+            let total_amount = entry.amount_deducted;
+            let commission_amount = if p2c_subscription_account.commission_bps == 0
+                || p2c_subscription_account.name == RAKURAI_REVENUE_NAME
+            {
+                0
+            } else {
+                ((total_amount as u128)
+                    .saturating_mul(p2c_subscription_account.commission_bps as u128)
+                    / 10_000u128) as u64
+            };
+            let amount = total_amount.saturating_sub(commission_amount);
+            if amount == 0 {
+                info!(
+                    "reward_distributor block_reward_conversion_p2c_escrow skip: zero validator amount \
+                     kind={share_kind} uuid={uuid:?} epoch={} transferred_amount={total_amount} \
+                     commission_bps={} pda={p2c_sub_pda}",
+                    entry.epoch, p2c_subscription_account.commission_bps
+                );
+                continue;
+            }
+
+            let convert_ix = update_p2c_epoch_converted_to_block_reward_ix(
+                reward_distribution_program_id,
+                UpdateP2CEpochConvertedToBlockRewardArgs { epoch: entry.epoch },
+                UpdateP2CEpochConvertedToBlockRewardAccounts {
+                    p2c_subscription_account: p2_escrow_pda,
+                    validator_vote_account: vote_account,
+                    signer: identity,
+                },
+            );
+
+            let instructions = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(BLOCK_REWARD_CONVERSION_CU_LIMIT),
+                ComputeBudgetInstruction::set_compute_unit_price(
+                    amount * AMOUNT_MULTIPLICATION_FACTOR,
+                ),
+                convert_ix,
+            ];
+
+            match self.create_runtime_transaction(bank, &instructions) {
+                Some(runtime_tx) => {
+                    let signature = runtime_tx.signature().clone();
+                    info!(
+                        "reward_distributor block_reward_conversion_p2c_escrow txn_sent kind={share_kind} \
+                         uuid={uuid:?} epoch={} transferred_amount={total_amount} commission_bps={} \
+                         priority_fee_lamports={amount} pda={p2c_sub_pda} sig={signature}",
+                        entry.epoch, p2c_subscription_account.commission_bps
+                    );
+                    self.send_transaction(
+                        format!(
+                            "block_reward_conversion=p2c_escrow,share_kind={},uuid={},revenue_pda={}",
+                            share_kind, uuid, p2c_sub_pda
+                        ),
+                        &bank,
+                        runtime_tx,
+                    );
+                    sent += 1;
+                }
+                None => {
+                    self.warning_log(format!(
+                        "reward_distributor block_reward_conversion_p2c_escrow failed to build txn \
+                         kind={share_kind} uuid={uuid:?} epoch={} pda={p2c_sub_pda}",
+                        entry.epoch
+                    ));
+                }
+            }
+        }
+
+        (sent, waiting_claim, already_converted)
+    }
+
+    /// Mirrors the legacy scan for TCAV1/MCAV1 revenue-share accounts (`REVENUE_SHARE_V1`).
+    fn process_block_reward_conversions_from_chain_v1(&mut self, bank: &Bank) {
+        let current_epoch = bank.epoch();
+        let reward_distribution_program_id =
+            self.distribution_config.reward_distribution_program_id;
+
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+        let mut tip_group_count = 0usize;
+        let mut mev_share_group_count = 0usize;
+
+        match load_cached_uuid_tip_groups(bank, &self.distribution_config.vote_account) {
+            Some(groups) => {
+                tip_group_count = groups.len();
+                for group in groups {
+                    let (tip_collection_account, _bump) = derive_tip_collection_account_v1_address(
+                        &reward_distribution_program_id,
+                        &group.uuid_name,
+                        &self.distribution_config.vote_account,
+                    );
+                    let (s, w, a) = self.process_revenue_share_block_reward_conversions_v1(
+                        bank,
+                        current_epoch,
+                        reward_distribution_program_id,
+                        self.distribution_config.vote_account,
+                        self.cluster_info.id(),
+                        &group.uuid,
+                        "tip",
+                        tip_collection_account,
+                    );
+                    sent += s;
+                    waiting_claim += w;
+                    already_converted += a;
+                }
+            }
+            None => {
+                info!(
+                    "reward_distributor block_reward_conversion_v1 tip scan skipped: \
+                     virtual priority config unavailable (current_epoch={current_epoch})"
+                );
+            }
+        }
+
+        match load_cached_uuid_mev_share_groups(bank, &self.distribution_config.vote_account) {
+            Some(groups) => {
+                mev_share_group_count = groups.len();
+                for group in groups {
+                    let (mev_share_collection_account, _bump) =
+                        derive_mev_share_collection_account_v1_address(
+                            &reward_distribution_program_id,
+                            &group.uuid_name,
+                            &self.distribution_config.vote_account,
+                        );
+                    let (s, w, a) = self.process_revenue_share_block_reward_conversions_v1(
+                        bank,
+                        current_epoch,
+                        reward_distribution_program_id,
+                        self.distribution_config.vote_account,
+                        self.cluster_info.id(),
+                        &group.uuid,
+                        "mev_share",
+                        mev_share_collection_account,
+                    );
+                    sent += s;
+                    waiting_claim += w;
+                    already_converted += a;
+                }
+            }
+            None => {
+                info!(
+                    "reward_distributor block_reward_conversion_v1 mev_share scan skipped: \
+                     postpack confirmation config unavailable (current_epoch={current_epoch})"
+                );
+            }
+        }
+
+        info!(
+            "reward_distributor block_reward_conversion_v1 scan complete current_epoch={current_epoch} \
+             tip_uuid_groups={tip_group_count} mev_share_uuid_groups={mev_share_group_count} \
+             txn_sent={sent} waiting_claim={waiting_claim} already_converted={already_converted}"
+        );
+    }
+
+    /// Scans one V1 revenue-share PDA (TCAV1 or MCAV1) and sends conversion txs for
+    /// eligible ledger entries. Returns `(txn_sent, waiting_claim, already_converted)`.
+    fn process_revenue_share_block_reward_conversions_v1(
+        &mut self,
+        bank: &Bank,
+        current_epoch: u64,
+        reward_distribution_program_id: Pubkey,
+        vote_account: Pubkey,
+        identity: Pubkey,
+        uuid: &str,
+        share_kind: &str,
+        revenue_share_account_pda: Pubkey,
+    ) -> (usize, usize, usize) {
+        let mut sent = 0usize;
+        let mut waiting_claim = 0usize;
+        let mut already_converted = 0usize;
+
+        let revenue_share_pubkey = Pubkey::new_from_array(*revenue_share_account_pda.as_array());
+        let Some(account) = bank.get_account(&revenue_share_pubkey) else {
+            return (sent, waiting_claim, already_converted);
+        };
+        if account.owner() != &reward_distribution_program_id {
+            return (sent, waiting_claim, already_converted);
+        }
+        let Ok(revenue_share_account) = RevenueShareAccountV1::try_deserialize(&mut account.data())
+        else {
+            warn!(
+                "reward_distributor block_reward_conversion_v1 scan: {share_kind} deserialize failed \
+                 uuid={uuid:?} pda={revenue_share_pubkey}"
+            );
+            return (sent, waiting_claim, already_converted);
+        };
+
+        if !revenue_share_account.block_reward_conversion_enabled {
+            return (sent, waiting_claim, already_converted);
+        }
+
+        for entry in &revenue_share_account.ledger.entries {
+            if entry.epoch >= current_epoch {
+                continue;
+            }
+            if entry.block_reward_converted {
+                already_converted += 1;
+                continue;
+            }
+            // V1 claimable / conversion base is settled funds (`transferred_amount`), not
+            // recorded `amount` (which may differ under under/over-settle).
+            if entry.transferred_amount == 0 {
+                continue;
+            }
+
+            if !entry.claimed {
+                waiting_claim += 1;
+                info!(
+                    "reward_distributor block_reward_conversion_v1 waiting: kind={share_kind} \
+                     uuid={uuid:?} epoch={} claimed=false transferred_amount={} amount={} \
+                     pda={revenue_share_pubkey}",
+                    entry.epoch, entry.transferred_amount, entry.amount
+                );
+                continue;
+            }
+
+            let total_amount = entry.transferred_amount;
+            let commission_amount = if revenue_share_account.commission_bps == 0
+                || revenue_share_account.name == RAKURAI_REVENUE_NAME
+            {
+                0
+            } else {
+                ((total_amount as u128)
+                    .saturating_mul(revenue_share_account.commission_bps as u128)
+                    / 10_000u128) as u64
+            };
+            let amount = total_amount.saturating_sub(commission_amount);
+            if amount == 0 {
+                info!(
+                    "reward_distributor block_reward_conversion_v1 skip: zero validator amount \
+                     kind={share_kind} uuid={uuid:?} epoch={} transferred_amount={total_amount} \
+                     commission_bps={} pda={revenue_share_pubkey}",
+                    entry.epoch, revenue_share_account.commission_bps
+                );
+                continue;
+            }
+
+            let convert_ix = update_epoch_converted_to_block_reward_v1_ix(
+                reward_distribution_program_id,
+                UpdateEpochConvertedToBlockRewardArgs { epoch: entry.epoch },
+                UpdateEpochConvertedToBlockRewardAccounts {
+                    revenue_share_account: revenue_share_account_pda,
+                    validator_vote_account: vote_account,
+                    signer: identity,
+                },
+            );
+
+            let instructions = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(BLOCK_REWARD_CONVERSION_CU_LIMIT),
+                ComputeBudgetInstruction::set_compute_unit_price(
+                    amount * AMOUNT_MULTIPLICATION_FACTOR,
+                ),
+                convert_ix,
+            ];
+
+            match self.create_runtime_transaction(bank, &instructions) {
+                Some(runtime_tx) => {
+                    let signature = runtime_tx.signature().clone();
+                    info!(
+                        "reward_distributor block_reward_conversion_v1 txn_sent kind={share_kind} \
+                         uuid={uuid:?} epoch={} transferred_amount={total_amount} commission_bps={} \
+                         priority_fee_lamports={amount} pda={revenue_share_pubkey} sig={signature}",
+                        entry.epoch, revenue_share_account.commission_bps
+                    );
+                    self.send_transaction(
+                        format!(
+                            "block_reward_conversion=v1,share_kind={},uuid={},revenue_pda={}",
+                            share_kind, uuid, revenue_share_pubkey
+                        ),
+                        &bank,
+                        runtime_tx,
+                    );
+                    sent += 1;
+                }
+                None => {
+                    self.warning_log(format!(
+                        "reward_distributor block_reward_conversion_v1 failed to build txn \
+                         kind={share_kind} uuid={uuid:?} epoch={} pda={revenue_share_pubkey}",
+                        entry.epoch
+                    ));
+                }
+            }
+        }
+
+        (sent, waiting_claim, already_converted)
+    }
+
+    fn create_init_tip_collection_account_ix(
+        &self,
+        name: [u8; 32],
+        record_authority: Pubkey,
+        identity: Pubkey,
+        vote_account: Pubkey,
+        reward_distribution_program_id: Pubkey,
+        tip_collection_account: Pubkey,
+        bump: u8,
+    ) -> Instruction {
+        initialize_revenue_share_account_v1_ix(
+            reward_distribution_program_id,
+            InitializeRevenueShareAccountV1Args {
+                record_authority,
+                share_kind: reward_distribution::state::RevenueKind::Tip,
+                name,
+                bump,
+            },
+            InitializeRevenueShareAccountV1Accounts {
+                tips_and_mev_share_config: derive_tips_and_mev_share_config_address(
+                    &reward_distribution_program_id,
+                )
+                .0,
+                system_program: system_program::id(),
+                revenue_share_account: tip_collection_account,
+                rakurai_activation_account: derive_activation_account_address(
+                    &self.distribution_config.rakurai_activation_program_id,
+                    &identity,
+                )
+                .0,
+                validator_vote_account: vote_account,
+                payer: identity,
+            },
+        )
+    }
+
+    fn start_tip_turn_tracking(&mut self, bank: &Bank, leader_slot: Slot) {
+        let first_slot = first_of_consecutive_leader_slots(leader_slot);
+        let last_slot = last_of_consecutive_leader_slots(leader_slot);
+
+        if first_slot == 0 {
+            warn!("reward_distributor tip_turn_tracking skipped: first_slot is 0");
+            return;
+        }
+
+        // The parent is the last frozen ancestor bank, i.e. the canonical state entering the
+        // turn. We snapshot start balances here because the bank will be pruned from
+        // bank_forks long before the turn slots are rooted.
+        let Some(baseline_bank) = bank.parent() else {
+            warn!(
+                "reward_distributor tip_turn_tracking skipped: no parent bank for first_slot={first_slot}"
+            );
+            return;
+        };
+        let baseline_slot = baseline_bank.slot();
+
+        match load_cached_uuid_tip_groups(bank, &self.distribution_config.vote_account) {
+            Some(groups) if !groups.is_empty() => {
+                let groups: Vec<CachedUuidTipGroup> = groups
+                    .into_iter()
+                    .filter(|group| group.uuid_name != RAKURAI_REVENUE_NAME)
+                    .collect();
+                if groups.is_empty() {
+                    return;
+                }
+                let start_balances = snapshot_group_balances(&baseline_bank, &groups);
+                let uuid_group_entries = groups
+                    .iter()
+                    .map(|group| format!("{}:{}", group.uuid, group.entries.len()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                info!(
+                    "reward_distributor tip_turn_tracking started first_slot={first_slot} \
+                     last_slot={last_slot} baseline_slot={baseline_slot} uuid_groups={} \
+                     uuid_entries=[{uuid_group_entries}]",
+                    groups.len(),
+                );
+                self.active_tip_turn = Some(TipTurnReport {
+                    first_slot,
+                    last_slot,
+                    baseline_slot,
+                    groups,
+                    start_balances,
+                    end_balances: None,
+                    end_captured_slot: None,
+                });
+            }
+            Some(_) => {
+                warn!("reward_distributor tip_turn_tracking: empty uuid groups");
+            }
+            None => {
+                warn!(
+                    "reward_distributor tip_turn_tracking: failed to load virtual priority config"
+                );
+            }
+        }
+    }
+
+    fn enqueue_tip_turn_report(&mut self) {
+        if let Some(report) = self.active_tip_turn.take() {
+            info!(
+                "reward_distributor tip_turn_tracking enqueued first_slot={} last_slot={}",
+                report.first_slot, report.last_slot
+            );
+            self.pending_tip_reports.push(report);
+        }
+    }
+
+    /// Enqueue the active tip-turn only when the leader window has actually ended.
+    ///
+    /// A bare Forward is not enough: Alpenglow sad FLH (and inter-slot bank clear) briefly
+    /// clears `working_bank` and DecisionMaker returns Forward while we are still inside
+    /// `[first_slot, last_slot]`. Enqueueing then would finalize tip-turn early; a later
+    /// recreate would start a second tip-turn and double-count revenue.
+    fn enqueue_tip_turn_report_if_window_ended(&mut self, decision_slot: Slot) {
+        let Some(report) = self.active_tip_turn.as_ref() else {
+            return;
+        };
+
+        let (root_slot, highest_slot) = match self.bank_forks.read().ok() {
+            Some(bank_forks_r) => (bank_forks_r.root(), bank_forks_r.working_bank().slot()),
+            None => return,
+        };
+
+        let window_ended = decision_slot > report.last_slot
+            || highest_slot > report.last_slot
+            || root_slot > report.last_slot;
+
+        if window_ended {
+            self.enqueue_tip_turn_report();
+        } else {
+            info!(
+                "reward_distributor tip_turn_tracking skip enqueue on Forward \
+                 (window still active first_slot={} last_slot={} decision_slot={decision_slot} \
+                 highest_slot={highest_slot} root_slot={root_slot})",
+                report.first_slot, report.last_slot
+            );
+        }
+    }
+
+    fn try_finalize_pending_tip_reports(&mut self) {
+        if self.pending_tip_reports.is_empty() {
+            return;
+        }
+
+        let (root_slot, highest_slot) = match self.bank_forks.read().ok() {
+            Some(bank_forks_r) => (bank_forks_r.root(), bank_forks_r.working_bank().slot()),
+            None => return,
+        };
+
+        let reports = std::mem::take(&mut self.pending_tip_reports);
+        for mut report in reports {
+            // Step 1: capture end-of-turn balances while the leader banks are still retained
+            // in bank_forks. They get pruned once the root advances past them, so we cannot
+            // defer this until the slots are rooted.
+            //
+            // We must snapshot from the last slot of the turn to account for tips accrued in
+            // every slot. The report is enqueued on the Forward decision, but the last leader
+            // bank may still be freezing at that instant, so we prefer the exact `last_slot`
+            // bank and only fall back to the highest frozen bank in the window once the turn
+            // is definitively over (a bank beyond the window exists, or the root has passed
+            // it). That fallback covers the case where the last slot(s) were skipped.
+            if report.end_balances.is_none() {
+                let turn_over = highest_slot > report.last_slot || root_slot > report.last_slot;
+                if let Some(end_bank) = self.frozen_bank_at(report.last_slot) {
+                    report.end_balances = Some(snapshot_group_balances(&end_bank, &report.groups));
+                    report.end_captured_slot = Some(report.last_slot);
+                } else if turn_over {
+                    if let Some((end_slot, end_bank)) =
+                        self.highest_frozen_bank_in_window(report.first_slot, report.last_slot)
+                    {
+                        report.end_balances =
+                            Some(snapshot_group_balances(&end_bank, &report.groups));
+                        report.end_captured_slot = Some(end_slot);
+                    } else {
+                        // The turn window is fully behind us but no leader bank was ever
+                        // observed frozen (e.g. the whole turn was skipped). Drop it.
+                        warn!(
+                            "reward_distributor tip_turn_complete dropped: no frozen leader bank \
+                             for first_slot={} last_slot={} (root={root_slot}, highest={highest_slot})",
+                            report.first_slot, report.last_slot
+                        );
+                        continue;
+                    }
+                } else {
+                    // Last leader bank not frozen yet and the turn is not definitively over;
+                    // wait for a later poll so we don't undercount trailing slots.
+                    self.pending_tip_reports.push(report);
+                    continue;
+                }
+            }
+
+            let end_captured_slot = report
+                .end_captured_slot
+                .expect("end_captured_slot set when end_balances is Some");
+
+            // Step 2: only finalize once the captured slot is rooted, so the snapshotted
+            // balances are canonical. Ancestors of a rooted bank (including the baseline)
+            // are guaranteed rooted as well.
+            if !self.blockstore.is_root(end_captured_slot) {
+                if root_slot > end_captured_slot {
+                    // Root advanced past the captured slot without rooting it: the bank we
+                    // snapshotted was on an abandoned fork. Drop the report.
+                    warn!(
+                        "reward_distributor tip_turn_complete dropped: captured slot \
+                         {end_captured_slot} not rooted (root={root_slot}, first_slot={}, \
+                         last_slot={})",
+                        report.first_slot, report.last_slot
+                    );
+                    continue;
+                }
+                self.pending_tip_reports.push(report);
+                continue;
+            }
+
+            // Step 3: compute weighted deltas from the captured snapshots and queue them.
+            let end_balances = report
+                .end_balances
+                .as_ref()
+                .expect("end_balances set at this point");
+            let deltas = weighted_tip_deltas_from_balances(
+                &report.start_balances,
+                end_balances,
+                &report.groups,
+            );
+            info!(
+                "reward_distributor tip_turn_complete first_slot={} last_slot={} \
+                 baseline_slot={} end_slot={end_captured_slot}",
+                report.first_slot, report.last_slot, report.baseline_slot
+            );
+            self.queue_tip_revenue_updates_from_deltas(deltas, report.first_slot, report.last_slot);
+        }
+    }
+
+    /// If `op` already has an in-flight txn, retry it until it lands.
+    /// Returns `true` when the caller should skip building a new txn for this op
+    /// (already landed, waiting on retry interval, or retrying the same signed txn).
+    fn retry_pending_rakurai_op(
+        &self,
+        op: &mut RakuraiOpTxn,
+        bank: &Bank,
+        kind: &str,
+        retry_interval: Duration,
+    ) -> bool {
+        if op.landed {
+            return true;
+        }
+        if op.txn.is_none() {
+            return false;
+        }
+        if Self::rakurai_op_landed_on_bank(op, bank) {
+            op.landed();
+            return true;
+        }
+        if op.last_send.elapsed() <= retry_interval {
+            return true;
+        }
+        let runtime_tx = op.txn.as_ref().unwrap().clone();
+        if !self.send_transaction(format!("{kind}_retry=true"), bank, runtime_tx) {
+            // Sim rejected — re-check message-hash status (AlreadyProcessed path).
+            if Self::rakurai_op_landed_on_bank(op, bank) {
+                op.landed();
+                return true;
+            }
+        }
+        op.last_send = Instant::now();
+        true
+    }
+
+    /// Build, track, and send a single-task rakurai op transaction.
+    /// Returns `true` only if a runtime transaction was created **and** accepted by
+    /// `send_transaction` (simulation passed + handed to scheduler).
+    fn dispatch_rakurai_op(
+        &mut self,
+        op: &mut RakuraiOpTxn,
+        bank: &Bank,
+        instructions: &[Instruction],
+        kind: &str,
+        extra: String,
+        track_rewards: bool,
+    ) -> bool {
+        if instructions.is_empty() {
+            return false;
+        }
+        let Some(runtime_tx) = self.create_runtime_transaction(bank, instructions) else {
+            self.warning_log(format!(
+                "reward_distributor dispatch_rakurai_op failed to build txn \
+                 kind={kind} instructions={:?} extra={}",
+                instructions.len(),
+                extra
+            ));
+            return false;
+        };
+        let txn_kind = if extra.is_empty() {
+            kind.to_string()
+        } else {
+            format!("{kind},{extra}")
+        };
+        if !self.send_transaction(txn_kind, bank, runtime_tx.clone()) {
+            // Simulation failed — do not leave a phantom in-flight txn.
+            return false;
+        }
+        if track_rewards {
+            self.txns_history.insert(
+                runtime_tx.signature().clone(),
+                TxnsHistory {
+                    rewards: self.accumulated_reward,
+                    message_hash: runtime_tx.message_hash().clone(),
+                    send_slot: bank.slot(),
+                    blockhash: runtime_tx.recent_blockhash().clone(),
+                },
+            );
+            self.accumulated_reward = 0;
+        }
+        info!(
+            "reward_distributor txn_sent kind={kind} instructions={} sig={}",
+            instructions.len(),
+            runtime_tx.signature()
+        );
+        op.txn(runtime_tx);
+        true
+    }
+
+    pub fn run(mut self) -> Result<(), SchedulerError> {
+        let mut decision;
+        let mut slot_rewards: HashMap<Slot, u64> = HashMap::new();
+        let mut buffered_slots = Vec::new();
+        let mut prev_decision = BufferedPacketsDecision::Hold;
+        let mut slot;
+        let mut previous_slot = 0;
+        // Tracks Consume working-bank identity so same-slot sad handover (new bank_id)
+        // refreshes shared_bank_update even when BufferedPacketsDecision PartialEq is equal.
+        let mut previous_bank_id = None;
+        #[cfg(feature = "build_validator")]
+        let mut rakurai_enabled_flag;
+        // leader's last slot, used to detect the change in slot
+        let mut last_leader_slot: u64 = 0;
+        // used to detect the turn has started, it will be set at first consume decision and reset at first forward decision
+        let mut turn_started: bool = false;
+
+        // this is const of 5ms because make_consume_or_forward_decision updates its decision after every 5 ms
+        // so polling make_consume_or_forward_decision at a higher frequency is not needed
+        let timeout_ms = Duration::from_millis(5);
+        let mut last_epoch = 0;
+
+        let mut rakurai_ops = RakuraiOpTxnSet::new();
+        let mut is_tip_receiver_changed = false;
+        // Retry interval while an op txn is in-flight and has not yet landed
+        let rakurai_op_txn_retry_interval_ms = Duration::from_millis(25);
+        let mut last_log_slot = 0;
+
+        let mut tip_turn_to_start: Option<(Arc<Bank>, Slot)> = None;
+        // Set at the first slot of a leader turn to scan on-chain TCAs and run conversions.
+        let mut conversions_to_process: Option<Arc<Bank>> = None;
+
+        // On-chain P2C enable flag is refreshed via FFI on this interval (not every 5ms poll).
+        const P2C_ENABLE_SYNC_INTERVAL: Duration = Duration::from_secs(30);
+        let mut last_p2c_enable_sync = Instant::now()
+            .checked_sub(P2C_ENABLE_SYNC_INTERVAL)
+            .unwrap_or_else(Instant::now);
+        let mut p2c_update_enabled = false;
+
+        loop {
+            std::thread::sleep(timeout_ms);
+
+            #[cfg(feature = "build_validator")]
+            if self.reset_rakurai.load(Relaxed) {
+                unsafe {
+                    info!("resetting rakurai");
+                    reset_rakurai();
+                }
+
+                self.reset_rakurai.store(false, Relaxed);
+            }
+            // Get the current decision and switching point flag from the decision maker
+            (decision, _, slot) = self.decision_maker.make_consume_or_forward_decision();
+            let decision_changed = decision != prev_decision;
+
+            if let Some(forward_to_p2c) = &self.forward_to_p2c {
+                if last_p2c_enable_sync.elapsed() >= P2C_ENABLE_SYNC_INTERVAL {
+                    last_p2c_enable_sync = Instant::now();
+                    #[cfg(feature = "build_validator")]
+                    {
+                        let bank = self.bank_forks.read().unwrap().working_bank();
+                        // SAFETY: exported by rakurai_scheduler entrypoint from the same revision.
+                        p2c_update_enabled = unsafe {
+                            enable_tpu_p2c_update(
+                                bank.as_ref(),
+                                &self.distribution_config.vote_account,
+                            )
+                        };
+                    }
+                    #[cfg(not(feature = "build_validator"))]
+                    {
+                        p2c_update_enabled = false;
+                    }
+                }
+                forward_to_p2c.store(
+                    p2c_update_enabled
+                        && matches!(
+                            &decision,
+                            BufferedPacketsDecision::Forward
+                                | BufferedPacketsDecision::ForwardAndHold
+                        ),
+                    Relaxed,
+                );
+            }
+
+            if decision_changed {
+                match &decision {
+                    BufferedPacketsDecision::Consume(bank_start) => {
+                        let root_bank = self.bank_forks.read().unwrap().root_bank();
+                        Self::publish_shared_bank_update(
+                            &self.shared_bank_update,
+                            root_bank,
+                            bank_start.working_bank.clone(),
+                        );
+                        previous_slot = bank_start.working_bank.slot();
+                        previous_bank_id = Some(bank_start.working_bank.bank_id());
+                    }
+                    _ => {
+                        let root_bank = self.bank_forks.read().unwrap().root_bank();
+                        let working_bank = self.bank_forks.read().unwrap().working_bank();
+                        previous_slot = working_bank.slot();
+                        previous_bank_id = Some(working_bank.bank_id());
+                        Self::publish_shared_bank_update(
+                            &self.shared_bank_update,
+                            root_bank,
+                            working_bank,
+                        );
+                    }
+                }
+            } else if Self::is_slot_changed(&slot, &mut previous_slot) {
+                if let Ok(bank_forks_read_lock) = self.bank_forks.read() {
+                    let root_bank = bank_forks_read_lock.root_bank();
+                    if let BufferedPacketsDecision::Consume(bank_start) = &decision {
+                        // DecisionMaker slot (tick height / Alpenglow clock) can advance while
+                        // we still hold the leader Consume bank. Keep shared_bank_update and
+                        // previous_bank_id on that bank so Tower never spuriously recreates.
+                        Self::publish_shared_bank_update(
+                            &self.shared_bank_update,
+                            root_bank,
+                            bank_start.working_bank.clone(),
+                        );
+                    } else {
+                        let working_bank = bank_forks_read_lock.working_bank();
+                        previous_slot = working_bank.slot();
+                        previous_bank_id = Some(working_bank.bank_id());
+                        Self::publish_shared_bank_update(
+                            &self.shared_bank_update,
+                            root_bank,
+                            working_bank,
+                        );
+                    }
+                }
+            } else if let BufferedPacketsDecision::Consume(bank_start) = &decision {
+                // Same decision + same tick slot can still be a new leader bank after
+                // Alpenglow sad handover (clear + recreate at the same slot).
+                let bank_id = bank_start.working_bank.bank_id();
+                if previous_bank_id != Some(bank_id) {
+                    let had_prior_bank = previous_bank_id.is_some();
+                    let root_bank = self.bank_forks.read().unwrap().root_bank();
+                    Self::publish_shared_bank_update(
+                        &self.shared_bank_update,
+                        root_bank,
+                        bank_start.working_bank.clone(),
+                    );
+                    previous_slot = bank_start.working_bank.slot();
+                    previous_bank_id = Some(bank_id);
+                    if had_prior_bank && self.decision_maker.is_alpenglow_enabled() {
+                        self.handle_leader_bank_recreated(
+                            &bank_start.working_bank,
+                            &mut rakurai_ops,
+                            &mut tip_turn_to_start,
+                            &mut conversions_to_process,
+                        );
+                    }
+                }
+            }
+
+            // Only update decision state if it has changed
+            if decision_changed {
+                prev_decision = decision.clone();
+
+                if let BufferedPacketsDecision::Consume(bank_start) = &decision {
+                    let new_leader_slot = bank_start.working_bank.slot();
+                    if new_leader_slot != last_leader_slot {
+                        last_leader_slot = new_leader_slot;
+                        #[cfg(feature = "build_validator")]
+                        unsafe {
+                            rakurai_enabled_flag = rakurai_enabled();
+                        }
+                        #[cfg(feature = "build_validator")]
+                        {
+                            if rakurai_enabled_flag {
+                                // Push new slots if Rakurai is enabled
+                                buffered_slots.push(new_leader_slot);
+                                if leader_slot_index(new_leader_slot) == 0 {
+                                    tip_turn_to_start =
+                                        Some((bank_start.working_bank.clone(), new_leader_slot));
+                                    // Scan on-chain TCAs and run block-reward conversions once per turn.
+                                    conversions_to_process = Some(bank_start.working_bank.clone());
+                                }
+                            }
+                        }
+
+                        if !turn_started {
+                            // Mark the turn as started
+                            turn_started = true;
+
+                            // Check for epoch change
+                            let current_epoch = bank_start.working_bank.epoch();
+                            if last_epoch != 0 && last_epoch != current_epoch {
+                                info!(
+                                    "reward_distributor epoch changed from {} to {}, slot {}",
+                                    last_epoch, current_epoch, slot
+                                );
+                                // Reset MEV commission status on epoch change
+                                self.rakurai_commission_on_mev_commission_stats =
+                                    RakuraiCommissionOnMevStatus::NotDeducted;
+                            }
+                            last_epoch = current_epoch;
+
+                            // Reset MEV commission status for new turn (except if already deducted or skipped)
+                            if self.rakurai_commission_on_mev_commission_stats
+                                == RakuraiCommissionOnMevStatus::TransactionSent
+                            {
+                                self.rakurai_commission_on_mev_commission_stats =
+                                    RakuraiCommissionOnMevStatus::NotDeducted;
+                            }
+                        }
+                    } else if self.decision_maker.is_alpenglow_enabled() {
+                        // Same slot after Hold/Forward gap (sad FLH clear_bank). Ops may have been
+                        // reset on Forward; tip-turn may need restart on the new bank_id.
+                        // Tower never recreates the same leader slot — keep pre-AG behavior.
+                        self.handle_leader_bank_recreated(
+                            &bank_start.working_bank,
+                            &mut rakurai_ops,
+                            &mut tip_turn_to_start,
+                            &mut conversions_to_process,
+                        );
+                    }
+                }
+            }
+
+            if let Some((working_bank, leader_slot)) = tip_turn_to_start.take() {
+                self.start_tip_turn_tracking(&working_bank, leader_slot);
+            }
+
+            if let Some(working_bank) = conversions_to_process.take() {
+                self.process_block_reward_conversions_from_chain_v1(&working_bank);
+                self.process_p2c_escrow_block_reward_conversions_from_chain(&working_bank);
+            }
+
+            match decision {
+                BufferedPacketsDecision::ForwardAndHold => {
+                    self.read_rewards_and_check_txn_history(&mut slot_rewards, &mut buffered_slots);
+
+                    let bank_forks_r = self.bank_forks.read();
+                    if bank_forks_r.is_ok() {
+                        let current_slot = bank_forks_r.unwrap().working_bank().slot();
+                        self.txns_history.retain(|_, history| {
+                            if current_slot > history.send_slot + 150 {
+                                self.accumulated_reward += history.rewards;
+                                false
+                            } else {
+                                true
+                            }
+                        });
+                    }
+                    turn_started = false;
+                }
+
+                BufferedPacketsDecision::Consume(bank_start) => {
+                    // Run reward ops on the optimistic bank as well; if ParentReady switches
+                    // parent (new bank_id), handle_leader_bank_recreated resets and redoes them.
+                    let working_bank = bank_start.working_bank;
+                    let (rca_created, reward_collection_account) =
+                        self.get_reward_collection_pda_status(&working_bank);
+
+                    // create-rca
+                    if !self.retry_pending_rakurai_op(
+                        &mut rakurai_ops.create_rca,
+                        &working_bank,
+                        "create-rca",
+                        rakurai_op_txn_retry_interval_ms,
+                    ) && !rca_created
+                    {
+                        match self.initialize_reward_collection_account_instruction(&working_bank) {
+                            Ok(ix) => {
+                                debug!(
+                                    "reward_distributor initialize_reward_collection_account_instruction"
+                                );
+                                self.dispatch_rakurai_op(
+                                    &mut rakurai_ops.create_rca,
+                                    &working_bank,
+                                    &[ix],
+                                    "create-rca",
+                                    format!("rca={reward_collection_account}"),
+                                    false,
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "reward_distributor error in initialize_reward_collection_account_instruction: {e}"
+                                );
+                            }
+                        }
+                    }
+
+                    // change-tip-receiver
+                    if !self.retry_pending_rakurai_op(
+                        &mut rakurai_ops.change_tip_receiver,
+                        &working_bank,
+                        "change-tip-receiver",
+                        rakurai_op_txn_retry_interval_ms,
+                    ) {
+                        is_tip_receiver_changed = false;
+                        match self.change_tip_receiver_instruction(
+                            &working_bank,
+                            &mut is_tip_receiver_changed,
+                        ) {
+                            Ok(maybe_ix) => match maybe_ix {
+                                Some(ix) if !ix.is_empty() => {
+                                    debug!("reward_distributor change_tip_receiver_instruction");
+                                    self.dispatch_rakurai_op(
+                                        &mut rakurai_ops.change_tip_receiver,
+                                        &working_bank,
+                                        &ix,
+                                        "change-tip-receiver",
+                                        format!(
+                                            "is_tip_receiver_changed={is_tip_receiver_changed}"
+                                        ),
+                                        false,
+                                    );
+                                }
+                                _ => {
+                                    debug!(
+                                        "reward_distributor change_tip_receiver_instruction not required"
+                                    );
+                                }
+                            },
+                            Err(e) => {
+                                error!(
+                                    "reward_distributor error in change_tip_receiver_instruction: {e}"
+                                );
+                            }
+                        }
+                    }
+
+                    // Record tip revenue deltas from the previous leader turn on-chain.
+                    if !self.retry_pending_rakurai_op(
+                        &mut rakurai_ops.record_ix,
+                        &working_bank,
+                        "record-ix",
+                        rakurai_op_txn_retry_interval_ms,
+                    ) {
+                        let mut record_instructions = Vec::new();
+                        match self.append_pending_tip_revenue_instructions(
+                            &working_bank,
+                            &mut record_instructions,
+                        ) {
+                            Ok(mut queued) => {
+                                if self.dispatch_rakurai_op(
+                                    &mut rakurai_ops.record_ix,
+                                    &working_bank,
+                                    &record_instructions,
+                                    "record-ix",
+                                    String::new(),
+                                    false,
+                                ) {
+                                    self.pending_tip_revenue_in_flight = queued;
+                                } else {
+                                    self.pending_tip_revenue_updates.append(&mut queued);
+                                }
+                            }
+                            Err(e) => {
+                                error!(
+                                    "reward_distributor error in append_pending_tip_revenue_instructions: {e}"
+                                );
+                            }
+                        }
+                    } else if rakurai_ops.record_ix.landed {
+                        self.pending_tip_revenue_in_flight.clear();
+                    }
+
+                    // transfer-staker-rewards (requires this epoch's RCA)
+                    if !self.retry_pending_rakurai_op(
+                        &mut rakurai_ops.transfer_staker_rewards,
+                        &working_bank,
+                        "transfer-staker-rewards",
+                        rakurai_op_txn_retry_interval_ms,
+                    ) {
+                        let rca_ready = rca_created || rakurai_ops.create_rca.landed;
+                        if rca_ready && self.accumulated_reward > 0 {
+                            match self.create_transfer_rca_instruction(
+                                self.accumulated_reward,
+                                reward_collection_account,
+                                &working_bank,
+                            ) {
+                                Ok(maybe_ix) => match maybe_ix {
+                                    Some(ix) => {
+                                        debug!(
+                                            "reward_distributor create_transfer_rca_instruction"
+                                        );
+                                        self.dispatch_rakurai_op(
+                                            &mut rakurai_ops.transfer_staker_rewards,
+                                            &working_bank,
+                                            &[ix],
+                                            "transfer-staker-rewards",
+                                            format!("rca={reward_collection_account}"),
+                                            true,
+                                        );
+                                    }
+                                    None => {
+                                        debug!(
+                                            "reward_distributor create_transfer_rca_instruction not required"
+                                        );
+                                    }
+                                },
+                                Err(e) => {
+                                    error!(
+                                        "reward_distributor error in create_transfer_rca_instruction: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    // mev_commission
+                    if !self.retry_pending_rakurai_op(
+                        &mut rakurai_ops.mev_commission,
+                        &working_bank,
+                        "mev-commission",
+                        rakurai_op_txn_retry_interval_ms,
+                    ) {
+                        match self.rakurai_commission_on_mev_commission_stats {
+                            RakuraiCommissionOnMevStatus::NotDeducted => {
+                                let (should_deduct, rca_pda, tda_pda) =
+                                    self.should_deduct_mev_commission(&working_bank, 50);
+                                if should_deduct && rca_pda.is_some() && tda_pda.is_some() {
+                                    info!("reward_distributor deducting mev commission");
+                                    match self.transfer_mev_commission(
+                                        &working_bank,
+                                        rca_pda.unwrap(),
+                                        tda_pda.unwrap(),
+                                    ) {
+                                        Ok(maybe_ix) => match maybe_ix {
+                                            Some(ix) => {
+                                                debug!(
+                                                    "reward_distributor transfer_mev_commission"
+                                                );
+                                                self.dispatch_rakurai_op(
+                                                    &mut rakurai_ops.mev_commission,
+                                                    &working_bank,
+                                                    &[ix],
+                                                    "mev-commission",
+                                                    String::new(),
+                                                    false,
+                                                );
+                                            }
+                                            None => {
+                                                debug!(
+                                                    "reward_distributor transfer_mev_commission not required"
+                                                );
+                                            }
+                                        },
+                                        Err(e) => {
+                                            error!("error in transfer_mev_commission: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
+                    // Log once per leader slot
+                    if working_bank.slot() != last_log_slot {
+                        last_log_slot = working_bank.slot();
+                        info!(
+                            "reward_distributor decision=consume, rca={}, epoch={}, slot={}, rca_status={:?}, rakurai_commission_on_mev_commission_stats={:?}, change_tip_receiver_instruction={}, create_rca_landed={}, change_tip_receiver_landed={}, record_ix_landed={}, transfer_staker_rewards_landed={}, mev_commission_landed={}, pending_txns_count={}, pending_txns={:?}",
+                            reward_collection_account,
+                            working_bank.epoch(),
+                            working_bank.slot(),
+                            rca_created,
+                            self.rakurai_commission_on_mev_commission_stats,
+                            is_tip_receiver_changed,
+                            rakurai_ops.create_rca.landed,
+                            rakurai_ops.change_tip_receiver.landed,
+                            rakurai_ops.record_ix.landed,
+                            rakurai_ops.transfer_staker_rewards.landed,
+                            rakurai_ops.mev_commission.landed,
+                            self.txns_history.len(),
+                            self.txns_history
+                                .iter()
+                                .map(|(sig, tx)| (sig, tx.send_slot, tx.rewards))
+                                .collect::<Vec<_>>()
+                        );
+                    }
+                }
+
+                BufferedPacketsDecision::Forward => {
+                    self.read_rewards_and_check_txn_history(&mut slot_rewards, &mut buffered_slots);
+                    // Pre-AG: enqueue on every Forward (historical behavior).
+                    // Alpenglow: only when the leader window has ended — mid-window clear_bank
+                    // / sad FLH can briefly Forward/Hold while still inside the tip-turn window.
+                    if self.decision_maker.is_alpenglow_enabled() {
+                        self.enqueue_tip_turn_report_if_window_ended(slot);
+                    } else {
+                        self.enqueue_tip_turn_report();
+                    }
+                    // Keep trying to finalize while Forwarding (reports may wait on root).
+                    self.try_finalize_pending_tip_reports();
+                    // Settle/restore/reset only once when entering Forward. Doing this every
+                    // 5ms poll used to re-arm restore after reset and could re-queue tip
+                    // revenue that had already landed on-chain.
+                    if decision_changed {
+                        self.settle_record_ix_tip_revenue_on_forward(&mut rakurai_ops.record_ix);
+                        turn_started = false;
+                        rakurai_ops.reset();
+                    }
+                }
+
+                BufferedPacketsDecision::Hold => {}
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RewardDistributorError {
+    #[error("RCA account not found")]
+    RcaAccountNotFound,
+
+    #[error("RCA deserialization failed")]
+    RcaDeserializationFailed,
+
+    #[error("RAA config account not found")]
+    RaaConfigAccountNotFound,
+
+    #[error("RAA config deserialization failed")]
+    RaaConfigDeserializationFailed,
+
+    #[error("RAA account not found")]
+    RaaAccountNotFound,
+
+    #[error("RAA deserialization failed")]
+    RaaDeserializationFailed,
+
+    #[error("Tip config account not found")]
+    TipConfigAccountNotFound,
+
+    #[error("Tip config deserialization failed")]
+    TipConfigDeserializationFailed,
+}
