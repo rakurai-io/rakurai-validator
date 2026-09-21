@@ -1,3 +1,9 @@
+// Re-exported so sibling modules (bam_receive_and_buffer, bundle_packet_deserializer) can
+// reach it through this module.
+// Re-exported for sibling modules and rakurai-scheduler (separate crate).
+use crate::banking_stage::DecisionState;
+pub use crate::transaction_priority::calculate_priority_and_cost;
+
 use {
     super::{
         transaction_priority_id::TransactionPriorityId,
@@ -11,7 +17,7 @@ use {
             consumer::Consumer, decision_maker::BufferedPacketsDecision, packet_bytes,
             scheduler_messages::MaxAge,
         },
-        transaction_priority::calculate_priority_and_cost,
+        transaction_priority,
     },
     agave_banking_stage_ingress_types::{BankingPacketBatch, BankingPacketReceiver},
     agave_transaction_view::{
@@ -33,6 +39,7 @@ use {
         transaction_meta::TransactionMeta, transaction_with_meta::TransactionWithMeta,
     },
     solana_svm::transaction_error_metrics::TransactionErrorMetrics,
+    solana_svm_timings::wallclock_timestamp_nanos,
     solana_svm_transaction::svm_message::SVMMessage,
     solana_transaction::sanitized::MessageHash,
     solana_transaction_error::TransactionError,
@@ -45,6 +52,24 @@ pub(crate) enum IngressCheckError {
     Transaction(TransactionError),
     FeePayer,
 }
+
+// /// Returns the total number of locks required by the transaction.
+// fn total_num_locks(tx: &SanitizedVersionedTransaction) -> usize {
+//     let extract_table_key_len = |table: &MessageAddressTableLookup| {
+//         table
+//             .writable_indexes
+//             .len()
+//             .wrapping_add(table.readonly_indexes.len())
+//     };
+
+//     let message = &tx.get_message().message;
+//     message.static_account_keys().len().wrapping_add(
+//         message
+//             .address_table_lookups()
+//             .map(|l| l.iter().map(extract_table_key_len).sum())
+//             .unwrap_or(0),
+//     )
+// }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PacketHandlingError {
@@ -62,6 +87,14 @@ pub(crate) struct PrecheckedTransaction {
 
 pub(crate) type PrecheckResult = Result<PrecheckedTransaction, IngressCheckError>;
 
+/// Source IPv4 of a packet as a big-endian `u32` (0 for unset/non-IPv4).
+fn source_ipv4_from_packet(packet: solana_perf::packet::PacketRef<'_>) -> u32 {
+    match packet.meta().addr {
+        std::net::IpAddr::V4(v4) => u32::from(v4),
+        std::net::IpAddr::V6(_) => 0,
+    }
+}
+
 pub(crate) fn precheck_transaction(
     bytes: Bytes,
     root_bank: &Bank,
@@ -70,7 +103,7 @@ pub(crate) fn precheck_transaction(
 ) -> PrecheckResult {
     let sanitize_config = sanitize_config();
     let transaction_account_lock_limit = working_bank.get_transaction_account_lock_limit();
-    let state = TransactionViewReceiveAndBuffer::try_handle_packet(
+    let (state, _reward) = TransactionViewReceiveAndBuffer::try_handle_packet(
         bytes,
         root_bank,
         working_bank,
@@ -101,7 +134,7 @@ pub(crate) fn precheck_transaction(
 /// Perform sanitization checks and transition from data to an executable
 /// [`RuntimeTransaction`]. This additionally returns the minimum slot for
 /// ALT deactivation, if any. If no minimum slot, Slot::MAX is returned.
-pub(crate) fn translate_to_runtime_view<D: TransactionData>(
+pub fn translate_to_runtime_view<D: TransactionData>(
     data: D,
     bank: &Bank,
     vote_only: bool,
@@ -186,14 +219,14 @@ pub(crate) fn contains_blacklisted_account<'a>(
 }
 
 #[derive(Debug)]
-pub(crate) enum DisconnectedError {
+pub enum DisconnectedError {
     Receiver,
     CheckWorker,
 }
 
 /// Stats/metrics returned by `receive_and_buffer_packets`.
 #[derive(Debug, Default)]
-pub(crate) struct ReceivingStats {
+pub struct ReceivingStats {
     pub num_received: usize,
     /// Count of packets that passed sigverify but were dropped
     /// without further checks because we were outside the holding
@@ -256,7 +289,7 @@ impl ReceivingStats {
         }
     }
 
-    pub(crate) fn accumulate(&mut self, other: ReceivingStats) {
+    pub fn accumulate(&mut self, other: ReceivingStats) {
         self.num_received += other.num_received;
         self.num_dropped_without_parsing += other.num_dropped_without_parsing;
         self.num_dropped_on_parsing_and_sanitization +=
@@ -277,7 +310,7 @@ impl ReceivingStats {
     }
 }
 
-pub(crate) trait ReceiveAndBuffer {
+pub trait ReceiveAndBuffer {
     type Transaction: TransactionWithMeta + Send + Sync;
     type Container: StateContainer<Self::Transaction> + Send + Sync;
 
@@ -286,8 +319,16 @@ pub(crate) trait ReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError>;
+
+    fn packet_receiver(&self) -> BankingPacketReceiver;
+
+    fn skip_wait(&mut self) -> Option<&mut bool>;
+
+    #[allow(unused)]
+    fn on_skip_wait_disabled(&mut self);
 
     fn drain_check_results(
         &mut self,
@@ -298,20 +339,24 @@ pub(crate) trait ReceiveAndBuffer {
 
 pub(crate) struct TransactionViewReceiveAndBuffer {
     receiver: BankingPacketReceiver,
-    check_work_sender: Sender<Bytes>,
+    // (packet bytes, arrival_timestamp_nanos, source_ipv4)
+    check_work_sender: Sender<(Bytes, i64, u32)>,
     check_result_receiver: Receiver<PrecheckResult>,
+    capture_gui_timestamps: bool,
 }
 
 impl TransactionViewReceiveAndBuffer {
     pub(crate) fn new(
         receiver: BankingPacketReceiver,
-        check_work_sender: Sender<Bytes>,
+        check_work_sender: Sender<(Bytes, i64, u32)>,
         check_result_receiver: Receiver<PrecheckResult>,
+        capture_gui_timestamps: bool,
     ) -> Self {
         Self {
             receiver,
             check_work_sender,
             check_result_receiver,
+            capture_gui_timestamps,
         }
     }
 
@@ -322,7 +367,7 @@ impl TransactionViewReceiveAndBuffer {
         transaction_account_lock_limit: usize,
         sanitize_config: &SanitizeConfig,
         filter_keys: &HashSet<Pubkey, S>,
-    ) -> Result<TransactionViewState, PacketHandlingError> {
+    ) -> Result<(TransactionViewState, u64), PacketHandlingError> {
         let (view, deactivation_slot) = translate_to_runtime_view(
             bytes,
             root_bank,
@@ -344,10 +389,14 @@ impl TransactionViewReceiveAndBuffer {
             .transaction_configuration(&working_bank.feature_set)
             .map_err(|_| PacketHandlingError::ComputeBudget)?;
         let max_age = calculate_max_age(root_bank.epoch(), deactivation_slot, root_bank.slot());
-        let (priority, cost) =
-            calculate_priority_and_cost(working_bank, &view, &transaction_configuration);
+        let (priority, cost, reward) =
+            transaction_priority::calculate_priority_and_cost(
+                working_bank,
+                &view,
+                &transaction_configuration,
+            );
 
-        Ok(TransactionState::new(view, max_age, priority, cost))
+            Ok((TransactionState::new(view, max_age, priority, cost), reward))
     }
 }
 
@@ -358,8 +407,15 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
     fn receive_and_buffer_packets(
         &mut self,
         container: &mut Self::Container,
-        decision: &BufferedPacketsDecision,
+        decision: Option<&BufferedPacketsDecision>,
+        _decision_state: Option<&DecisionState>,
     ) -> Result<ReceivingStats, DisconnectedError> {
+        let decision = if let Some(decision) = decision {
+            decision
+        } else {
+            return Ok(ReceivingStats::default()); // in case decision is not found
+        };
+
         const RECV_TIMEOUT: Duration = Duration::from_millis(10);
         const MAX_PACKET_RECEIVES: usize = 512;
 
@@ -452,6 +508,16 @@ impl ReceiveAndBuffer for TransactionViewReceiveAndBuffer {
         stats.buffer_time_us = start.elapsed().as_micros() as u64;
         stats
     }
+
+    fn packet_receiver(&self) -> BankingPacketReceiver {
+        self.receiver.clone()
+    }
+
+    fn skip_wait(&mut self) -> Option<&mut bool> {
+        None
+    }
+
+    fn on_skip_wait_disabled(&mut self) {}
 }
 
 impl TransactionViewReceiveAndBuffer {
@@ -468,6 +534,12 @@ impl TransactionViewReceiveAndBuffer {
         should_check: bool,
         stats: &mut ReceivingStats,
     ) -> Result<(), DisconnectedError> {
+        let capture_gui_timestamps = self.capture_gui_timestamps;
+        // One syscall per received batch: when these packets entered the buffer.
+        let packet_batch_arrival_timestamp_nanos = capture_gui_timestamps
+            .then(wallclock_timestamp_nanos)
+            .unwrap_or(0);
+
         for packet in batch.iter() {
             let Some(packet_data) = packet.data(..) else {
                 continue;
@@ -479,7 +551,16 @@ impl TransactionViewReceiveAndBuffer {
                 continue;
             }
 
-            let work = packet_bytes(packet, packet_data);
+            let source_ipv4 = if capture_gui_timestamps {
+                source_ipv4_from_packet(packet)
+            } else {
+                0
+            };
+            let work = (
+                packet_bytes(packet, packet_data),
+                packet_batch_arrival_timestamp_nanos,
+                source_ipv4,
+            );
             match self.check_work_sender.try_send(work) {
                 Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
@@ -532,7 +613,7 @@ impl TransactionViewReceiveAndBuffer {
         }
 
         stats.num_dropped_on_capacity +=
-            container.push_ids_into_queue(std::iter::once(priority_id));
+            container.push_ids_into_queue(std::iter::once(priority_id)).0;
         stats.num_buffered += 1;
     }
 
@@ -704,6 +785,7 @@ mod tests {
             receiver,
             check_work_sender,
             check_result_receiver,
+            false,
         );
         let container = TransactionViewStateContainer::with_capacity(TEST_CONTAINER_CAPACITY);
         (receive_and_buffer, container)
@@ -806,12 +888,13 @@ mod tests {
             .send(to_single_banking_packet_batch(&Transaction::default()))
             .unwrap();
         let (work_sender, _work_receiver) = bounded(1);
-        work_sender.send(Bytes::new()).unwrap();
+        work_sender.send((Bytes::new(), 0, 0)).unwrap();
         let (_result_sender, result_receiver) = bounded(1);
         let mut receive_and_buffer = TransactionViewReceiveAndBuffer {
             receiver,
             check_work_sender: work_sender,
             check_result_receiver: result_receiver,
+            capture_gui_timestamps: false,
         };
         let mut container = TransactionViewStateContainer::with_capacity(1);
 
@@ -838,6 +921,7 @@ mod tests {
             receiver,
             check_work_sender: work_sender,
             check_result_receiver: result_receiver,
+            capture_gui_timestamps: false,
         };
         let mut container = TransactionViewStateContainer::with_capacity(1);
 

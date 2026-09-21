@@ -27,12 +27,17 @@ pub struct LatestValidatorVote {
     authorized_voter_pubkey: Pubkey,
     vote: Option<SanitizedTransactionView<Bytes>>,
     /// Successfully landed vote retained for a same-slot bank replacement.
-    pub(super) retained_vote: Option<(Bytes, VoteSource, (Slot, Hash))>,
+    /// Tuple: `(bytes, source, (slot, hash), arrival_timestamp_nanos, source_ipv4)`.
+    pub(super) retained_vote: Option<(Bytes, VoteSource, (Slot, Hash), i64, u32)>,
     /// Retained vote is a validated, one-shot fallback for the current bank.
     pub(super) restore_retained_on_failure: bool,
     slot: Slot,
     hash: Hash,
     timestamp: Option<UnixTimestamp>,
+    /// Wall-clock nanos when this vote entered `VoteStorage` (0 if unset).
+    arrival_timestamp_nanos: i64,
+    /// Source IPv4 of the packet as a big-endian `u32` (0 if unset/non-IPv4).
+    source_ipv4: u32,
 }
 
 impl LatestValidatorVote {
@@ -40,6 +45,8 @@ impl LatestValidatorVote {
         vote: SanitizedTransactionView<Bytes>,
         vote_source: VoteSource,
         deprecate_legacy_vote_ixs: bool,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
     ) -> Result<Self, DeserializedPacketError> {
         let (_, instruction) = vote
             .program_instructions_iter()
@@ -97,6 +104,8 @@ impl LatestValidatorVote {
                     authorized_voter_pubkey,
                     vote_source,
                     timestamp,
+                    arrival_timestamp_nanos,
+                    source_ipv4,
                 })
             }
             _ => Err(DeserializedPacketError::VoteTransaction),
@@ -120,7 +129,7 @@ impl LatestValidatorVote {
         )
         .unwrap();
 
-        Self::new_from_view(vote, vote_source, deprecate_legacy_vote_ixs)
+        Self::new_from_view(vote, vote_source, deprecate_legacy_vote_ixs, 0, 0)
     }
 
     pub fn vote_pubkey(&self) -> Pubkey {
@@ -137,6 +146,14 @@ impl LatestValidatorVote {
 
     pub fn source(&self) -> VoteSource {
         self.vote_source
+    }
+
+    pub fn arrival_timestamp_nanos(&self) -> i64 {
+        self.arrival_timestamp_nanos
+    }
+
+    pub fn source_ipv4(&self) -> u32 {
+        self.source_ipv4
     }
 
     pub(crate) fn hash(&self) -> Hash {
@@ -162,10 +179,9 @@ impl LatestValidatorVote {
     ) -> Option<usize> {
         let current_vote_is_valid =
             self.vote.is_some() && is_valid_for_fork((self.slot, self.hash));
-        let retained_vote_is_valid = self
-            .retained_vote
-            .as_ref()
-            .is_some_and(|(_, _, slot_hash)| is_valid_for_fork(*slot_hash));
+        let retained_vote_is_valid = self.retained_vote.as_ref().is_some_and(
+            |(_, _, slot_hash, _, _)| is_valid_for_fork(*slot_hash),
+        );
         self.restore_retained_on_failure = current_vote_is_valid && retained_vote_is_valid;
 
         if current_vote_is_valid || !retained_vote_is_valid {
@@ -190,10 +206,17 @@ impl LatestValidatorVote {
     }
 
     fn restore_retained_vote(&mut self, deprecate_legacy_vote_ixs: bool) -> Option<()> {
-        let (bytes, source, _) = self.retained_vote.as_ref()?;
+        let (bytes, source, _, arrival_timestamp_nanos, source_ipv4) = self.retained_vote.as_ref()?;
         let vote =
             SanitizedTransactionView::try_new_sanitized(bytes.clone(), &sanitize_config()).ok()?;
-        let mut restored = Self::new_from_view(vote, *source, deprecate_legacy_vote_ixs).ok()?;
+        let mut restored = Self::new_from_view(
+            vote,
+            *source,
+            deprecate_legacy_vote_ixs,
+            *arrival_timestamp_nanos,
+            *source_ipv4,
+        )
+        .ok()?;
         restored.retained_vote = self.retained_vote.take();
         *self = restored;
         Some(())

@@ -1,3 +1,5 @@
+use std::num::Saturating;
+
 use {
     super::{
         scheduler::{Scheduler, SchedulingSummary},
@@ -23,7 +25,6 @@ use {
     solana_cost_model::block_cost_limits::MAX_BLOCK_UNITS,
     solana_ledger::shred::get_data_shred_bytes_per_batch_typical,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-    std::num::Saturating,
 };
 
 // 15% of a batch is chosen as a target. If all entries are within this bound, the
@@ -66,6 +67,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
         finished_consume_work_receiver: Receiver<FinishedConsumeWork<Tx>>,
         config: GreedySchedulerConfig,
         bundle_account_locker: BundleAccountLocker,
+        capture_gui_timestamps: bool,
     ) -> Self {
         assert!(
             config.target_entry_bytes_per_batch > ENTRY_OVERHEAD_BYTES,
@@ -77,6 +79,7 @@ impl<Tx: TransactionWithMeta> GreedyScheduler<Tx> {
                 consume_work_senders,
                 finished_consume_work_receiver,
                 config.target_transactions_per_batch,
+                capture_gui_timestamps,
             ),
             config,
             bundle_account_locker,
@@ -186,7 +189,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                     if self.common.batches.entry_bytes()[thread_id] + transaction_bytes
                         > self.config.target_entry_bytes_per_batch
                     {
-                        num_sent += self.common.send_batches()?;
+                        num_sent += self.common.send_batches(container)?;
                     }
 
                     num_scheduled += 1;
@@ -206,7 +209,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
                         || self.common.batches.entry_bytes()[thread_id]
                             >= self.config.target_entry_bytes_per_batch
                     {
-                        num_sent += self.common.send_batches()?;
+                        num_sent += self.common.send_batches(container)?;
                     }
 
                     // if the thread is at target_cu_per_thread, remove it from the schedulable threads
@@ -225,7 +228,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             }
         }
 
-        num_sent += self.common.send_batches()?;
+        num_sent += self.common.send_batches(container)?;
         let Saturating(num_scheduled) = num_scheduled;
         assert_eq!(
             num_scheduled, num_sent,
@@ -241,7 +244,18 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for GreedyScheduler<Tx> {
             num_scheduled,
             num_unschedulable_conflicts,
             num_unschedulable_threads,
+            num_conflict_with_bundles: 0,
         })
+    }
+
+    // returns if txns are in flight
+    fn in_flight_txns(&mut self) -> bool {
+        !self
+            .scheduling_common_mut()
+            .in_flight_tracker
+            .num_in_flight_per_thread()
+            .iter()
+            .all(|txns_count| *txns_count == 0)
     }
 
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
@@ -358,6 +372,7 @@ mod test {
             finished_consume_work_receiver,
             config,
             bundle_account_locker,
+            false,
         );
         (
             scheduler,
@@ -396,7 +411,7 @@ mod test {
             ),
         >,
     ) -> TransactionStateContainer<RuntimeTransaction<SanitizedTransaction>> {
-        let mut container = TransactionStateContainer::with_capacity(10 * 1024);
+        let mut container = TransactionStateContainer::with_capacity(10 * 1024, false);
         for (from_keypair, to_pubkeys, lamports, compute_unit_price) in tx_infos.into_iter() {
             let transaction = prioritized_tranfers(
                 from_keypair.borrow(),

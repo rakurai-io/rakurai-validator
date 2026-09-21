@@ -18,11 +18,88 @@ pub enum TipDistributionError {
     SerializationError,
 }
 
+const HEADER_SIZE: usize = 8;
+
 pub type TipDistributionResult<T> = std::result::Result<T, TipDistributionError>;
 
-pub struct TipDistributionAccount;
+/// Reads `payload_len` Borsh bytes after the 8-byte discriminator. `payload_len` is the
+/// packed field size, not `size_of::<T>()` (that includes Rust alignment padding).
+fn read_borsh_account<T: BorshDeserialize>(
+    account_shared_data: &AccountSharedData,
+    program_id: &Pubkey,
+    discriminator: &[u8],
+    payload_len: usize,
+    label: &str,
+) -> TipDistributionResult<T> {
+    if account_shared_data.owner() != program_id {
+        return Err(TipDistributionError::InvalidAccountOwner);
+    }
+
+    let data = account_shared_data.data();
+    let end = HEADER_SIZE + payload_len;
+    if data.len() < end || &data[..HEADER_SIZE] != discriminator {
+        return Err(TipDistributionError::InvalidDiscriminator);
+    }
+
+    let mut payload = &data[HEADER_SIZE..end];
+    T::deserialize(&mut payload).map_err(|e| {
+        error!("Error deserializing {label}: {e}");
+        TipDistributionError::DeserializationError
+    })
+}
+
+#[allow(unused)]
+#[derive(BorshDeserialize)]
+
+pub struct TipDistributionAccount {
+    /// The validator's vote account, also the recipient of remaining lamports after
+    /// upon closing this account.
+    pub validator_vote_account: Pubkey,
+
+    /// The only account authorized to upload a merkle-root for this account.
+    pub merkle_root_upload_authority: Pubkey,
+
+    /// The merkle root used to verify user claims from this account.
+    pub merkle_root: Option<MerkleRoot>,
+
+    /// Epoch for which this account was created.  
+    pub epoch_created_at: u64,
+
+    /// The commission basis points this validator charges.
+    pub validator_commission_bps: u16,
+
+    /// The epoch (upto and including) that tip funds can be claimed.
+    pub expires_at: u64,
+
+    /// The bump used to generate this account
+    pub bump: u8,
+}
+
+#[allow(unused)]
+#[derive(BorshDeserialize)]
+pub struct MerkleRoot {
+    /// The 256-bit merkle root.
+    pub root: [u8; 32],
+
+    /// Maximum number of funds that can ever be claimed from this [MerkleRoot].
+    pub max_total_claim: u64,
+
+    /// Maximum number of nodes that can ever be claimed from this [MerkleRoot].
+    pub max_num_nodes: u64,
+
+    /// Total funds that have been claimed.
+    pub total_funds_claimed: u64,
+
+    /// Number of nodes that have been claimed.
+    pub num_nodes_claimed: u64,
+}
 
 impl TipDistributionAccount {
+    const DISCRIMINATOR: &'static [u8] = &[85, 64, 113, 198, 234, 94, 120, 123];
+    /// vote + upload authority + Option<MerkleRoot> + epoch + commission + expires + bump.
+    /// 32 + 32 + (1 + 64) + 8 + 2 + 8 + 1 = 148. Sized for `merkle_root = Some`.
+    const PAYLOAD_LEN: usize = 148;
+
     pub(crate) fn find_program_address(
         program_id: &Pubkey,
         vote_pubkey: &Pubkey,
@@ -35,6 +112,19 @@ impl TipDistributionAccount {
                 epoch.to_le_bytes().as_ref(),
             ],
             program_id,
+        )
+    }
+
+    pub(crate) fn from_account_shared_data(
+        account_shared_data: &AccountSharedData,
+        program_id: &Pubkey,
+    ) -> TipDistributionResult<Self> {
+        read_borsh_account(
+            account_shared_data,
+            program_id,
+            Self::DISCRIMINATOR,
+            Self::PAYLOAD_LEN,
+            "tip distribution account",
         )
     }
 }
@@ -170,5 +260,46 @@ impl JitoTipDistributionConfig {
 
     pub(crate) fn bump(&self) -> u8 {
         self.bump
+    }
+}
+
+#[allow(unused)]
+#[derive(BorshDeserialize)]
+pub struct ClaimStatus {
+    /// Whether the claim was already made.
+    pub is_claimed: bool,
+    /// Who made the claim.
+    pub claimant: Pubkey,
+    /// Payer of the claim status account.
+    pub claim_status_payer: Pubkey,
+    /// Slot when the claim was made.
+    pub slot_claimed_at: u64,
+    /// Amount claimed.
+    pub amount: u64,
+    /// Expiry of this claim.
+    pub expires_at: u64,
+    /// PDA bump.
+    pub bump: u8,
+}
+
+impl ClaimStatus {
+    /// PDA seed for claim status accounts.
+    pub const SEED: &'static [u8] = b"CLAIM_STATUS";
+    const DISCRIMINATOR: &'static [u8] = &[22, 183, 249, 157, 247, 95, 150, 96];
+    /// is_claimed + claimant + payer + slot + amount + expires + bump.
+    /// 1 + 32 + 32 + 8 + 8 + 8 + 1 = 90.
+    const PAYLOAD_LEN: usize = 90;
+
+    pub(crate) fn from_account_shared_data(
+        account_shared_data: &AccountSharedData,
+        program_id: &Pubkey,
+    ) -> TipDistributionResult<Self> {
+        read_borsh_account(
+            account_shared_data,
+            program_id,
+            Self::DISCRIMINATOR,
+            Self::PAYLOAD_LEN,
+            "claim status account",
+        )
     }
 }

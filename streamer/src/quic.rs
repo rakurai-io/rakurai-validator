@@ -552,6 +552,29 @@ impl StreamerStats {
 /// connection's peer still retains sufficient stake.
 pub const DEFAULT_STAKE_REVALIDATION_INTERVAL: RangeInclusive<Duration> =
     Duration::from_secs(60 * 60)..=Duration::from_secs(2 * 60 * 60);
+pub struct GuiStreamerStats {
+    pub total_packets_sent_to_consumer: u64,
+    pub total_handle_chunk_to_packet_send_err: u64,
+    pub total_handle_chunk_to_packet_send_disconnected_err: u64,
+    pub total_handle_chunk_to_packet_send_full_err: u64,
+    pub total_packet_batches_none: u64,
+    pub invalid_stream_size: u64,
+    pub total_stream_read_errors: u64,
+    pub total_stream_read_timeouts: u64,
+}
+
+pub struct GuiStreamerReceiveStats {
+    pub name: &'static str,
+    pub packets_count: usize,
+    pub packet_batches_count: usize,
+    pub full_packet_batches_count: usize,
+    pub max_channel_len: usize,
+    pub num_packets_dropped: usize,
+}
+pub enum GuiStreamerMetrics {
+    Quic(GuiStreamerStats),
+    Udp(GuiStreamerReceiveStats),
+}
 
 #[derive(Clone)]
 pub struct QuicStreamerConfig {
@@ -618,6 +641,7 @@ fn spawn_runtime_and_server<Q, C>(
     quic_server_params: QuicStreamerConfig,
     qos: Q,
     cancel: CancellationToken,
+    gui_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
 ) -> Result<SpawnServerResult, QuicServerError>
 where
     Q: QosController<C> + Send + Sync + 'static,
@@ -635,6 +659,7 @@ where
             quic_server_params.clone(),
             qos,
             cancel,
+            gui_metrics_sender,
         )
     }?;
     let handle = thread::Builder::new()
@@ -668,6 +693,7 @@ pub fn spawn_stake_weighted_qos_server(
     quic_server_params: QuicStreamerConfig,
     qos_config: SwQosConfig,
     cancel: CancellationToken,
+    gui_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
 ) -> Result<SpawnServerResult, QuicServerError> {
     let stats = Arc::<StreamerStats>::default();
     let swqos = SwQos::new(qos_config, stats.clone(), staked_nodes, cancel.clone());
@@ -681,6 +707,7 @@ pub fn spawn_stake_weighted_qos_server(
         quic_server_params,
         swqos,
         cancel,
+        gui_metrics_sender,
     )
 }
 
@@ -697,6 +724,7 @@ pub fn spawn_simple_qos_server(
     quic_server_params: QuicStreamerConfig,
     qos_config: SimpleQosConfig,
     cancel: CancellationToken,
+    gui_metrics_sender: Option<Sender<GuiStreamerMetrics>>,
 ) -> Result<(SpawnServerResult, Arc<SimpleQosBanlist>), QuicServerError> {
     let server_params = SimpleQosQuicStreamerConfig {
         quic_streamer_config: quic_server_params,
@@ -721,6 +749,7 @@ pub fn spawn_simple_qos_server(
         server_params.quic_streamer_config,
         simple_qos,
         cancel,
+        gui_metrics_sender,
     )
     .map(|ssr| (ssr, banlist))
 }
@@ -787,6 +816,7 @@ mod test {
             server_params.quic_streamer_config,
             server_params.qos_config,
             cancel.clone(),
+            None,
         )
         .unwrap();
         (t, receiver, server_address, cancel, banlist)
@@ -820,6 +850,7 @@ mod test {
             server_params,
             SwQosConfig::default_for_tests(),
             cancel.clone(),
+            None,
         )
         .unwrap();
         (t, receiver, server_address, cancel)
@@ -881,6 +912,7 @@ mod test {
                 ..Default::default()
             },
             cancel.clone(),
+            None,
         )
         .unwrap();
 
@@ -1073,6 +1105,7 @@ mod test {
                 ..Default::default()
             },
             cancel.clone(),
+            None,
         )
         .unwrap();
 

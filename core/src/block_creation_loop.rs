@@ -8,7 +8,8 @@ use {
     crate::{
         banking_trace::{BankingPacketSender, BankingTracer},
         block_creation_loop::rewards::{
-            certs_requestor::CertsRequestor, msg_types::RewardRespSucc,
+            certs_requestor::CertsRequestor,
+            msg_types::{RewardRequestToken, RewardRespSucc},
             reward_certs_service::RewardCertsService,
         },
         replay_stage::{Finalizer, ReplayStage},
@@ -75,13 +76,20 @@ mod stats;
 // - broadcast.
 // Recording stops this much before the slot timeout so block completion has time to finish before
 // the leader window deadline.
-const TIME_TO_COMPLETE_BLOCK_BROADCAST: Duration = Duration::from_millis(6);
+const TIME_TO_COMPLETE_BLOCK_BROADCAST: Duration = Duration::from_millis(0);
 
 // Empirically derived value estimating the average turbine transmission time
 // over a leader window. Agave will terminate block production early such that
 // an external observer views `bank.ns_per_slot()` time between consecutive block
 // completions.
-const BLOCK_PRODUCTION_BUFFER: Duration = Duration::from_millis(50);
+const BLOCK_PRODUCTION_BUFFER: Duration = Duration::from_millis(0);
+
+// Hold the first slot of a leader window this long after the window timer starts.
+const FIRST_SLOT_START_DELAY: Duration = Duration::from_millis(15);
+
+// Added to the cluster slot time so each slot in the turn records for 202 ms
+// when `ns_per_slot` is 200 ms.
+const SLOT_DURATION_EXTENSION: Duration = Duration::from_millis(4);
 
 /// Source of a leader-window notification consumed by BCL.
 enum ParentSource {
@@ -461,12 +469,32 @@ fn reset_poh_recorder(bank: &Arc<Bank>, ctx: &LeaderContext, preserve_replacemen
     }
 }
 
+/// Slot length used while this node is producing a leader window.
+fn leader_slot_duration(bank: &Bank, slot: Slot) -> Duration {
+    Duration::from_nanos_u128(bank.ns_per_slot_at_slot(slot)).saturating_add(SLOT_DURATION_EXTENSION)
+}
+
 /// Returns the elapsed leader-window time at which `slot` must be completed.
+///
+/// The first slot starts `FIRST_SLOT_START_DELAY` after the window timer, and
+/// every slot then runs for `leader_slot_duration`.
 fn block_timeout(bank: &Bank, slot: Slot) -> Duration {
-    Duration::from_nanos_u128(bank.ns_per_slot_at_slot(slot))
+    leader_slot_duration(bank, slot)
         .saturating_mul((leader_slot_index(slot) as u32).saturating_add(1))
+        .saturating_add(FIRST_SLOT_START_DELAY)
         .saturating_sub(TIME_TO_COMPLETE_BLOCK_BROADCAST)
         .saturating_sub(BLOCK_PRODUCTION_BUFFER)
+}
+
+/// Sleep until the first slot of this window is allowed to start.
+fn wait_for_first_slot_start(block_timer: Instant) {
+    let Some(start_at) = block_timer.checked_add(FIRST_SLOT_START_DELAY) else {
+        return;
+    };
+    let Some(remaining) = start_at.checked_duration_since(Instant::now()) else {
+        return;
+    };
+    thread::sleep(remaining);
 }
 
 /// Select the freshest leader-window notification within one source.
@@ -599,8 +627,10 @@ fn produce_window(
     mut block_timer: Instant,
     ctx: &mut LeaderContext,
 ) -> Result<(), StartLeaderError> {
-    update_leader_window_clock(ctx, start_slot, block_timer);
+    wait_for_first_slot_start(block_timer);
+    update_leader_window_clock(ctx, start_slot, Instant::now());
 
+    let mut reward_cert_request = request_reward_certs(ctx, start_slot)?;
     // Insert the first bank
     let mut working_bank = start_leader_wait_for_parent_replay(
         start_slot,
@@ -628,9 +658,14 @@ fn produce_window(
         let mut bank_completion_measure = Measure::start("bank_completion");
         let optimistic_parent =
             (fast_leader_handover && slot == start_slot).then_some(parent_block);
-        if let Err(e) =
-            record_and_complete_block(ctx, slot, optimistic_parent, &mut block_timer, timeout)
-        {
+        if let Err(e) = record_and_complete_block(
+            ctx,
+            slot,
+            optimistic_parent,
+            reward_cert_request,
+            &mut block_timer,
+            timeout,
+        ) {
             if ctx.exit.load(Ordering::Relaxed) {
                 return Ok(());
             }
@@ -656,6 +691,7 @@ fn produce_window(
             break;
         }
 
+        reward_cert_request = request_reward_certs(ctx, slot)?;
         // Although `slot - 1`has been cleared from `poh_recorder`, it might not have finished processing in
         // `replay_stage`, which is why we use `start_leader_retry_replay`
         working_bank =
@@ -665,6 +701,30 @@ fn produce_window(
     window_production_start.stop();
     ctx.metrics.window_production_elapsed += window_production_start.as_us();
     Ok(())
+}
+
+/// Asks the rewards service to build the reward certs for `slot`'s footer.
+///
+/// Call this before waiting for the parent. That wait can use up most of the slot's budget, and
+/// the footer doesn't wait for the reply, so requesting afterwards can leave the rewards service
+/// no time to answer.
+fn request_reward_certs(
+    ctx: &mut LeaderContext,
+    slot: Slot,
+) -> Result<Option<RewardRequestToken>, StartLeaderError> {
+    // Do not build reward certs for the first NUM_SLOTS_FOR_REWARD AG slots as the reward slots
+    // would be tower slots.
+    if slot
+        <= ctx
+            .genesis_cert_block_marker
+            .slot
+            .saturating_add(NUM_SLOTS_FOR_REWARD)
+    {
+        return Ok(None);
+    }
+    ctx.reward_certs_requestor
+        .request_reward_certs(ctx.my_pubkey, slot)
+        .map_err(|()| StartLeaderError::PohRecorder(PohRecorderError::ChannelDisconnected))
 }
 
 /// Records incoming transactions until we reach the block timeout.
@@ -678,23 +738,10 @@ fn record_and_complete_block(
     ctx: &mut LeaderContext,
     bank_slot: Slot,
     mut optimistic_parent: Option<Block>,
+    reward_cert_request: Option<RewardRequestToken>,
     block_timer: &mut Instant,
     block_timeout: Duration,
 ) -> Result<(), PohRecorderError> {
-    // Do not build reward certs for the first NUM_SLOTS_FOR_REWARD AG slots as the reward slots
-    // would be tower slots.
-    let reward_cert_request = if bank_slot
-        > ctx
-            .genesis_cert_block_marker
-            .slot
-            .saturating_add(NUM_SLOTS_FOR_REWARD)
-    {
-        ctx.reward_certs_requestor
-            .request_reward_certs(ctx.my_pubkey, bank_slot)
-            .map_err(|()| PohRecorderError::ChannelDisconnected)?
-    } else {
-        None
-    };
     let mut accumulated_txs = vec![];
     let mut records_shutdown = false;
     let window_has_moved_on = loop {
@@ -1065,7 +1112,7 @@ fn handle_parent_ready(
             // technically this send can evict to make room (which may drop a few packets)
             // but this should (hopefully) not be significant amounts since we are evicting
             // at most 1 batch.
-            .send(banking_packet_batch)
+            .send(banking_packet_batch, &None, &None)
             .map_err(|_| PohRecorderError::RescheduleTransactionsError(slot))?;
     }
 
@@ -1073,8 +1120,7 @@ fn handle_parent_ready(
 }
 
 fn update_leader_window_clock(ctx: &LeaderContext, slot: Slot, started_at: Instant) {
-    let slot_duration =
-        Duration::from_nanos_u128(ctx.sharable_banks.root().ns_per_slot_at_slot(slot));
+    let slot_duration = leader_slot_duration(&ctx.sharable_banks.root(), slot);
     ctx.alpenglow_slot_clock
         .update_leader(slot, started_at, slot_duration);
 }
@@ -1999,7 +2045,7 @@ mod tests {
 
         let start = Instant::now();
         let result =
-            record_and_complete_block(&mut ctx, 1, None, &mut Instant::now(), Duration::ZERO);
+            record_and_complete_block(&mut ctx, 1, None, None, &mut Instant::now(), Duration::ZERO);
         assert!(matches!(result, Err(PohRecorderError::WindowMovedOn(1))));
         assert!(start.elapsed() < Duration::from_millis(250));
         assert!(!ctx.poh_recorder.read().unwrap().has_bank());

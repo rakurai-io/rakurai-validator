@@ -84,6 +84,7 @@ fn stakes_cache_account_shared_data(account: &AccountSharedData) -> AccountShare
 
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample))]
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct StakesCache(RwLock<Stakes<StakeAccount>>);
 
 impl StakesCache {
@@ -91,7 +92,7 @@ impl StakesCache {
         Self(RwLock::new(stakes))
     }
 
-    pub(crate) fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
+    pub fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
         self.0.read().unwrap()
     }
 
@@ -204,6 +205,7 @@ impl StakesCache {
 /// stake-delegations.
 #[cfg_attr(feature = "frozen-abi", derive(AbiExample, StableAbi, StableAbiSample))]
 #[derive(Default, Clone, PartialEq, Debug, Serialize, SchemaWrite)]
+#[repr(C)]
 #[cfg_attr(
     feature = "dev-context-only-utils",
     field_qualifiers(

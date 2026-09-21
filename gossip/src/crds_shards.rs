@@ -8,6 +8,7 @@ use {
 };
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct CrdsShards {
     // shards[k] includes crds values which the first shard_bits of their hash
     // value is equal to k. Each shard is a mapping from crds values indices to

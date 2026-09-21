@@ -119,6 +119,7 @@ pub(in crate::banking_stage) fn build_finished_consume_work_extra_info(
                 loaded_accounts_data_size,
                 fee_payer_post_balance,
                 result,
+                ..
             } => TransactionResult::Committed(TransactionCommittedResult {
                 cus_consumed: *compute_units as u32,
                 feepayer_balance_lamports: *fee_payer_post_balance,

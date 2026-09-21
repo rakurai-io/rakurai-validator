@@ -20,6 +20,7 @@ agave-unstable-api = []
 dev-context-only-utils = ["dep:wincode"]
 
 [dependencies]
+serde = { workspace = true }
 crossbeam-channel = { workspace = true }
 solana-perf = { workspace = true }
 wincode = { workspace = true, optional = true }

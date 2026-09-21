@@ -8,6 +8,7 @@ pub struct TransactionErrorMetrics {
     pub account_loaded_twice: Saturating<usize>,
     pub account_not_found: Saturating<usize>,
     pub blockhash_not_found: Saturating<usize>,
+    pub nonce_account_not_found: Saturating<usize>,
     pub blockhash_too_old: Saturating<usize>,
     pub call_chain_too_deep: Saturating<usize>,
     pub already_processed: Saturating<usize>,
@@ -40,6 +41,7 @@ impl TransactionErrorMetrics {
         self.account_loaded_twice += other.account_loaded_twice;
         self.account_not_found += other.account_not_found;
         self.blockhash_not_found += other.blockhash_not_found;
+        self.nonce_account_not_found += other.nonce_account_not_found;
         self.blockhash_too_old += other.blockhash_too_old;
         self.call_chain_too_deep += other.call_chain_too_deep;
         self.already_processed += other.already_processed;

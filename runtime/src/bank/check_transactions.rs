@@ -250,6 +250,10 @@ impl Bank {
         ) {
             Ok(Some(nonce_address))
         } else {
+            if let Some(_) = tx.get_durable_nonce() {
+                error_counters.nonce_account_not_found += 1;
+            }
+
             error_counters.blockhash_not_found += 1;
             Err(TransactionError::BlockhashNotFound)
         }

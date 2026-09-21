@@ -114,27 +114,35 @@ impl VoteStorage {
         &mut self,
         vote_source: VoteSource,
         packet: SanitizedTransactionView<Bytes>,
+        arrival_timestamp_nanos: i64,
+        source_ipv4: u32,
     ) -> VoteInsertionMetrics {
-        let Ok(vote) =
-            LatestValidatorVote::new_from_view(packet, vote_source, self.deprecate_legacy_vote_ixs)
-        else {
+        let Ok(vote) = LatestValidatorVote::new_from_view(
+            packet,
+            vote_source,
+            self.deprecate_legacy_vote_ixs,
+            arrival_timestamp_nanos,
+            source_ipv4,
+        ) else {
             return VoteInsertionMetrics::default();
         };
 
         self.insert_vote(vote, false)
     }
 
-    // Re-insert re-tryable packets.
+    // Re-insert re-tryable packets, preserving ingress GUI metadata.
     pub(crate) fn reinsert_packets(
         &mut self,
-        packets: impl Iterator<Item = SanitizedTransactionView<Bytes>>,
+        votes: impl Iterator<Item = (SanitizedTransactionView<Bytes>, VoteSource, i64, u32)>,
     ) {
         let should_deprecate_legacy_vote_ixs = self.deprecate_legacy_vote_ixs;
-        for vote in packets.filter_map(|packet| {
+        for vote in votes.filter_map(|(packet, vote_source, arrival_timestamp_nanos, source_ipv4)| {
             LatestValidatorVote::new_from_view(
                 packet,
-                VoteSource::Tpu, // incorrect, but this bug has been here w/o issue for a long time.
+                vote_source,
                 should_deprecate_legacy_vote_ixs,
+                arrival_timestamp_nanos,
+                source_ipv4,
             )
             .ok()
         }) {
@@ -147,21 +155,42 @@ impl VoteStorage {
             .latest_vote_per_vote_pubkey
             .get_mut(&pubkey)
             .expect("drained vote entry must still exist");
-        vote.retained_vote = Some((bytes, vote.source(), (vote.slot(), vote.hash())));
+        vote.retained_vote = Some((
+            bytes,
+            vote.source(),
+            (vote.slot(), vote.hash()),
+            vote.arrival_timestamp_nanos(),
+            vote.source_ipv4(),
+        ));
         vote.restore_retained_on_failure = false;
     }
 
     pub fn drain_unprocessed(
         &mut self,
         bank: &Bank,
-    ) -> Vec<(Pubkey, SanitizedTransactionView<Bytes>)> {
+    ) -> Vec<(
+        Pubkey,
+        SanitizedTransactionView<Bytes>,
+        VoteSource,
+        i64,
+        u32,
+    )> {
         self.drain_unprocessed_with_deferred_restores(bank).0
     }
 
     pub(crate) fn drain_unprocessed_with_deferred_restores(
         &mut self,
         bank: &Bank,
-    ) -> (Vec<(Pubkey, SanitizedTransactionView<Bytes>)>, usize) {
+    ) -> (
+        Vec<(
+            Pubkey,
+            SanitizedTransactionView<Bytes>,
+            VoteSource,
+            i64,
+            u32,
+        )>,
+        usize,
+    ) {
         let slot_hashes = Self::load_slot_hashes(bank);
         let mut deferred_restore_count = 0;
 
@@ -175,16 +204,31 @@ impl VoteStorage {
                             (latest_vote.slot(), latest_vote.hash()),
                             &slot_hashes,
                         );
-                        let vote = if current_vote_is_valid {
-                            latest_vote.take_vote()
+                        // Capture GUI meta after take/restore so deferred retained
+                        // votes expose their own arrival/ipv4, not an invalid overlay's.
+                        let taken = if current_vote_is_valid {
+                            let source = latest_vote.source();
+                            let arrival = latest_vote.arrival_timestamp_nanos();
+                            let ipv4 = latest_vote.source_ipv4();
+                            latest_vote
+                                .take_vote()
+                                .map(|vote| (vote, source, arrival, ipv4))
                         } else {
                             latest_vote
                                 .take_deferred_retained_vote(self.deprecate_legacy_vote_ixs)
                                 .inspect(|_| deferred_restore_count += 1)
+                                .map(|vote| {
+                                    (
+                                        vote,
+                                        latest_vote.source(),
+                                        latest_vote.arrival_timestamp_nanos(),
+                                        latest_vote.source_ipv4(),
+                                    )
+                                })
                         };
-                        vote.map(|vote| {
+                        taken.map(|(vote, source, arrival, ipv4)| {
                             self.num_unprocessed_votes -= 1;
-                            (pubkey, vote)
+                            (pubkey, vote, source, arrival, ipv4)
                         })
                     })
             })
@@ -230,24 +274,43 @@ impl VoteStorage {
     }
 
     /// Clears unprocessed votes while retaining same-slot handover state.
-    pub fn clear(&mut self) {
-        self.latest_vote_per_vote_pubkey
-            .values_mut()
-            .for_each(|vote| {
-                drop(vote.take_vote());
-                vote.restore_retained_on_failure = false;
-            });
+    /// Returns `(dropped_gossip, dropped_tpu)` for forward-path waterfall stats.
+    pub fn clear(&mut self) -> (usize, usize) {
+        let mut num_dropped_gossip = 0;
+        let mut num_dropped_tpu = 0;
+        for vote in self.latest_vote_per_vote_pubkey.values_mut() {
+            if !vote.is_vote_taken() {
+                match vote.source() {
+                    VoteSource::Gossip => num_dropped_gossip += 1,
+                    VoteSource::Tpu => num_dropped_tpu += 1,
+                }
+            }
+            drop(vote.take_vote());
+            vote.restore_retained_on_failure = false;
+        }
         self.num_unprocessed_votes = 0;
+        (num_dropped_gossip, num_dropped_tpu)
     }
 
     pub(crate) fn take_deferred_retained_vote(
         &mut self,
         pubkey: Pubkey,
-    ) -> Option<(Pubkey, SanitizedTransactionView<Bytes>)> {
-        self.latest_vote_per_vote_pubkey
-            .get_mut(&pubkey)?
-            .take_deferred_retained_vote(self.deprecate_legacy_vote_ixs)
-            .map(|vote| (pubkey, vote))
+    ) -> Option<(
+        Pubkey,
+        SanitizedTransactionView<Bytes>,
+        VoteSource,
+        i64,
+        u32,
+    )> {
+        let latest = self.latest_vote_per_vote_pubkey.get_mut(&pubkey)?;
+        let vote = latest.take_deferred_retained_vote(self.deprecate_legacy_vote_ixs)?;
+        Some((
+            pubkey,
+            vote,
+            latest.source(),
+            latest.arrival_timestamp_nanos(),
+            latest.source_ipv4(),
+        ))
     }
 
     pub fn cache_epoch_boundary_info(&mut self, bank: &Bank) {
@@ -615,7 +678,7 @@ pub(crate) mod tests {
         packets: impl IntoIterator<Item = SanitizedTransactionView<Bytes>>,
     ) {
         for packet in packets {
-            vote_storage.insert_packet(vote_source, packet);
+            vote_storage.insert_packet(vote_source, packet, 0, 0);
         }
     }
 
@@ -632,15 +695,17 @@ pub(crate) mod tests {
 
         let vote = packet_from_slots_with_hash(vec![(0, 1)], &keypair, None, root_bank.hash());
         let mut vote_storage = VoteStorage::new(&bank_a);
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote), 0, 0);
 
-        let (vote_pubkey, vote) = vote_storage.drain_unprocessed(&bank_a).pop().unwrap();
+        let (vote_pubkey, vote, ..) = vote_storage.drain_unprocessed(&bank_a).pop().unwrap();
         vote_storage.retain_processed_vote(vote_pubkey, vote.into_inner_data());
 
         // An invalid newer vote must not destroy the retained fallback.
         vote_storage.insert_packet(
             VoteSource::Tpu,
             to_sanitized_view(packet_from_slots(vec![(0, 2), (1, 1)], &keypair, None)),
+            0,
+            0,
         );
 
         vote_storage.clear();
@@ -655,18 +720,19 @@ pub(crate) mod tests {
         // A valid newer vote is preferred, but its retained fallback survives a retry and a
         // subsequent incompatible vote.
         let vote_b = packet_from_slots_with_hash(vec![(0, 1)], &keypair, Some(1), root_bank.hash());
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote_b));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote_b), 0, 0);
 
         // Prefer the newer, fork-compatible B while retaining A as a fallback for bank A.
         assert_eq!(vote_storage.restore_taken_votes_for_bank(&bank_a), 0);
 
         // A retry of B must carry its retained fallback state.
-        let (_, vote_b) = vote_storage.drain_unprocessed(&bank_a).pop().unwrap();
-        vote_storage.reinsert_packets(std::iter::once(vote_b));
+        let (_pubkey, vote_b, source, arrival, ipv4) =
+            vote_storage.drain_unprocessed(&bank_a).pop().unwrap();
+        vote_storage.reinsert_packets(std::iter::once((vote_b, source, arrival, ipv4)));
 
         // A newer C that is incompatible with bank B must not continue to mask A.
         let vote_c = packet_from_slots(vec![(0, 2), (1, 1)], &keypair, None);
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote_c));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(vote_c), 0, 0);
         let (restored_votes, deferred_restore_count) =
             vote_storage.drain_unprocessed_with_deferred_restores(&bank_a);
         assert_eq!(deferred_restore_count, 1);
@@ -942,7 +1008,7 @@ pub(crate) mod tests {
             &keypair.vote_keypair,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(correct_vote));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(correct_vote), 0, 0);
         assert_eq!(1, vote_storage.len());
         assert_eq!(
             Some(0),
@@ -956,7 +1022,7 @@ pub(crate) mod tests {
             &unauthorized_keypair,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(unauthorized_vote));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(unauthorized_vote), 0, 0);
         // Should still be 1 (unauthorized vote was filtered)
         assert_eq!(1, vote_storage.len());
         // Slot should still be 0 (the authorized vote), not 1 (the unauthorized one)
@@ -972,7 +1038,7 @@ pub(crate) mod tests {
             &keypair.vote_keypair,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(correct_vote_2));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(correct_vote_2), 0, 0);
         assert_eq!(1, vote_storage.len());
         assert_eq!(
             Some(2),
@@ -1040,7 +1106,7 @@ pub(crate) mod tests {
             &epoch1_authorized_voter_keypair,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(epoch1_vote));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(epoch1_vote), 0, 0);
         assert_eq!(
             1,
             vote_storage.len(),
@@ -1055,7 +1121,7 @@ pub(crate) mod tests {
             &epoch2_authorized_voter_keypair, // This won't match epoch 1's authorized voter
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(wrong_epoch_vote));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(wrong_epoch_vote), 0, 0);
         // Should still be 1 - the vote with wrong authorized voter was rejected
         assert_eq!(
             1,
@@ -1263,7 +1329,7 @@ pub(crate) mod tests {
             &keypair_a.vote_keypair,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(stale_vote_a));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(stale_vote_a), 0, 0);
         assert_eq!(1, vote_storage.len());
         assert_eq!(None, vote_storage.get_latest_vote_slot(vote_pubkey_a));
 
@@ -1274,7 +1340,7 @@ pub(crate) mod tests {
             &new_authorized_voter_a,
             None,
         );
-        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(fresh_vote_a));
+        vote_storage.insert_packet(VoteSource::Tpu, to_sanitized_view(fresh_vote_a), 0, 0);
         assert_eq!(2, vote_storage.len());
         assert_eq!(Some(4), vote_storage.get_latest_vote_slot(vote_pubkey_a));
     }

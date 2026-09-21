@@ -4,6 +4,7 @@
 use {
     crate::{
         bam_dependencies::{BamOutboundMessage, v0_to_versioned_proto},
+        banking_trace::BankingPacketSender,
         tonic_endpoint,
     },
     jito_protos::proto::{
@@ -68,6 +69,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         batch_sender: crossbeam_channel::Sender<MultipleAtomicTxnBatch>,
         outbound_receiver: &mut Option<mpsc::Receiver<BamOutboundMessage>>,
+        non_vote_sender: BankingPacketSender,
     ) -> Result<Self, TryInitError> {
         // Create connection and inbound and outbound streams
         let backend_endpoint = Self::endpoint_from_url(&url)?
@@ -111,6 +113,7 @@ impl BamConnection {
             cluster_info,
             is_healthy.clone(),
             outbound_receiver,
+            non_vote_sender,
         ));
 
         Ok(Self {
@@ -135,6 +138,7 @@ impl BamConnection {
         cluster_info: Arc<ClusterInfo>,
         is_healthy: Arc<AtomicBool>,
         mut outbound_receiver: mpsc::Receiver<BamOutboundMessage>,
+        non_vote_sender: BankingPacketSender,
     ) -> mpsc::Receiver<BamOutboundMessage> {
         let mut metrics = BamConnectionMetrics::default();
         let mut last_heartbeat = None;
@@ -258,6 +262,13 @@ impl BamConnection {
                         SchedulerResponseV0 { resp: Some(Resp::MultipleAtomicTxnBatch(batches)), .. } => {
                             let num_batches = batches.batches.len() as u64;
                             metrics.bundle_received += num_batches;
+                            for batch in &batches.batches {
+                                let _ = non_vote_sender
+                                    .send_bam_batch(Arc::new(batch.clone()))
+                                    .inspect_err(|_| {
+                                        error!("Failed to send BAM batch to trace sender");
+                                    });
+                            }
                             if num_batches > 0 && batch_sender.try_send(batches).is_err() {
                                 metrics.bundle_forward_to_scheduler_fail += num_batches;
                             }

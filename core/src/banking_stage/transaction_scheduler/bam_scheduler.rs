@@ -413,6 +413,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
                     respond_with_extra_info: true,
                     target_slot: None,
                     admission: None,
+                    gui_schedule_info: Vec::new(),
                 });
             work.ids.extend(batch_ids);
             // The entries were checked above and the container is exclusively borrowed.
@@ -500,6 +501,7 @@ impl<Tx: TransactionWithMeta> BamScheduler<Tx> {
         work.ids.clear();
         work.transactions.clear();
         work.max_ages.clear();
+        work.gui_schedule_info.clear();
         self.reusable_consume_work.push(work);
     }
 
@@ -745,6 +747,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
             num_scheduled,
             num_unschedulable_conflicts: 0,
             num_unschedulable_threads: 0,
+            num_conflict_with_bundles: 0,
         })
     }
 
@@ -768,6 +771,7 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
                 mut work,
                 retryable_indexes,
                 extra_info,
+                cu_err_indexes: _,
             } = result;
             num_transactions += work.ids.len();
             let batch_id = work.batch_id;
@@ -847,6 +851,10 @@ impl<Tx: TransactionWithMeta> Scheduler<Tx> for BamScheduler<Tx> {
 
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx> {
         todo!()
+    }
+
+    fn in_flight_txns(&mut self) -> bool {
+        false
     }
 }
 
@@ -1235,6 +1243,7 @@ mod tests {
                 work,
                 retryable_indexes: vec![],
                 extra_info: Some(vec![response]),
+                cu_err_indexes: None,
             };
             finished_consume_work_sender.send(finished_work).unwrap();
         }
@@ -1286,6 +1295,7 @@ mod tests {
                     execution_success: true,
                 },
             )]),
+            cu_err_indexes: None,
         };
         finished_consume_work_sender.send(finished_work).unwrap();
 
@@ -1664,11 +1674,12 @@ mod tests {
             });
             work.transactions.len()
         ];
-        test.finished_consume_work_sender
+            test.finished_consume_work_sender
             .send(FinishedConsumeWork {
                 work,
                 retryable_indexes: vec![],
                 extra_info: Some(processed_results),
+                cu_err_indexes: None,
             })
             .unwrap();
         test.receive_completed(container, decision);
@@ -2114,6 +2125,7 @@ mod tests {
                     work,
                     retryable_indexes,
                     extra_info: None,
+                    cu_err_indexes: None,
                 })
                 .unwrap();
         };
@@ -2301,6 +2313,7 @@ mod tests {
                 extra_info: Some(vec![TransactionResult::NotCommitted(
                     NotCommittedReason::PohTimeout,
                 )]),
+                cu_err_indexes: None,
             })
             .unwrap();
         test.receive_completed(&mut container, &decision);

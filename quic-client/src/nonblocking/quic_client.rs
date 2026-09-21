@@ -43,6 +43,7 @@ const QUIC_KEEP_ALIVE: Duration = Duration::from_secs(1);
 pub const QUIC_CONNECTION_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A lazy-initialized Quic Endpoint
+#[repr(C)]
 pub struct QuicLazyInitializedEndpoint {
     endpoint: OnceCell<Arc<Endpoint>>,
     client_certificate: Arc<QuicClientCertificate>,
@@ -144,6 +145,7 @@ impl Default for QuicLazyInitializedEndpoint {
 /// A wrapper over NewConnection with additional capability to create the endpoint as part
 /// of creating a new connection.
 #[derive(Clone)]
+#[repr(C)]
 struct QuicNewConnection {
     endpoint: Arc<Endpoint>,
     connection: Arc<Connection>,
@@ -227,6 +229,7 @@ impl QuicNewConnection {
     }
 }
 
+#[repr(C)]
 pub struct QuicClient {
     endpoint: Arc<QuicLazyInitializedEndpoint>,
     connection: Arc<Mutex<Option<QuicNewConnection>>>,

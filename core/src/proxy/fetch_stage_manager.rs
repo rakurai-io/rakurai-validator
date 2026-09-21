@@ -5,16 +5,23 @@ use {
     },
     arc_swap::ArcSwap,
     crossbeam_channel::{Receiver, RecvError, Sender, select, tick},
+    log::{error, info, warn},
+    serde::Deserialize,
     solana_gossip::{
         cluster_info::ClusterInfo,
         contact_info::{self, Protocol},
     },
     solana_perf::packet::PacketBatch,
+    crate::gui::GuiCoreMetrics,
     std::{
-        fmt,
-        net::SocketAddr,
+        collections::HashSet,
+        env, fmt,
+        fs::File,
+        io::Read,
+        net::{IpAddr, SocketAddr},
+        path::{Path, PathBuf},
         sync::{
-            Arc,
+            Arc, RwLock,
             atomic::{AtomicBool, AtomicU8, Ordering},
         },
         thread::{self, Builder, JoinHandle},
@@ -34,6 +41,9 @@ const RELAYER_TPU_ENABLE_DELAY: Duration = Duration::from_secs(60);
 /// How often to log metrics
 const METRICS_INTERVAL: Duration = Duration::from_secs(1);
 const TPU_REPORT_INTERVAL: Duration = Duration::from_secs(1);
+const CONFIG_RELOAD_INTERVAL: Duration = Duration::from_secs(1800); // Reload config every 30 minutes
+const DEFAULT_QUIC_CONFIG_PATH: &str = "../quic_config.json";
+const QUIC_CONFIG_PATH_ENV: &str = "QUIC_CONFIG_PATH";
 
 /// Manages switching between the validator's tpu ports and that of the proxy's.
 /// Switch-overs are triggered by late and missed heartbeats.
@@ -53,6 +63,7 @@ impl FetchStageManager {
         bam_enabled: Arc<AtomicU8>,
         my_fallback_contact_info: contact_info::ContactInfo,
         bam_tpu_info: Arc<ArcSwap<Option<(SocketAddr, SocketAddr)>>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         let t_hdl = Self::start(
             cluster_info,
@@ -63,6 +74,7 @@ impl FetchStageManager {
             bam_enabled,
             my_fallback_contact_info,
             bam_tpu_info,
+            gui_core_metrics_sender,
         );
 
         Self { t_hdl }
@@ -77,6 +89,7 @@ impl FetchStageManager {
         bam_enabled: Arc<AtomicU8>,
         my_fallback_contact_info: contact_info::ContactInfo,
         bam_tpu_info: Arc<ArcSwap<Option<(SocketAddr, SocketAddr)>>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> JoinHandle<()> {
         Builder::new()
             .name("fetch-stage-manager".into())
@@ -107,10 +120,19 @@ impl FetchStageManager {
                 let state_machine_tick = tick(STATE_MACHINE_TICK);
                 let metrics_tick = tick(METRICS_INTERVAL);
 
+                // Get config path from environment variable or use default
+                let config_path = Self::get_quic_config_path();
+                info!("Using QUIC config path: {}", config_path.display());
+
+                // Initialize quic config
+                let quic_config = Arc::new(RwLock::new(Self::load_quic_config(&config_path)));
+                let config_path_arc = Arc::new(config_path);
+                let config_reload_tick = tick(CONFIG_RELOAD_INTERVAL);
+
                 // Run the semi-eternal loop
                 while !exit.load(Ordering::Relaxed) {
                     let all_good = select! {
-                        recv(packet_intercept_rx) -> pkt => tpu_state_machine.handle_packet_batch(pkt),
+                        recv(packet_intercept_rx) -> pkt => tpu_state_machine.handle_packet_batch(pkt, Some(quic_config.clone()), gui_core_metrics_sender.as_ref()),
                         recv(state_machine_tick) -> _ => {
                             tpu_state_machine.state_machine_tick();
                             true
@@ -120,6 +142,14 @@ impl FetchStageManager {
                             tpu_state_machine.handle_metrics_tick();
                             true
                         },
+                        recv(config_reload_tick) -> _ => {
+                            // Reload quic config file
+                            let new_config = Self::load_quic_config(&config_path_arc);
+                            let mut config = quic_config.write().unwrap();
+                            *config = new_config;
+                            debug!("Reloaded quic config file from {}", config_path_arc.display());
+                            true
+                        }
                     };
                     if !all_good {
                         datapoint_warn!("fetch_stage_manager-shutdown", ("stop", 1, i64));
@@ -132,6 +162,87 @@ impl FetchStageManager {
 
     pub fn join(self) -> thread::Result<()> {
         self.t_hdl.join()
+    }
+
+    /// Gets the QUIC config path from environment variable or returns default
+    fn get_quic_config_path() -> PathBuf {
+        env::var(QUIC_CONFIG_PATH_ENV)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(DEFAULT_QUIC_CONFIG_PATH))
+    }
+
+    /// Loads quic_config.json file
+    fn load_quic_config(config_path: &Path) -> HashSet<IpAddr> {
+        if !config_path.exists() {
+            warn!("Config file {} not found", config_path.display());
+            return HashSet::new();
+        }
+
+        match File::open(config_path) {
+            Ok(mut file) => {
+                let mut contents = String::new();
+                match file.read_to_string(&mut contents) {
+                    Ok(_) => match serde_json::from_str::<QuicConfig>(&contents) {
+                        Ok(config_json) => {
+                            let total_ips = config_json.quic_config.len();
+                            let mut config = HashSet::new();
+                            for ip_str in &config_json.quic_config {
+                                match ip_str.parse::<IpAddr>() {
+                                    Ok(ip) => {
+                                        config.insert(ip);
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to parse IP address '{}': {}", ip_str, e);
+                                    }
+                                }
+                            }
+                            if config.is_empty() && total_ips > 0 {
+                                warn!(
+                                    "No valid IP addresses found in config file {}",
+                                    config_path.display()
+                                );
+                            } else {
+                                info!(
+                                    "Loaded {} IP addresses from config file {}",
+                                    config.len(),
+                                    config_path.display()
+                                );
+                            }
+                            config
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Failed to parse config file {}: {}",
+                                config_path.display(),
+                                e
+                            );
+                            HashSet::new()
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            "Failed to read config file {}: {}",
+                            config_path.display(),
+                            e
+                        );
+                        HashSet::new()
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(
+                    "Failed to open config file {}: {}",
+                    config_path.display(),
+                    e
+                );
+                HashSet::new()
+            }
+        }
+    }
+
+    /// Checks if an IP address is in the quic config
+    pub fn is_ip_in_quic_config(ip: IpAddr, config: &HashSet<IpAddr>) -> bool {
+        config.contains(&ip)
     }
 }
 
@@ -315,7 +426,7 @@ impl FetchStageTpuStateMachine {
         let state_changed = prev_state != self.current_tpu_state;
         let report_due = Instant::now().duration_since(self.last_tpu_report) >= TPU_REPORT_INTERVAL;
 
-        let mut succeeded = true;
+        let mut succeeded: bool = true;
 
         // Update gossip if the state changed
         if state_changed {
@@ -400,9 +511,26 @@ impl FetchStageTpuStateMachine {
     }
 
     /// Process a batch of packets from FetchStage; returns false if we should shut down
-    fn handle_packet_batch(&mut self, pkt: Result<PacketBatch, RecvError>) -> bool {
+    fn handle_packet_batch(
+        &mut self,
+        pkt: Result<PacketBatch, RecvError>,
+        quic_config: Option<Arc<RwLock<HashSet<IpAddr>>>>,
+        gui_core_metrics_sender: Option<&Sender<GuiCoreMetrics>>,
+    ) -> bool {
         match pkt {
-            Ok(pkt) => {
+            Ok(mut pkt) => {
+                if let Some(quic_config) = quic_config {
+                    let config = quic_config.read().unwrap();
+                    for mut packet in pkt.iter_mut() {
+                        if FetchStageManager::is_ip_in_quic_config(
+                            packet.meta().socket_addr().ip(),
+                            &config,
+                        ) {
+                            packet.meta_mut().bypass_delay(true);
+                        }
+                    }
+                    drop(config); // Release lock before sending
+                }
                 // Only forward packets when fetch stage is "connected"
                 if self.should_forward_packets() {
                     if self.packet_tx.send(pkt).is_err() {
@@ -410,6 +538,13 @@ impl FetchStageTpuStateMachine {
                         return false;
                     }
                     self.metrics.packets_forwarded += 1;
+                }
+                else {
+                    if let Some(gui_core_metrics_sender) = gui_core_metrics_sender {
+                        if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::FetchStageManagerForwardDropped(1)) {
+                            warn!("failed to send FetchStageManagerForwardDropped gui metrics: {err}");
+                        }
+                    }
                 }
                 true
             }
@@ -446,6 +581,12 @@ impl FetchStageTpuStateMachine {
 
         true
     }
+}
+
+/// Configuration structure for quic_config.json
+#[derive(Deserialize)]
+struct QuicConfig {
+    quic_config: Vec<String>,
 }
 
 #[cfg(test)]
@@ -501,7 +642,7 @@ mod tests {
         should_send: bool,
     ) {
         let pkt = PacketBatch::Single(BytesPacket::empty());
-        assert!(brain.handle_packet_batch(Ok(pkt.clone())));
+        assert!(brain.handle_packet_batch(Ok(pkt.clone())), None);
         if should_send {
             let received_pkt = packet_rx.recv().unwrap();
             assert_eq!(received_pkt, pkt);

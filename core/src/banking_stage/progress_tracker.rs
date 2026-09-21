@@ -103,7 +103,7 @@ impl ProgressTracker {
 
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset());
+                .for_each(|metrics| metrics.maybe_report_and_reset(false, None));
 
             self.wait_for_next_progress_boundary();
         }
@@ -180,7 +180,7 @@ impl ProgressTracker {
                             working_bank.slot(),
                             slot_info.slot,
                             slot_info.started_at.elapsed(),
-                            Duration::from_nanos_u128(working_bank.ns_per_slot),
+                            slot_info.slot_duration,
                         )
                     })
                     .unwrap_or(0)

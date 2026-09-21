@@ -9,6 +9,7 @@ use {
         inflation_rewards::points::PointValue, reward_info::RewardInfo,
         stake_account::StakeAccount, stake_history::StakeHistory,
     },
+    serde::{Deserialize, Serialize},
     solana_account::{AccountSharedData, ReadableAccount},
     solana_accounts_db::{
         stake_rewards::StakeReward,
@@ -26,7 +27,8 @@ use {
 const REWARD_CALCULATION_NUM_BLOCKS: u64 = 1;
 
 /// Total reward for a stake account, comprising inflation and block rewards.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub(crate) struct PartitionedStakeReward {
     /// Stake account address
     pub stake_pubkey: Pubkey,
@@ -37,7 +39,8 @@ pub(crate) struct PartitionedStakeReward {
 }
 
 /// Just the inflation portion of a partitioned stake reward
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[repr(C)]
 pub(crate) struct InflationReward {
     /// `Stake` state to be stored in account
     pub stake: Stake,
@@ -52,7 +55,7 @@ pub(crate) struct InflationReward {
 }
 
 /// A vector of stake rewards.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct PartitionedStakeRewards {
     /// Inner vector.
     rewards: Vec<Option<PartitionedStakeReward>>,
@@ -135,7 +138,8 @@ impl FromIterator<PartitionedStakeReward> for PartitionedStakeRewards {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[repr(C)]
 pub(crate) struct StartBlockHeightAndRewards {
     /// the block height of the slot at which rewards distribution began
     pub(crate) distribution_starting_block_height: u64,
@@ -159,6 +163,7 @@ pub(crate) struct StartBlockHeightAndPartitionedRewards {
 
 /// Represent whether bank is in the reward phase or not.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[repr(C)]
 pub(crate) enum EpochRewardStatus {
     /// this bank is in the reward phase.
     /// Contents are the start point for epoch reward calculation,

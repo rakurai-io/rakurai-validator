@@ -30,6 +30,7 @@ impl ::solana_frozen_abi::abi_example::AbiExample for ReservedAccountKeys {
 /// account keys that are reserved by the protocol and may not be write-locked
 /// during transaction processing.
 #[derive(Debug, Clone, PartialEq)]
+#[repr(C)]
 pub struct ReservedAccountKeys {
     /// Set of currently active reserved account keys
     pub active: HashSet<Pubkey>,

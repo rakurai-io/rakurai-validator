@@ -559,8 +559,11 @@ impl ClusterInfoVoteListener {
                     stats.banking_channel_max_len = stats
                         .banking_channel_max_len
                         .max(verified_packets_sender.len());
-                    stats.banking_channel_eviction_drops +=
-                        verified_packets_sender.send(BankingPacketBatch::new(packet_batch))?;
+                    stats.banking_channel_eviction_drops += verified_packets_sender.send(
+                        BankingPacketBatch::new(packet_batch),
+                        &None,
+                        &None,
+                    )?;
                 }
             }
             if last_report.elapsed() >= STATS_REPORT_INTERVAL {

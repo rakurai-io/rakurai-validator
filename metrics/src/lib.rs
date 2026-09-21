@@ -3,7 +3,10 @@
 pub mod counter;
 pub mod datapoint;
 pub mod metrics;
-pub use crate::metrics::{flush, set_host_id, set_panic_hook, submit};
+pub use crate::metrics::{
+    flush, rakurai_metrics_enabled, set_host_id, set_panic_hook, set_rakurai_metrics_config,
+    set_rakurai_metrics_enabled, submit,
+};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -11,6 +14,7 @@ use std::sync::{
 
 // To track an external counter which cannot be reset and is always increasing
 #[derive(Default)]
+#[repr(C)]
 pub struct MovingStat {
     value: AtomicU64,
 }

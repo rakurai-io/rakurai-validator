@@ -29,6 +29,7 @@ use {
         transaction_processor::{ExecutionRecordingConfig, TransactionProcessingConfig},
     },
     solana_transaction::TransactionError,
+    solana_svm_timings::wallclock_timestamp_nanos,
     std::{
         iter::repeat,
         num::Saturating,
@@ -42,6 +43,7 @@ pub struct BundleConsumer {
     committer: Committer,
     transaction_recorder: TransactionRecorder,
     log_messages_bytes_limit: Option<usize>,
+    capture_gui_timestamps: bool,
 }
 
 impl BundleConsumer {
@@ -49,11 +51,13 @@ impl BundleConsumer {
         committer: Committer,
         transaction_recorder: TransactionRecorder,
         log_messages_bytes_limit: Option<usize>,
+        capture_gui_timestamps: bool,
     ) -> Self {
         Self {
             committer,
             transaction_recorder,
             log_messages_bytes_limit,
+            capture_gui_timestamps,
         }
     }
 
@@ -82,10 +86,17 @@ impl BundleConsumer {
         // Need to filter out transactions since they were sanitized earlier.
         // This means that the transaction may cross and epoch boundary (not allowed),
         //  or account lookup tables may have been closed.
+        let mut microblock_start_timestamps_nanos = Vec::new();
+        if self.capture_gui_timestamps {
+            microblock_start_timestamps_nanos.reserve(txs.len());
+        }
         let pre_results: SmallVec<[_; 5]> = txs
             .iter()
             .zip(max_ages)
             .map(|(tx, max_age)| {
+                if self.capture_gui_timestamps {
+                    microblock_start_timestamps_nanos.push(wallclock_timestamp_nanos());
+                }
                 bank.resanitize_transaction_minimally(
                     tx,
                     max_age.sanitized_epoch,
@@ -118,6 +129,8 @@ impl BundleConsumer {
             return ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count: 0,
                 cost_model_us: 0,
+                compute_units_requested: Vec::new(),
+                microblock_start_timestamps_nanos,
                 execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
                     execute_and_commit_timings: LeaderExecuteAndCommitTimings::default(),
                     error_counters,
@@ -128,7 +141,10 @@ impl BundleConsumer {
             };
         }
 
-        self.process_and_record_transactions_with_pre_results(bank, txs, max_bundle_duration)
+        let mut output =
+            self.process_and_record_transactions_with_pre_results(bank, txs, max_bundle_duration);
+        output.microblock_start_timestamps_nanos = microblock_start_timestamps_nanos;
+        output
     }
 
     fn process_and_record_transactions_with_pre_results(
@@ -147,6 +163,17 @@ impl BundleConsumer {
             txs,
             repeat(Ok(())),
         ));
+        let compute_units_requested: Vec<u32> = if self.capture_gui_timestamps {
+            transaction_qos_cost_results
+                .iter()
+                .map(|result| match result {
+                    Ok(cost) => cost.programs_execution_cost() as u32,
+                    Err(_) => 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         if let Some((index, err)) = transaction_qos_cost_results
             .iter()
             .enumerate()
@@ -165,6 +192,8 @@ impl BundleConsumer {
             return ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count,
                 cost_model_us,
+                compute_units_requested,
+                microblock_start_timestamps_nanos: Vec::new(),
                 execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
                     transaction_counts: LeaderProcessedTransactionCounts::default(),
                     // everything is retryable, but not immediately because the QoS isn't reset until the next slot
@@ -192,6 +221,8 @@ impl BundleConsumer {
             return ProcessTransactionBatchOutput {
                 cost_model_throttled_transactions_count: 0,
                 cost_model_us,
+                compute_units_requested,
+                microblock_start_timestamps_nanos: Vec::new(),
                 execute_and_commit_transactions_output: ExecuteAndCommitTransactionsOutput {
                     transaction_counts: LeaderProcessedTransactionCounts {
                         attempted_processing_count: 0,
@@ -251,6 +282,8 @@ impl BundleConsumer {
             cost_model_throttled_transactions_count,
             cost_model_us,
             execute_and_commit_transactions_output,
+            compute_units_requested,
+            microblock_start_timestamps_nanos: Vec::new(),
         }
     }
 
@@ -307,6 +340,10 @@ impl BundleConsumer {
                     strict_nonce_size_check: true,
                     drop_noop_transactions: true,
                     check_program_deployment_slot: bank.check_program_deployment_slot(),
+                    capture_gui_timestamps: self.capture_gui_timestamps,
+                    tip_accounts: self
+                        .capture_gui_timestamps
+                        .then(|| crate::bundle_stage::bundle_storage::jito_tip_accounts()),
                 }
             ));
         execute_and_commit_timings.load_execute_us = load_execute_us;
@@ -590,7 +627,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -709,7 +746,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -768,7 +805,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -840,7 +877,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -1043,7 +1080,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -1110,7 +1147,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -1192,7 +1229,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:
@@ -1252,7 +1289,7 @@ mod tests {
             replay_vote_sender,
             Some(Arc::new(PrioritizationFeeCache::new(0u64))),
         );
-        let mut consumer = BundleConsumer::new(committer, recorder, None);
+        let mut consumer = BundleConsumer::new(committer, recorder, None, false);
 
         let ProcessTransactionBatchOutput {
             execute_and_commit_transactions_output:

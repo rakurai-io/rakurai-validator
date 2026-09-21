@@ -8,6 +8,7 @@ use {
 };
 
 #[derive(Default)]
+#[repr(C)]
 pub struct ClientStats {
     pub total_connections: AtomicU64,
     pub connection_reuse: AtomicU64,

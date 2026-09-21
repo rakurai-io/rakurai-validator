@@ -171,6 +171,7 @@ impl QosService {
                             loaded_accounts_data_size,
                             result: _,
                             fee_payer_post_balance: _,
+                            ..
                         } => {
                             cost_tracker.update_execution_cost(
                                 tx_cost,
@@ -374,6 +375,8 @@ mod tests {
                         + loaded_accounts_data_size_adjustment,
                     result: Ok(()),
                     fee_payer_post_balance: 0,
+                    fee_details: FeeDetails::default(),
+                    tips: 0,
                 })
                 .collect();
             let final_txs_cost = total_txs_cost
@@ -504,6 +507,8 @@ mod tests {
                                 + loaded_accounts_data_size_adjustment,
                             result: Ok(()),
                             fee_payer_post_balance: 1,
+                            fee_details: FeeDetails::default(),
+                            tips: 0,
                         }
                     }
                 })
@@ -605,6 +610,8 @@ mod tests {
                     loaded_accounts_data_size: 0,
                     result: Ok(()),
                     fee_payer_post_balance: 0,
+                    fee_details: FeeDetails::default(),
+                    tips: 0,
                 })
                 .collect();
             QosService::remove_or_update_costs(
@@ -657,6 +664,8 @@ mod tests {
                     loaded_accounts_data_size: 1,
                     result: Ok(()),
                     fee_payer_post_balance: 0,
+                    fee_details: FeeDetails::default(),
+                    tips: 0,
                 })
                 .collect();
             QosService::remove_or_update_costs(

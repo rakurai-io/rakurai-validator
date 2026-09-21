@@ -4,6 +4,7 @@
 
 use {
     crate::{
+        banking_stage::scheduler_update_notifier::P2cUpdateSender,
         banking_trace::BankingPacketSender, sigverify_stage::SigVerifyServiceError,
         transaction_priority::calculate_priority_from_bytes,
     },
@@ -145,6 +146,8 @@ struct WorkerPoolChannels {
     sharable_banks: SharableBanks,
     non_vote_state: SigVerifyWorkerState,
     tpu_vote_state: SigVerifyWorkerState,
+    input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+    p2c_update: Option<P2cUpdateSender>,
 }
 
 pub(crate) struct SigVerifyWorkerPool {
@@ -174,6 +177,8 @@ impl SigVerifyWorkerPool {
         sharable_banks: SharableBanks,
         non_vote_state: SigVerifyWorkerState,
         tpu_vote_state: SigVerifyWorkerState,
+        input_tx_signature_sender: Option<(Sender<String>, Arc<AtomicBool>)>,
+        p2c_update: Option<P2cUpdateSender>,
     ) -> Self {
         let (gossip_sender, gossip_receiver) = bounded(SIGVERIFY_GOSSIP_VOTE_WORK_CHANNEL_SIZE);
         let channels = WorkerPoolChannels {
@@ -185,6 +190,8 @@ impl SigVerifyWorkerPool {
             sharable_banks,
             non_vote_state,
             tpu_vote_state,
+            input_tx_signature_sender,
+            p2c_update,
         };
         let exit = Arc::new(AtomicBool::new(false));
         let worker_hdls = (0..num_workers.get())
@@ -232,6 +239,8 @@ impl SigVerifyWorkerPool {
                         false,
                         &channels.sharable_banks,
                         &channels.non_vote_state,
+                        &channels.input_tx_signature_sender,
+                        &channels.p2c_update,
                     ),
                     Err(_) => false,
                 }
@@ -246,6 +255,8 @@ impl SigVerifyWorkerPool {
                         true,
                         &channels.sharable_banks,
                         &channels.tpu_vote_state,
+                        &channels.input_tx_signature_sender,
+                        &channels.p2c_update,
                     ),
                     Err(_) => false,
                 }
@@ -271,6 +282,8 @@ impl SigVerifyWorkerPool {
         is_tpu_vote: bool,
         sharable_banks: &SharableBanks,
         state: &SigVerifyWorkerState,
+        input_tx_signature_sender: &Option<(Sender<String>, Arc<AtomicBool>)>,
+        p2c_update: &Option<P2cUpdateSender>,
     ) -> bool {
         let batch_len = batch.len();
         state.stats.total_batches.fetch_add(1, Ordering::Relaxed);
@@ -350,10 +363,17 @@ impl SigVerifyWorkerPool {
             .stats
             .max_pre_send_len
             .fetch_max(state.banking_stage_sender.len(), Ordering::Relaxed);
-        match state
-            .banking_stage_sender
-            .send(banking_packet_batch.clone())
-        {
+
+        let tx_io_sender = if is_tpu_vote {
+            &None
+        } else {
+            input_tx_signature_sender
+        };
+        match state.banking_stage_sender.send(
+            banking_packet_batch.clone(),
+            tx_io_sender,
+            p2c_update,
+        ) {
             Ok(0) => {} // avoid poking atomics if nothing was evicted (typical case)
             Ok(evicted) => {
                 // record evicted amount into metrics

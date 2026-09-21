@@ -75,6 +75,7 @@ pub enum RecordSenderError {
 /// The sender does not wait for service to pick up the records, and will return
 /// immediately if the channel is full, shutdown, or if the bank id has changed.
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct RecordSender {
     /// Used to track active senders for the current bank id. Used so that the receiver
     /// side can determine that no more sends are in-flight while shutting down.

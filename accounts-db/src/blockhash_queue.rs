@@ -38,6 +38,7 @@ impl HashInfo {
     )
 )]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub struct BlockhashQueue {
     /// index of last hash to be registered
     last_hash_index: u64,
