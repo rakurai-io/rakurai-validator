@@ -929,11 +929,6 @@ impl BankingSimulator {
             Some(SchedlingStrategy::Strategy1),
             nonce_packets,
             nonce_packet_receiver,
-            Arc::new(RwLock::new(
-                crate::banking_stage::PostPackConfirmationConfig {
-                    entries: Vec::new(),
-                },
-            )),
             Arc::new(arc_swap::ArcSwap::from_pointee(
                 crate::banking_stage::PostPackConfirmationConfigStatus::default(),
             )),

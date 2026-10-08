@@ -13,8 +13,8 @@ use {
         bam_dependencies::{BamConnectionState, BamDependencies},
         banking_simulation::DummyClusterInfo,
         banking_stage::{
-            BankingStage, DecisionState, PostPackConfirmationConfig, RakuraiConfig, RakuraiMode,
-            SchedlingStrategy, reward_distributor::RewardDistributionConfig,
+            BankingStage, RakuraiConfig, RakuraiMode, SchedlingStrategy,
+            decision_maker::DecisionMaker, reward_distributor::RewardDistributionConfig,
             transaction_scheduler::scheduler_controller::SchedulerConfig,
             update_bank_forks_and_poh_recorder_for_new_tpu_bank,
         },
@@ -207,9 +207,10 @@ fn main() {
             (None, None)
         };
 
-    let shared_decision = (
-        Arc::new(RwLock::new(DecisionState::Hold)),
-        Arc::new(AtomicBool::new(false)),
+    let decision_maker = DecisionMaker::from_poh_recorder(
+        &poh_recorder,
+        bank_forks.read().unwrap().migration_status(),
+        agave_votor::slot_clock::SharedAlpenglowSlotClock::default(),
     );
 
     let client_mode = Arc::new(Mutex::new(ClientMode::RakuraiBAM));
@@ -256,16 +257,13 @@ fn main() {
         })),
         input_tx_signature_sender,
         output_tx_signature_sender,
-        shared_decision,
+        decision_maker,
         exit.clone(),
         client_mode,
         Arc::new(AtomicBool::new(false)),
         Some(SchedlingStrategy::Strategy1),
         nonce_packets,
         nonce_packet_receiver,
-        Arc::new(RwLock::new(PostPackConfirmationConfig {
-            entries: Vec::new(),
-        })),
         Arc::new(arc_swap::ArcSwap::from_pointee(
             solana_core::banking_stage::PostPackConfirmationConfigStatus::default(),
         )),
