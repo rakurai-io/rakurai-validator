@@ -47,7 +47,7 @@ jobs:
     steps:
       # 1️⃣ Checkout main repo branch
       - name: Checkout main repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.branch }}
           token: ${{ secrets.GITHUB_TOKEN }}
