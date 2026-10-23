@@ -66,6 +66,9 @@ jobs:
             git apply core/src/banking_stage/rakurai_scheduler/lib_building.patch
             cargo build --release -p rakurai-scheduler
 
+        - name: Running static tests to ensure no file I/O, network I/O or validator private key access is present in the scheduler binary
+          run: ./static_scheduler_tests.sh target/release/librakurai_scheduler.so
+
         - name: Generating SLSA compliant GitHub Artifact Attestation to prove build provenance and integrity of the scheduler binary
           uses: actions/attest-build-provenance@v3
           with:
@@ -105,7 +108,3 @@ jobs:
               "cd ${BACKEND_PATH}/ && ./deploy_binaries.sh '${{ github.ref_name }}'"
 
             shred -u backend_key.pem
-
-        - name: Running static tests to ensure no file I/O, network I/O or validator private key access is present in the scheduler binary
-          run: ./static_scheduler_tests.sh
-          
