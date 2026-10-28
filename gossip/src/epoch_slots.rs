@@ -16,6 +16,7 @@ pub const MAX_SLOTS_PER_ENTRY: usize = 2048 * 8;
 
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub struct Uncompressed {
     pub first_slot: Slot,
     pub num: usize,
@@ -50,6 +51,7 @@ impl Sanitize for Uncompressed {
 
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub struct Flate2 {
     pub first_slot: Slot,
     pub num: usize,
@@ -179,6 +181,7 @@ impl Uncompressed {
 
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Clone, Debug, PartialEq, Eq, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub enum CompressedSlots {
     Flate2(Flate2),
     Uncompressed(Uncompressed),
@@ -254,6 +257,7 @@ impl CompressedSlots {
     )
 )]
 #[derive(Clone, Default, PartialEq, Eq, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub struct EpochSlots {
     pub from: Pubkey,
     pub slots: Vec<CompressedSlots>,

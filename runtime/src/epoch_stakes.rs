@@ -170,6 +170,7 @@ impl BLSPubkeyToRankMap {
 
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, SchemaRead, SchemaWrite)]
+#[repr(C)]
 pub struct NodeVoteAccounts {
     pub vote_accounts: Vec<Pubkey>,
     pub total_stake: u64,
@@ -220,6 +221,7 @@ fn stable_abi_sample_deserializable_epoch_stakes(
 #[derive(Clone, Debug, SchemaWrite)]
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[cfg_attr(feature = "dev-context-only-utils", derive(PartialEq))]
+#[repr(C)]
 pub enum VersionedEpochStakes {
     Current {
         stakes: EpochStakes,

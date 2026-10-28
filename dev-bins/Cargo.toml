@@ -2,9 +2,12 @@
 members = [
     "../accounts-db/store-tool",
     "../bam-local-cluster",
+    "../bam-banking-bench",
     "../conformance",
     "../ledger-tool",
     "../svm-conformance",
+    "../scheduler-test-setup",
+    "../seccomp-enforcer",
 ]
 
 resolver = "2"
@@ -38,6 +41,7 @@ used_underscore_binding = "deny"
 new_without_default = "allow"
 
 [workspace.dependencies]
+agave-banking-stage-ingress-types = { path = "../banking-stage-ingress-types", version = "=4.4.1", features = ["agave-unstable-api"] }
 agave-feature-set = { path = "../feature-set", version = "=4.4.1", features = ["agave-unstable-api"] }
 agave-logger = { path = "../logger", version = "=4.4.1", features = ["agave-unstable-api"] }
 agave-precompiles = { path = "../precompiles", version = "=4.4.1", features = ["agave-unstable-api"] }
@@ -48,7 +52,10 @@ agave-votor = { path = "../votor", version = "=4.4.1", features = ["agave-unstab
 agave-votor-messages = { path = "../votor-messages", version = "=4.4.1", features = ["agave-unstable-api"] }
 ahash = "0.8.11"
 anyhow = "1.0.104"
+arc-swap = "=1.9.2"
 assert_cmd = "2.2.2"
+assert_matches = "1.5.0"
+axum = "0.8.9"
 bincode = "1.3.3"
 bv = "0.11.1"
 bytes = "1.12.1"
@@ -62,6 +69,7 @@ futures = "0.3.34"
 histogram = "0.6.9"
 itertools = "0.15.0"
 jemallocator = { package = "tikv-jemallocator", version = "0.6.0", features = ["unprefixed_malloc_on_supported_platforms"] }
+jito-protos = { path = "../jito-protos", version = "=4.4.1" }
 log = "0.4.28"
 num_cpus = "1.17.0"
 pretty-hex = "0.4.2"
@@ -71,6 +79,7 @@ protosol = "=15.0.0"
 rand = "0.9.4"
 rayon = "1.12.0"
 regex = "1.13.1"
+seccomp-enforcer = { path = "../seccomp-enforcer" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_bytes = "0.11.19"
 serde_json = "1.0.151"
@@ -81,6 +90,7 @@ signal-hook = "0.4.4"
 solana-account = "5.0.0"
 solana-account-decoder = { path = "../account-decoder", version = "=4.4.1", features = ["agave-unstable-api"] }
 solana-accounts-db = { path = "../accounts-db", version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-address = "2.7.0"
 solana-address-lookup-table-interface = "4.0.0"
 solana-bloom = { path = "../bloom", version = "=4.4.1", features = ["agave-unstable-api"] }
 solana-bls-signatures = { version = "4.0.0", features = ["serde"] }
@@ -126,7 +136,10 @@ solana-metrics = { path = "../metrics", version = "=4.4.1", features = ["agave-u
 solana-native-token = "3.0.0"
 solana-net-utils = { path = "../net-utils", version = "=4.4.1", features = ["agave-unstable-api"] }
 solana-nonce = "3.2.1"
-solana-packet = "4.2.0"
+solana-packet = "4.3.0"
+solana-perf = { path = "../perf", version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-poh = { path = "../poh", version = "=4.4.1", features = ["agave-unstable-api"] }
+solana-poh-config = "3.1.0"
 solana-precompile-error = "3.0.0"
 solana-program-binaries = { path = "../program-binaries", version = "=4.4.1", features = ["agave-unstable-api"] }
 solana-program-runtime = { path = "../program-runtime", version = "=4.4.1", features = ["agave-unstable-api"] }
@@ -223,3 +236,20 @@ codegen-units = 1
 [patch.crates-io]
 librocksdb-sys = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }
 rocksdb = { git = "https://github.com/anza-xyz/rust-rocksdb", rev = "4dba80dfe9434e595a971f5b2985ff9ba4fb31e7" }
+agave-geyser-plugin-interface = { path = "../solana-sdk/geyser-plugin-interface" }
+arc-swap = { path = "../solana-sdk/arc-swap" }
+agave-transaction-view = { path = "../solana-sdk/transaction-view" }
+solana-account = { path = "../solana-sdk/account" }
+solana-cluster-type = { path = "../solana-sdk/cluster-type" }
+solana-example-mocks = { path = "../solana-sdk/example-mocks" }
+solana-fee-calculator = { path = "../solana-sdk/fee-calculator" }
+solana-fee-structure = { path = "../solana-sdk/fee-structure" }
+solana-hard-forks = { path = "../solana-sdk/hard-forks" }
+solana-inflation = { path = "../solana-sdk/inflation" }
+solana-message = { path = "../solana-sdk/message" }
+solana-packet = { path = "../solana-sdk/packet" }
+solana-reward-info = { path = "../solana-sdk/reward-info" }
+solana-time-utils = { path = "../solana-sdk/time-utils" }
+solana-transaction = { path = "../solana-sdk/transaction" }
+parking_lot_core = { path = "../parking_lot/core" }
+dashmap = { path = "../dashmap" }

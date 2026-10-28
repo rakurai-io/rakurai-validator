@@ -25,6 +25,7 @@ use {
 };
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct ComputeMeter(Cell<u64>);
 
 impl ComputeMeter {

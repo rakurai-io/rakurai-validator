@@ -5,6 +5,7 @@ use {
 };
 
 #[derive(Clone, PartialEq)]
+#[repr(C)]
 pub struct Ancestors {
     ancestors: RollingBitField,
 }

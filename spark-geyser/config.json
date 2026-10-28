@@ -1,0 +1,91 @@
+{
+  "name": "SparkGeyserPlugin",
+  "log_level": "info",
+  "check_version": true,
+  "zmq_auth": {
+    "enabled": true,
+    "allowed_ips": [],
+    "username": null,
+    "password": null
+  },
+  "program_filter_control": {
+    "enabled": true,
+    "addr": "tcp://0.0.0.0:5600",
+    "hwm": 100
+  },
+  "supported_programs": {
+    "orca": [
+      "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+    ],
+    "raydium": [
+      "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C",
+      "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK",
+      "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+    ],
+    "meteora": [
+      "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo",
+      "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG"
+    ],
+    "phoenix": [
+      "EtrnLzgbS7nMMy5fbD42kXiUzGg8XQzJ972Xtk1cjWih"
+    ],
+    "pancakeswap": [
+      "HpNfyc2Saw7RKkQd8nEL4khUcuPhQ7WwY1B2qjx8jxFq"
+    ],
+    "gmtrade": [
+      "Gmso1uvJnLbawvw7yezdfCDcPydwW2s2iqG3w6MDucLo"
+    ],
+    "tokenprogram": [
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+    ],
+    "system": [
+      "Sysvar1111111111111111111111111111111111111"
+    ]
+  },
+  "zmq_sockets": {
+    "Slot": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5550",
+        "hwm": 100
+      }
+    },
+    "AccAndTx": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5551"
+      }
+    },
+    "Entry": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5552",
+        "hwm": 3000
+      }
+    },
+    "Account": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5554"
+      }
+    },
+    "BlockMeta": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5555",
+        "hwm": 100
+      }
+    },
+    "Transaction": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5556"
+      }
+    },
+    "BankCleared": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5553"
+      }
+    },
+    "BlockFooter": {
+      "cluster": {
+        "addr": "PubSub_tcp://0.0.0.0:5557"
+      }
+    }
+  },
+  "libpath": "./libspark_geyser_plugin-4_4_1.so"
+}

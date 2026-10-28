@@ -97,9 +97,15 @@ fn expires_by(token: &Token, deadline: i64) -> bool {
 }
 
 /// Interceptor responsible for adding the access token to request headers.
-pub(crate) struct AuthInterceptor {
+pub struct AuthInterceptor {
     /// The token added to each request header.
     access_token: Arc<ArcSwap<Token>>,
+}
+
+impl AuthInterceptor {
+    pub fn new(access_token: Arc<ArcSwap<Token>>) -> Self {
+        Self { access_token }
+    }
 }
 
 impl Interceptor for AuthInterceptor {

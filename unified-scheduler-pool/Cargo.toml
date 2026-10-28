@@ -43,6 +43,7 @@ solana-unified-scheduler-logic = { workspace = true }
 static_assertions = { workspace = true }
 
 [dev-dependencies]
+agave-jemalloc = { workspace = true, features = ["jemalloc", "metrics"] }
 agave-logger = { path = "../logger", features = ["agave-unstable-api"] }
 assert_matches = { workspace = true }
 jemallocator = { workspace = true }

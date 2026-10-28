@@ -92,6 +92,7 @@ pub enum Error {
     )
 )]
 #[derive(Clone, Debug, Eq, PartialEq, SchemaWrite)]
+#[repr(C)]
 pub struct ContactInfo {
     pubkey: Pubkey,
     #[wincode(with = "solana_wincode_varint::Leb128Int<u64>")]
@@ -121,6 +122,7 @@ pub struct ContactInfo {
     feature = "dev-context-only-utils",
     field_qualifiers(key(pub), index(pub), offset(pub))
 )]
+#[repr(C)]
 pub(crate) struct SocketEntry {
     pub(crate) key: u8,   // Protocol identifier, e.g. tvu, tpu, etc
     pub(crate) index: u8, // IpAddr index in the accompanying addrs vector.

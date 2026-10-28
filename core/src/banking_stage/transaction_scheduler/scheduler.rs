@@ -1,3 +1,5 @@
+use std::num::Saturating;
+
 use {
     super::{
         scheduler_common::SchedulingCommon, scheduler_error::SchedulerError,
@@ -6,10 +8,9 @@ use {
     crate::banking_stage::decision_maker::BufferedPacketsDecision,
     solana_clock::Slot,
     solana_runtime_transaction::transaction_with_meta::TransactionWithMeta,
-    std::num::Saturating,
 };
 
-pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
+pub trait Scheduler<Tx: TransactionWithMeta> {
     /// Schedule transactions from `container`.
     /// pre-graph and pre-lock filters may be passed to be applied
     /// before specific actions internally.
@@ -51,10 +52,14 @@ pub(crate) trait Scheduler<Tx: TransactionWithMeta> {
     /// All schedulers should have access to the common context for shared
     /// implementation.
     fn scheduling_common_mut(&mut self) -> &mut SchedulingCommon<Tx>;
+
+    // returns if txns are in flight
+    #[allow(dead_code)]
+    fn in_flight_txns(&mut self) -> bool;
 }
 /// Metrics from scheduling transactions.
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct SchedulingSummary {
+pub struct SchedulingSummary {
     /// Starting queue size
     pub starting_queue_size: usize,
     /// Starting buffer size (outstanding txs are not counted in queue)
@@ -66,4 +71,6 @@ pub(crate) struct SchedulingSummary {
     pub num_unschedulable_conflicts: usize,
     /// Number of transactions that were skipped due to thread capacity.
     pub num_unschedulable_threads: usize,
+    /// Number of transactions that were not scheduled due to conflicts with bundles.
+    pub num_conflict_with_bundles: usize,
 }

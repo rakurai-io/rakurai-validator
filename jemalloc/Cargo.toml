@@ -21,12 +21,16 @@ name = "agave_jemalloc"
 
 [features]
 agave-unstable-api = []
+# Rakurai: links tikv-jemalloc-sys. Enabled through solana-core's `jemalloc-stats` feature (validator
+# build). Left off for the rakurai scheduler cdylib, where a statically linked jemalloc would take
+# over the library's malloc and split the heap with the host process.
+jemalloc = ["dep:jemalloc-ctl", "dep:jemalloc-sys", "dep:jemallocator"]
 metrics = ["dep:log", "dep:solana-metrics"]
 
 [dependencies]
-jemalloc-ctl = { workspace = true }
-jemalloc-sys = { workspace = true }
-jemallocator = { workspace = true }
+jemalloc-ctl = { workspace = true, optional = true }
+jemalloc-sys = { workspace = true, optional = true }
+jemallocator = { workspace = true, optional = true }
 log = { workspace = true, optional = true }
 solana-metrics = { workspace = true, optional = true }
 thiserror = { workspace = true }

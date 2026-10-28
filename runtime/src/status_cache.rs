@@ -46,6 +46,7 @@ type SlotDeltaMap<T> = HashMap<Slot, Status<T>>;
 pub type SlotDelta<T> = (Slot, bool, Status<T>);
 
 #[derive(Clone, Debug)]
+#[repr(C)]
 pub struct StatusCache<T: Clone> {
     // cache[blockhash][tx_key] => [(fork1_slot, tx_result), (fork2_slot, tx_result), ...] used to
     // check if a tx_key was seen on a fork and for rpc to retrieve the tx_result

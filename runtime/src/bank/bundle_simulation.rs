@@ -83,6 +83,8 @@ impl Bank {
                     strict_nonce_size_check: true,
                     drop_noop_transactions: true,
                     drop_bail_out_transactions: true,
+                    capture_gui_timestamps: false,
+                    tip_accounts: None,
                 },
                 &mut program_cache_for_tx_batch,
                 false,

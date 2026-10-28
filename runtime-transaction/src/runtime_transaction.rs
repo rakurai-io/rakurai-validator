@@ -37,8 +37,9 @@ mod transaction_view;
 
 pub type ReplayTransaction = RuntimeTransaction<ResolvedTransactionView<Bytes>>;
 
-#[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
-#[derive(Debug)]
+// #[cfg_attr(feature = "dev-context-only-utils", derive(Clone))]
+#[derive(Debug, Clone)]
+#[repr(C)]
 pub struct RuntimeTransaction<T> {
     transaction: T,
     // transaction meta is a collection of fields, it is updated

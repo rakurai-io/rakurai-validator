@@ -4,6 +4,7 @@ use {
 };
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+#[repr(C)]
 pub struct RentCollector {
     pub epoch: Epoch,
     pub epoch_schedule: EpochSchedule,

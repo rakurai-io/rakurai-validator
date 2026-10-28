@@ -562,7 +562,62 @@ fn mallctl_name(name: &str) -> CString {
     CString::new(name).expect("mallctl name must not contain nul bytes")
 }
 
-#[cfg(test)]
+// Rakurai: stand-ins for the jemalloc crates when the `jemalloc` feature is off, so the code above
+// compiles unchanged and every mallctl reports an error instead of linking tikv-jemalloc-sys.
+#[cfg(not(feature = "jemalloc"))]
+mod jemalloc_ctl {
+    use std::fmt;
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct Error;
+
+    impl fmt::Display for Error {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("agave-jemalloc built without the `jemalloc` feature")
+        }
+    }
+
+    pub mod raw {
+        use super::Error;
+
+        pub unsafe fn read<T: Copy>(_name: &[u8]) -> Result<T, Error> {
+            Err(Error)
+        }
+
+        pub unsafe fn write<T: Copy>(_name: &[u8], _value: T) -> Result<(), Error> {
+            Err(Error)
+        }
+
+        pub unsafe fn update<T: Copy>(_name: &[u8], _value: T) -> Result<T, Error> {
+            Err(Error)
+        }
+    }
+
+    pub mod epoch {
+        pub fn advance() -> Result<u64, super::Error> {
+            Err(super::Error)
+        }
+    }
+}
+
+#[cfg(not(feature = "jemalloc"))]
+mod jemalloc_sys {
+    use std::os::raw::{c_char, c_int, c_void};
+
+    const ENOTSUP: c_int = 95;
+
+    pub unsafe fn mallctl(
+        _name: *const c_char,
+        _oldp: *mut c_void,
+        _oldlenp: *mut usize,
+        _newp: *mut c_void,
+        _newlen: usize,
+    ) -> c_int {
+        ENOTSUP
+    }
+}
+
+#[cfg(all(test, feature = "jemalloc"))]
 #[global_allocator]
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
 

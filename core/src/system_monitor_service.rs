@@ -883,7 +883,10 @@ impl SystemMonitorService {
         }
     }
 
-    #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
+    #[cfg(all(
+        feature = "jemalloc-stats",
+        not(any(target_env = "msvc", target_os = "freebsd"))
+    ))]
     fn report_jemalloc_stats() {
         use jemalloc_ctl::{epoch, stats};
         // Advance the epoch so jemalloc refreshes its cached stat values.
@@ -1200,7 +1203,10 @@ impl SystemMonitorService {
             }
             if config.report_os_memory_stats && mem_timer.should_update(SAMPLE_INTERVAL_MEM_MS) {
                 Self::report_mem_stats();
-                #[cfg(not(any(target_env = "msvc", target_os = "freebsd")))]
+                #[cfg(all(
+                    feature = "jemalloc-stats",
+                    not(any(target_env = "msvc", target_os = "freebsd"))
+                ))]
                 Self::report_jemalloc_stats();
             }
             if config.report_os_cpu_stats {

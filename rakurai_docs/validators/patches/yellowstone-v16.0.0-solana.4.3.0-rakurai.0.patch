@@ -1,0 +1,54 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index bb55eb4..a0d40a3 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -103,16 +103,16 @@ wincode = "0.6.1"
+ notify = "8.2.0"
+ 
+ # Agave Monorepo
+-agave-geyser-plugin-interface = "=4.3.0"
+-solana-account-decoder = "=4.3.0"
+-solana-entry = "=4.3.0"
++agave-geyser-plugin-interface = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "agave-geyser-plugin-interface" }
++solana-account-decoder = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "solana-account-decoder" }
++solana-entry = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "solana-entry" }
+ solana-logger = "3.0.0"
+-solana-storage-proto = "=4.3.0"
+-solana-transaction-context = "=4.3.0"
+-solana-transaction-status = "=4.3.0"
++solana-storage-proto = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "solana-storage-proto", features = ["agave-unstable-api"] }
++solana-transaction-context = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "solana-transaction-context" }
++solana-transaction-status = { git = "https://github.com/rakurai-io/rakurai-validator.git", branch = "v4.3.0-rakurai.0", package = "solana-transaction-status" }
+ 
+ # Solana SDK
+-solana-message = "4.4.1"
++solana-message = "=4.5.0"
+ 
+ solana-account = "4.0.0"
+ solana-clock = "3.0.0"
+@@ -123,7 +123,7 @@ solana-keypair = "3.0.0"
+ solana-pubkey = "4.0.0"
+ solana-signature = "3.0.0"
+ solana-signer = "3.0.0"
+-solana-transaction = "4.0.0"
++solana-transaction = "=4.2.0"
+ # We need to pin this to 3.2.0 because introduce a breaking changing in 3.3.0 which prevents compilation of solana-storage-proto.
+ solana-transaction-error = "3.3.1"
+ 
+@@ -142,6 +142,16 @@ yellowstone-grpc-tools = { path = "yellowstone-grpc-tools", version = "0.1.0" }
+ tokio-rustls = "0.26.0"
+ x509-parser = "0.18.0"
+ 
++
++[patch.crates-io]
++solana-message = { git = "https://github.com/rakurai-io/solana-sdk.git", package = "solana-message", rev = "54da37865945960416378602f6b627a865fd5b90" }
++solana-packet = { git = "https://github.com/rakurai-io/solana-sdk.git", package = "solana-packet", rev = "54da37865945960416378602f6b627a865fd5b90" }
++solana-transaction = { git = "https://github.com/rakurai-io/solana-sdk.git", package = "solana-transaction", rev = "54da37865945960416378602f6b627a865fd5b90" }
++
++[workspace.lints.rust]
++deprecated = "allow"
++
++
+ [workspace.lints.clippy]
+ clone_on_ref_ptr = "deny"
+ missing_const_for_fn = "deny"

@@ -10,3 +10,6 @@ rustflags = ["-Clinker-plugin-lto=no"]
 
 [alias]
 xtask = "run --manifest-path ci/xtask/Cargo.toml --bin xtask --"
+
+[build]
+rustc-wrapper = "scripts/suppress_anchor_warns.sh"

@@ -30,6 +30,8 @@ libloading = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
+solana-measure = { workspace = true }
+solana-metrics = { workspace = true }
 solana-account = { workspace = true }
 solana-account-decoder-client-types = { workspace = true }
 solana-accounts-db = { workspace = true }
@@ -38,7 +40,6 @@ solana-entry = { workspace = true }
 solana-gossip = { workspace = true }
 solana-hash = { workspace = true }
 solana-ledger = { workspace = true }
-solana-measure = { workspace = true }
 solana-message = { workspace = true }
 solana-pubkey = { workspace = true }
 solana-rpc = { workspace = true }

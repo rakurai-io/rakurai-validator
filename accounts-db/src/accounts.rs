@@ -66,6 +66,7 @@ impl<'a, T: TransactionWithMeta> TransactionAccountLocksIterator<'a, T> {
 
 /// This structure handles synchronization for db
 #[derive(Debug)]
+#[repr(C)]
 pub struct Accounts {
     /// Single global AccountsDb
     pub accounts_db: Arc<AccountsDb>,

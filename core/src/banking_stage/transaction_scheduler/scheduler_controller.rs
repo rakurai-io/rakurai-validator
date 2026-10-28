@@ -1,6 +1,12 @@
 //! Control flow for BankingStage's transaction scheduler.
 //!
 
+use std::sync::Mutex;
+
+use crate::{
+    banking_stage::{DecisionState, LeaderMetaData},
+    validator::ClientMode,
+};
 use {
     super::{
         receive_and_buffer::{DisconnectedError, ReceiveAndBuffer},
@@ -21,8 +27,10 @@ use {
             },
         },
         validator::SchedulerPacing,
+        gui::GuiCoreMetrics,
     },
     agave_banking_stage_ingress_types::SchedulerPriorityFloor,
+    crossbeam_channel::Sender,
     solana_clock::{BankId, DEFAULT_MS_PER_SLOT},
     solana_cost_model::cost_tracker::SharedBlockCost,
     solana_measure::measure_us,
@@ -92,6 +100,7 @@ const DEFAULT_SCHEDULER_PACING_NON_FILL_TIME_MILLIS: u64 = 50;
 pub(crate) const DEFAULT_SCHEDULER_PACING_FILL_TIME_MILLIS: NonZeroU64 =
     NonZeroU64::new(DEFAULT_MS_PER_SLOT - DEFAULT_SCHEDULER_PACING_NON_FILL_TIME_MILLIS).unwrap();
 
+
 /// Detects saturation and publishes the priority floor for dropping low-priority transactions upstream.
 struct SaturationState {
     priority_floor: Arc<SchedulerPriorityFloor>,
@@ -142,6 +151,24 @@ impl Drop for SaturationState {
     }
 }
 
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    fn check_state(
+        is_priority_queue_empty: bool,
+        decision_state: &DecisionState,
+        in_flight_txns: bool,
+        block_reception: &mut bool,
+        is_switching_point_detected: bool,
+    );
+}
+
+#[cfg(feature = "build_validator")]
+unsafe extern "C" {
+    #[allow(improper_ctypes)]
+    fn initial_check_state_for_standard();
+}
+
 /// Controls packet and transaction flow into scheduler, and scheduling execution.
 pub(crate) struct SchedulerController<R, S>
 where
@@ -180,6 +207,9 @@ where
     bam_controller: bool,
     /// Whether BAM is enabled.
     bam_enabled: Arc<AtomicU8>,
+    /// Client mode.
+    client_mode: Arc<Mutex<ClientMode>>,
+    gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
 }
 
 impl<R, S> SchedulerController<R, S>
@@ -200,6 +230,8 @@ where
         priority_floor: Arc<SchedulerPriorityFloor>,
         bam_controller: bool,
         bam_enabled: Arc<AtomicU8>,
+        client_mode: Arc<Mutex<ClientMode>>,
+        gui_core_metrics_sender: Option<Sender<GuiCoreMetrics>>,
     ) -> Self {
         priority_floor.clear();
         let container_capacity = TOTAL_BUFFERED_PACKETS;
@@ -210,7 +242,7 @@ where
             decision_maker,
             receive_and_buffer,
             sharable_banks,
-            container: R::Container::with_capacity(container_capacity),
+            container: R::Container::with_capacity(container_capacity, false),
             scheduler,
             count_metrics: SchedulerCountMetrics::new(metrics_id),
             timing_metrics: SchedulerTimingMetrics::new(metrics_id),
@@ -221,6 +253,8 @@ where
             saturation_state,
             bam_controller,
             bam_enabled,
+            client_mode,
+            gui_core_metrics_sender,
         }
     }
 
@@ -228,6 +262,23 @@ where
         let mut scheduling_bank_id = None;
         let mut scheduling_blocked_at = None;
         let mut cost_pacer = None;
+
+        #[allow(unused_mut)]
+        let mut block_reception = false;
+        #[cfg(feature = "build_validator")]
+        if !self.bam_controller {
+            unsafe {
+                initial_check_state_for_standard();
+            };
+        }
+        #[cfg(feature = "build_validator")]
+        let mut decision_state: DecisionState;
+
+        let report_interval_ms = if self.gui_core_metrics_sender.is_some() {
+            50
+        } else {
+            1000
+        };
 
         while !self.exit.load(Ordering::Relaxed) {
             let now = Instant::now();
@@ -241,7 +292,8 @@ where
             // `Forward` will drop packets from the buffer instead of forwarding.
             // During receiving, since packets would be dropped from buffer anyway, we can
             // bypass sanitization and buffering and immediately drop the packets.
-            let (decision, decision_time_us) =
+            #[allow(unused_variables)]
+            let ((decision, is_switching_point_detected, _), decision_time_us) =
                 measure_us!(self.decision_maker.make_consume_or_forward_decision());
             self.timing_metrics.update(|timing_metrics| {
                 timing_metrics.decision_time_us += decision_time_us;
@@ -249,9 +301,9 @@ where
             let new_leader_slot = decision.bank().map(|b| b.slot());
             let new_leader_bank_id = decision.bank().map(|b| b.bank_id());
             self.count_metrics
-                .maybe_report_and_reset_slot(new_leader_slot);
+                .maybe_report_and_reset_slot(new_leader_slot, self.bam_controller);
             self.timing_metrics
-                .maybe_report_and_reset_slot(new_leader_slot);
+                .maybe_report_and_reset_slot(new_leader_slot, self.bam_controller);
 
             self.receive_completed(&decision)?;
             // bank_id alone (not slot) detects the transition: it's globally unique,
@@ -327,33 +379,61 @@ where
                     timing_metrics.clean_time_us += clean_time_us;
                 });
             }
-            receiving_stats.accumulate(self.receive_and_buffer_packets(&decision).map_err(
-                |err| match err {
+            let packet_stats = if block_reception {
+                ReceivingStats::default()
+            } else {
+                self.receive_and_buffer_packets(&decision).map_err(|err| match err {
                     DisconnectedError::Receiver => {
                         SchedulerError::DisconnectedRecvChannel("receive and buffer disconnected")
                     }
                     DisconnectedError::CheckWorker => {
                         SchedulerError::DisconnectedSendChannel("check worker disconnected")
                     }
-                },
-            )?);
+                })?
+            };
+            receiving_stats.accumulate(packet_stats);
             self.update_receiving_metrics(&receiving_stats);
+
+            #[cfg(feature = "build_validator")]
+            {
+                if !self.bam_controller {
+                    decision_state = translate_decision_into_decision_state(&decision);
+                    unsafe {
+                        check_state(
+                            self.container.is_empty(),
+                            &decision_state,
+                            self.scheduler.in_flight_txns(),
+                            &mut block_reception,
+                            is_switching_point_detected,
+                        );
+                    };
+                }
+            }
+
             // Report metrics only if there is data.
             // Reset intervals when appropriate, regardless of report.
-            let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
+            // let should_report = self.count_metrics.interval_has_data() && self.scheduling_enabled();
+            let should_report = self.count_metrics.interval_has_data();
             let priority_min_max = self.container.get_min_max_priority();
             self.count_metrics.update(|count_metrics| {
                 count_metrics.update_priority_stats(priority_min_max);
             });
             self.update_scheduler_priority_floor(receiving_stats.num_dropped_on_capacity);
-            self.count_metrics
-                .maybe_report_and_reset_interval(should_report);
-            self.timing_metrics
-                .maybe_report_and_reset_interval(should_report);
+            let report_interval_passed = self
+                .count_metrics
+                .maybe_report_and_reset_interval(should_report, self.bam_controller, self.gui_core_metrics_sender.as_ref(), report_interval_ms);
+            if report_interval_passed {
+                if let Some(gui_core_metrics_sender) = self.gui_core_metrics_sender.as_ref() {
+                    let pack_retained = self.container.len() as u64;
+                    if let Err(err) = gui_core_metrics_sender.try_send(GuiCoreMetrics::PackRetained(pack_retained)) {
+                        warn!("failed to send PackRetained gui metrics: {err}");
+                    }
+                }
+            }
             self.worker_metrics
                 .iter()
-                .for_each(|metrics| metrics.maybe_report_and_reset());
-            self.scheduling_details.maybe_report();
+                .for_each(|metrics| metrics.maybe_report_and_reset(self.bam_controller, self.gui_core_metrics_sender.as_ref()));
+            self.scheduling_details.maybe_report(self.bam_controller);
         }
 
         Ok(())
@@ -369,11 +449,12 @@ where
         let scheduled = match decision {
             BufferedPacketsDecision::Consume(bank) => {
                 if !self.scheduling_enabled() {
-                    // When BAM disconnects while we're still leader, `schedule`
-                    // is never called so `pull_into_prio_graph` never drains the
-                    // priority queue. Drain leftover batch entries here to avoid
-                    // stale batches accumulating until the next slot change.
-                    if self.bam_controller
+                    if self.client_mode.lock().unwrap().clone() == ClientMode::BAMStrictCompliance {
+                        while let Some(id) = self.container.pop() {
+                            self.container.remove_by_id(id.id);
+                        }
+                        return Ok(0);
+                    } else if self.bam_controller
                         && matches!(
                             BamConnectionState::from_u8(self.bam_enabled.load(Ordering::Acquire)),
                             BamConnectionState::Disconnected | BamConnectionState::Connecting
@@ -382,8 +463,8 @@ where
                         while let Some(id) = self.container.pop() {
                             self.container.remove_by_id(id.id);
                         }
+                        return Ok(0);
                     }
-                    return Ok(0);
                 }
                 let scheduling_budget = if self.bam_controller {
                     u64::MAX
@@ -394,7 +475,7 @@ where
                 };
                 let (scheduling_summary, schedule_time_us) = measure_us!(self.scheduler.schedule(
                     &mut self.container,
-                    bank.slot(),
+                    bank.working_bank.slot(),
                     scheduling_budget,
                 )?);
 
@@ -568,7 +649,7 @@ where
         decision: &BufferedPacketsDecision,
     ) -> Result<ReceivingStats, DisconnectedError> {
         self.receive_and_buffer
-            .receive_and_buffer_packets(&mut self.container, decision)
+            .receive_and_buffer_packets(&mut self.container, Some(decision), None)
     }
 
     fn drain_check_results(&mut self, decision: &BufferedPacketsDecision) -> ReceivingStats {
@@ -656,6 +737,21 @@ impl CostPacer {
     }
 }
 
+pub fn translate_decision_into_decision_state(decision: &BufferedPacketsDecision) -> DecisionState {
+    match decision {
+        BufferedPacketsDecision::Consume(bank_start) => {
+            let bank = &bank_start.working_bank;
+            DecisionState::Consume(LeaderMetaData {
+                slot: bank.slot(),
+                bank_creation_time: *bank_start.bank_creation_time,
+            })
+        }
+        BufferedPacketsDecision::ForwardAndHold => DecisionState::ForwardAndHold,
+        BufferedPacketsDecision::Forward => DecisionState::Forward,
+        BufferedPacketsDecision::Hold => DecisionState::Hold,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use {
@@ -675,17 +771,23 @@ mod tests {
         },
         agave_votor::slot_clock::SharedAlpenglowSlotClock,
         ahash::HashSet,
+        agave_votor::slot_clock::SharedAlpenglowSlotClock,
+        agave_votor_messages::migration::MigrationStatus,
         crossbeam_channel::{Receiver, Sender, bounded, unbounded},
         itertools::Itertools,
         solana_account::{AccountSharedData, state_traits::StateMutWincode as _},
+        solana_clock::DEFAULT_TICKS_PER_SLOT,
         solana_compute_budget_interface::ComputeBudgetInstruction,
         solana_fee_calculator::FeeRateGovernor,
         solana_hash::Hash,
         solana_keypair::Keypair,
-        solana_ledger::genesis_utils::GenesisConfigInfo,
+        solana_ledger::{
+            blockstore::Blockstore, genesis_utils::GenesisConfigInfo,
+            get_tmp_ledger_path_auto_delete,
+        },
         solana_message::Message,
         solana_nonce::{self as nonce, state::DurableNonce},
-        solana_poh::poh_recorder::{LeaderState, SharedLeaderState},
+        solana_poh::poh_recorder::{create_test_recorder, LeaderState, SharedLeaderState},
         solana_pubkey::Pubkey,
         solana_runtime::{bank::Bank, bank_forks::BankForks},
         solana_runtime_transaction::transaction_meta::TransactionMeta,
@@ -696,6 +798,7 @@ mod tests {
         std::{
             num::NonZeroUsize,
             sync::{Arc, RwLock},
+            time::Instant,
         },
     };
 
@@ -761,7 +864,7 @@ mod tests {
             bank_forks.read().unwrap().sharable_banks(),
             Arc::new(blacklisted_accounts.into_iter().collect()),
         );
-        TransactionViewReceiveAndBuffer::new(receiver, check_work_sender, check_result_receiver)
+        TransactionViewReceiveAndBuffer::new(receiver, check_work_sender, check_result_receiver, false)
     }
 
     #[allow(clippy::type_complexity)]
@@ -786,8 +889,17 @@ mod tests {
 
         let shared_leader_state = SharedLeaderState::new(0, None, None);
 
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path())
+            .expect("Expected to be able to open database ledger");
+        let (_exit, poh_recorder, _controller, _recorder, _service, _entry_receiver) =
+            create_test_recorder(bank.clone(), Arc::new(blockstore), None, None);
         let decision_maker = DecisionMaker::new(
             shared_leader_state.clone(),
+            DEFAULT_TICKS_PER_SLOT,
+            Arc::new(Instant::now()),
+            0,
+            poh_recorder,
             bank_forks.read().unwrap().migration_status(),
             SharedAlpenglowSlotClock::default(),
         );
@@ -816,6 +928,7 @@ mod tests {
             consume_work_senders,
             finished_consume_work_receiver,
             GreedySchedulerConfig::default(),
+            false,
         );
         let exit = Arc::new(AtomicBool::new(false));
         let scheduler_controller = SchedulerController::new(
@@ -830,6 +943,8 @@ mod tests {
             Arc::new(SchedulerPriorityFloor::default()),
             false,
             Arc::new(AtomicU8::new(BamConnectionState::Disconnected as u8)),
+            Arc::new(Mutex::new(ClientMode::default())),
+            None,
         );
 
         (test_frame, scheduler_controller)
@@ -1015,7 +1130,7 @@ mod tests {
     fn test_receive_then_schedule<R: ReceiveAndBuffer>(
         scheduler_controller: &mut SchedulerController<R, impl Scheduler<R::Transaction>>,
     ) {
-        let decision = scheduler_controller
+        let (decision, _, _) = scheduler_controller
             .decision_maker
             .make_consume_or_forward_decision();
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
@@ -1066,9 +1181,11 @@ mod tests {
                     revert_on_error: false,
                     respond_with_extra_info: false,
                     admission: None,
+                    gui_schedule_info: Vec::new(),
                 },
                 retryable_indexes: vec![],
                 extra_info: None,
+                cu_err_indexes: None,
             })
             .unwrap();
 
@@ -1401,6 +1518,7 @@ mod tests {
                 work: consume_work,
                 retryable_indexes: vec![RetryableIndex::new(1, true)],
                 extra_info: None,
+                cu_err_indexes: None,
             })
             .unwrap();
 
@@ -1436,8 +1554,17 @@ mod tests {
         let (bank, bank_forks) = Bank::new_with_bank_forks_for_tests(&genesis_config);
 
         let mut shared_leader_state = SharedLeaderState::new(0, None, None);
+        let ledger_path = get_tmp_ledger_path_auto_delete!();
+        let blockstore = Blockstore::open(ledger_path.path())
+            .expect("Expected to be able to open database ledger");
+        let (_exit, poh_recorder, _controller, _recorder, _service, _entry_receiver) =
+            create_test_recorder(bank.clone(), Arc::new(blockstore), None, None);
         let decision_maker = DecisionMaker::new(
             shared_leader_state.clone(),
+            DEFAULT_TICKS_PER_SLOT,
+            Arc::new(Instant::now()),
+            0,
+            poh_recorder,
             bank_forks.read().unwrap().migration_status(),
             SharedAlpenglowSlotClock::default(),
         );
@@ -1481,12 +1608,14 @@ mod tests {
             Arc::new(SchedulerPriorityFloor::default()),
             true, // bam_controller
             bam_enabled.clone(),
+            Arc::new(Mutex::new(ClientMode::default())),
+            None,
         );
 
         // Set leader state so DecisionMaker returns Consume
         set_leader_bank(&mut shared_leader_state, Some(bank.clone()));
 
-        let decision = controller.decision_maker.make_consume_or_forward_decision();
+        let decision = controller.decision_maker.make_consume_or_forward_decision().0;
         assert!(matches!(decision, BufferedPacketsDecision::Consume(_)));
 
         // BAM scheduling must also work without a cost pacer.

@@ -146,6 +146,7 @@ pub enum PrioritizationFeeError {
 /// write account minimum fees are those greater than the block minimum transaction fee, because the minimum fee needed to land
 /// a transaction is determined by Max( min_compute_unit_price, min_writable_account_fees(key), ...)
 #[derive(Debug)]
+#[repr(C)]
 pub struct PrioritizationFee {
     // The minimum prioritization fee of transactions that landed in this block.
     min_compute_unit_price: u64,

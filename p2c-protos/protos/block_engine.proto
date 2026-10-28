@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package block_engine;
+
+import "packet.proto";
+import "shared.proto";
+
+// P2C / post-pack subset — packages and field numbers match Jito for drop-in wire compatibility.
+
+message ExpiringPacketBatch {
+  shared.Header header = 1;
+  packet.PacketBatch batch = 2;
+  // Historically expiry_ms; P2C carries the working-bank slot as u32.
+  uint32 expiry_ms = 3;
+}
+
+message PacketBatchUpdate {
+  oneof msg {
+    ExpiringPacketBatch batches = 1;
+    shared.Heartbeat heartbeat = 2;
+  }
+}
+
+message StartExpiringPacketStreamResponse {
+  shared.Heartbeat heartbeat = 1;
+}
+
+// Per-slot P2C send counts (validator → consumer), also dumped to metrics/DB.
+message P2cUpdateCount {
+  string uuid = 1;
+  uint64 slot = 2;
+  uint64 scheduler_count = 3;
+  uint64 tpu_count = 4;
+  uint64 total_count = 5;
+  bool p2c_tpu_enabled = 6;
+}
+
+message GetBlockEngineEndpointRequest {}
+
+message BlockEngineEndpoint {
+  string block_engine_url = 1;
+  string shredstream_receiver_address = 2;
+}
+
+message GetBlockEngineEndpointResponse {
+  BlockEngineEndpoint global_endpoint = 1;
+  repeated BlockEngineEndpoint regioned_endpoints = 2;
+}
+
+service BlockEngineValidator {
+  rpc GetBlockEngineEndpoints (GetBlockEngineEndpointRequest) returns (GetBlockEngineEndpointResponse) {}
+}
+
+service BlockEngineRelayer {
+  // ReSell: pre-conf stream (required for ReSell endpoints).
+  rpc StartExpiringPacketStream (stream PacketBatchUpdate) returns (stream StartExpiringPacketStreamResponse) {}
+  // Mev/backrun: pre-conf stream. Same PacketBatchUpdate shape.
+  rpc StartExpiringMevPacketStream (stream PacketBatchUpdate) returns (stream StartExpiringPacketStreamResponse) {}
+  // Optional: clients must tolerate UNIMPLEMENTED / missing method.
+  rpc StartExpiringTpuPacketStream (stream PacketBatchUpdate) returns (stream StartExpiringPacketStreamResponse) {}
+  // Optional: clients must tolerate UNIMPLEMENTED / missing method.
+  rpc StartP2cUpdateCountStream (stream P2cUpdateCount) returns (stream StartExpiringPacketStreamResponse) {}
+}

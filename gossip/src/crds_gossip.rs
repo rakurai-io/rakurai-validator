@@ -38,6 +38,7 @@ use {
 };
 
 #[derive(Default)]
+#[repr(C)]
 pub struct CrdsGossip {
     pub crds: RwLock<Crds>,
     pub push: CrdsGossipPush,

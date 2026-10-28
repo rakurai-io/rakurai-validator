@@ -1,0 +1,3659 @@
+{
+  "address": "FcTL7Mnq1RcstcYUk39ph2DzdVPNFyWh1EnrqCocXhhh",
+  "metadata": {
+    "name": "rakurai_client_config",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "On-chain validator config: block-engine endpoints, post-pack (P2C) URLs, and virtual-priority maps"
+  },
+  "instructions": [
+    {
+      "name": "abort_global_staging",
+      "docs": [
+        "Manager-only: close global staging without applying."
+      ],
+      "discriminator": [
+        81,
+        96,
+        192,
+        123,
+        56,
+        20,
+        83,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "abort_proposal_staging",
+      "docs": [
+        "Operator-only: close proposal staging without applying."
+      ],
+      "discriminator": [
+        239,
+        213,
+        8,
+        22,
+        79,
+        204,
+        222,
+        166
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "abort_validator_staging",
+      "docs": [
+        "Manager-only: close validator staging without applying."
+      ],
+      "discriminator": [
+        132,
+        130,
+        245,
+        190,
+        127,
+        37,
+        84,
+        160
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "approve_proposal",
+      "docs": [
+        "Manager-only: copy proposal → live validator config, then close proposal (rent → operator)."
+      ],
+      "discriminator": [
+        136,
+        108,
+        102,
+        85,
+        98,
+        114,
+        7,
+        147
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "operator",
+          "writable": true
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_global",
+      "docs": [
+        "Manager-only: close global config PDA and reclaim rent."
+      ],
+      "discriminator": [
+        106,
+        213,
+        60,
+        243,
+        28,
+        254,
+        62,
+        44
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "close_validator",
+      "docs": [
+        "Manager-only: close per-vote validator config PDA and reclaim rent."
+      ],
+      "discriminator": [
+        36,
+        32,
+        237,
+        188,
+        24,
+        102,
+        28,
+        118
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "commit_global_staging",
+      "docs": [
+        "Manager-only: deserialize staging payload into live global config, then close staging."
+      ],
+      "discriminator": [
+        119,
+        242,
+        167,
+        65,
+        103,
+        187,
+        150,
+        201
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "commit_proposal_staging",
+      "docs": [
+        "Operator-only: apply staging payload onto the proposal PDA, then close staging.",
+        "Proposal must already exist (small `init_proposal` with empty config is enough)."
+      ],
+      "discriminator": [
+        205,
+        4,
+        102,
+        11,
+        173,
+        138,
+        9,
+        188
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "validator",
+            "proposal"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "commit_validator_staging",
+      "docs": [
+        "Manager-only: apply staging payload to live validator overlay, then close staging."
+      ],
+      "discriminator": [
+        36,
+        111,
+        64,
+        99,
+        197,
+        78,
+        108,
+        41
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_global",
+      "docs": [
+        "Create the singleton global config. Signer becomes `manager`.",
+        "`limits` must be non-zero and ≤ absolute safety caps."
+      ],
+      "discriminator": [
+        44,
+        238,
+        77,
+        253,
+        76,
+        182,
+        192,
+        162
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "Config"
+            }
+          }
+        },
+        {
+          "name": "limits",
+          "type": {
+            "defined": {
+              "name": "ConfigLimits"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "init_global_staging",
+      "docs": [
+        "Manager-only: create ephemeral global staging PDA for a chunked config upload."
+      ],
+      "discriminator": [
+        190,
+        179,
+        77,
+        64,
+        38,
+        67,
+        59,
+        42
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "expected_len",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "init_proposal",
+      "docs": [
+        "Operator-only: create proposal PDA with suggested config.",
+        "Copies validator `limits` onto the proposal; validates against those caps."
+      ],
+      "discriminator": [
+        113,
+        76,
+        165,
+        176,
+        110,
+        138,
+        198,
+        178
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "validator"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "Config"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "init_proposal_staging",
+      "docs": [
+        "Operator-only: create ephemeral proposal staging PDA."
+      ],
+      "discriminator": [
+        165,
+        41,
+        176,
+        35,
+        175,
+        255,
+        219,
+        97
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "validator"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "expected_len",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "init_validator",
+      "docs": [
+        "Manager-only: create per-vote validator PDA, copying current global config + limits.",
+        "`operator` may later propose changes via the proposal PDA."
+      ],
+      "discriminator": [
+        4,
+        14,
+        109,
+        60,
+        76,
+        112,
+        181,
+        64
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "operator",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "init_validator_staging",
+      "docs": [
+        "Manager-only: create ephemeral validator staging PDA."
+      ],
+      "discriminator": [
+        111,
+        162,
+        20,
+        213,
+        124,
+        199,
+        111,
+        31
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "expected_len",
+          "type": "u32"
+        }
+      ]
+    },
+    {
+      "name": "migrate_global_to_v3",
+      "docs": [
+        "Manager-only: rewrite a V2 global payload as V3 (global TPU flag → per P2C URL).",
+        "No-op if already V3. Reallocs to fit."
+      ],
+      "discriminator": [
+        35,
+        84,
+        248,
+        205,
+        32,
+        33,
+        240,
+        42
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "migrate_proposal_to_v3",
+      "docs": [
+        "Operator-only: rewrite a V2 proposal payload as V3 (global TPU flag → per P2C URL).",
+        "No-op if already V3. Reallocs to fit."
+      ],
+      "discriminator": [
+        235,
+        248,
+        185,
+        181,
+        236,
+        193,
+        103,
+        230
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "validator",
+            "proposal"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "migrate_validator_to_v3",
+      "docs": [
+        "Manager-only: rewrite a V2 validator payload as V3 (global TPU flag → per P2C URL).",
+        "No-op if already V3. Reallocs to fit."
+      ],
+      "discriminator": [
+        218,
+        251,
+        0,
+        157,
+        167,
+        33,
+        210,
+        218
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "reject_proposal",
+      "docs": [
+        "Manager-only: close proposal without changing live validator config (rent → operator)."
+      ],
+      "discriminator": [
+        114,
+        162,
+        164,
+        82,
+        191,
+        11,
+        102,
+        25
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "operator",
+          "writable": true
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "set_operator",
+      "docs": [
+        "Manager-only: set who may propose for this vote."
+      ],
+      "discriminator": [
+        238,
+        153,
+        101,
+        169,
+        243,
+        131,
+        36,
+        1
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "operator",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "update_global",
+      "docs": [
+        "Manager-only: replace global config payload.",
+        "Reallocs the account to the serialized size of the new config (dynamic Vec/String)."
+      ],
+      "discriminator": [
+        90,
+        152,
+        240,
+        21,
+        199,
+        38,
+        72,
+        20
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "Config"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_global_limits",
+      "docs": [
+        "Manager-only: update global size caps (≤ absolute safety caps; must fit current payload)."
+      ],
+      "discriminator": [
+        251,
+        234,
+        164,
+        108,
+        155,
+        30,
+        191,
+        24
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "global",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "limits",
+          "type": {
+            "defined": {
+              "name": "ConfigLimits"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_proposal",
+      "docs": [
+        "Operator-only: replace proposal payload (reallocs).",
+        "Refreshes proposal `limits` from the validator PDA; validates against those caps."
+      ],
+      "discriminator": [
+        47,
+        144,
+        37,
+        102,
+        101,
+        215,
+        171,
+        47
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "validator",
+            "proposal"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "validator",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposal",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "Config"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_validator",
+      "docs": [
+        "Manager-only: replace validator-specific config (independent of global after copy).",
+        "Reallocs the account to the serialized size of the new config (dynamic Vec/String)."
+      ],
+      "discriminator": [
+        105,
+        192,
+        4,
+        98,
+        236,
+        115,
+        108,
+        192
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "config",
+          "type": {
+            "defined": {
+              "name": "Config"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "update_validator_limits",
+      "docs": [
+        "Manager-only: update this vote's size caps (≤ absolute safety caps; must fit current payload)."
+      ],
+      "discriminator": [
+        197,
+        140,
+        146,
+        247,
+        59,
+        128,
+        213,
+        122
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "signer": true,
+          "relations": [
+            "global"
+          ]
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "global",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  103,
+                  108,
+                  111,
+                  98,
+                  97,
+                  108,
+                  45,
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "validator",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  118,
+                  97,
+                  108,
+                  105,
+                  100,
+                  97,
+                  116,
+                  111,
+                  114,
+                  45,
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "limits",
+          "type": {
+            "defined": {
+              "name": "ConfigLimits"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "write_global_staging",
+      "docs": [
+        "Manager-only: append a chunk to global staging."
+      ],
+      "discriminator": [
+        83,
+        210,
+        106,
+        131,
+        103,
+        0,
+        48,
+        207
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "data",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "write_proposal_staging",
+      "docs": [
+        "Operator-only: append a chunk to proposal staging."
+      ],
+      "discriminator": [
+        192,
+        189,
+        20,
+        67,
+        154,
+        144,
+        116,
+        255
+      ],
+      "accounts": [
+        {
+          "name": "operator",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  112
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "data",
+          "type": "bytes"
+        }
+      ]
+    },
+    {
+      "name": "write_validator_staging",
+      "docs": [
+        "Manager-only: append a chunk to validator staging."
+      ],
+      "discriminator": [
+        231,
+        81,
+        136,
+        67,
+        88,
+        189,
+        86,
+        188
+      ],
+      "accounts": [
+        {
+          "name": "manager",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "vote"
+        },
+        {
+          "name": "staging",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103,
+                  45,
+                  115,
+                  116,
+                  97,
+                  103,
+                  105,
+                  110,
+                  103
+                ]
+              },
+              {
+                "kind": "const",
+                "value": [
+                  118
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vote"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "data",
+          "type": "bytes"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "ConfigStaging",
+      "discriminator": [
+        168,
+        210,
+        111,
+        201,
+        24,
+        192,
+        208,
+        109
+      ]
+    },
+    {
+      "name": "GlobalConfig",
+      "discriminator": [
+        149,
+        8,
+        156,
+        202,
+        160,
+        252,
+        176,
+        217
+      ]
+    },
+    {
+      "name": "ValidatorConfig",
+      "discriminator": [
+        26,
+        216,
+        46,
+        18,
+        222,
+        132,
+        83,
+        46
+      ]
+    },
+    {
+      "name": "ValidatorProposal",
+      "discriminator": [
+        217,
+        12,
+        148,
+        132,
+        81,
+        208,
+        193,
+        68
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "Unauthorized",
+      "msg": "Only the config manager may perform this action"
+    },
+    {
+      "code": 6001,
+      "name": "UnauthorizedOperator",
+      "msg": "Only the validator operator may propose"
+    },
+    {
+      "code": 6002,
+      "name": "VoteMismatch",
+      "msg": "Vote account does not match validator config"
+    },
+    {
+      "code": 6003,
+      "name": "OperatorMismatch",
+      "msg": "Operator account does not match proposal"
+    },
+    {
+      "code": 6004,
+      "name": "UrlEmpty",
+      "msg": "URL must not be empty"
+    },
+    {
+      "code": 6005,
+      "name": "UrlTooLong",
+      "msg": "URL exceeds max_url_len"
+    },
+    {
+      "code": 6006,
+      "name": "TooManySets",
+      "msg": "Too many named sets for this section"
+    },
+    {
+      "code": 6007,
+      "name": "TooManyUrls",
+      "msg": "Too many URLs in a set"
+    },
+    {
+      "code": 6008,
+      "name": "TooManyVpEntries",
+      "msg": "Too many virtual-priority entries in a set"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidVpValue",
+      "msg": "virtual_priority value must be in [0.0, 1.0]"
+    },
+    {
+      "code": 6010,
+      "name": "InvalidLimits",
+      "msg": "ConfigLimits are zero or exceed absolute safety caps"
+    },
+    {
+      "code": 6011,
+      "name": "StagingKindInvalid",
+      "msg": "Staging kind does not match this instruction"
+    },
+    {
+      "code": 6012,
+      "name": "StagingLengthMismatch",
+      "msg": "Staging payload length exceeds expected_len"
+    },
+    {
+      "code": 6013,
+      "name": "StagingIncomplete",
+      "msg": "Staging payload is incomplete"
+    },
+    {
+      "code": 6014,
+      "name": "StagingTooLarge",
+      "msg": "Staging payload is empty or exceeds MAX_STAGING_BYTES"
+    },
+    {
+      "code": 6015,
+      "name": "StagingDeserializeFailed",
+      "msg": "Failed to deserialize Config from staging bytes"
+    },
+    {
+      "code": 6016,
+      "name": "UnexpectedConfigVersion",
+      "msg": "Config payload is not the expected schema version"
+    }
+  ],
+  "types": [
+    {
+      "name": "BlockEngineConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "max_bundles",
+            "docs": [
+              "Bundles admitted per `period_ms`. 0 = unlimited."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "period_ms",
+            "docs": [
+              "Quota window in milliseconds. 0 = unlimited."
+            ],
+            "type": "u32"
+          },
+          {
+            "name": "max_bundle_burst",
+            "docs": [
+              "Token-bucket capacity. If 0 and quota is set, treat as equal to `max_bundles`."
+            ],
+            "type": "u32"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlockEngineEntryV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "BlockEngineConfig"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlockEngineEntryV4",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "docs": [
+              "Exactly one block-engine URL per UUID."
+            ],
+            "type": {
+              "defined": {
+                "name": "BlockEngineConfig"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlockEngineV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "docs": [
+              "Dynamic list of named endpoint groups; realloc when this grows/shrinks."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "BlockEngineEntryV1"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlockEngineV4",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "BlockEngineEntryV4"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Config",
+      "docs": [
+        "Versioned config payload shared by global and validator PDAs.",
+        "",
+        "Discriminant 0 (`V1`) is reserved so existing `V2` accounts (discriminant 1)",
+        "keep decoding after ConfigV1 was removed. `V3` is discriminant 2, `V4` is 3."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "V1"
+          },
+          {
+            "name": "V2",
+            "fields": [
+              {
+                "defined": {
+                  "name": "ConfigV2"
+                }
+              }
+            ]
+          },
+          {
+            "name": "V3",
+            "fields": [
+              {
+                "defined": {
+                  "name": "ConfigV3"
+                }
+              }
+            ]
+          },
+          {
+            "name": "V4",
+            "fields": [
+              {
+                "defined": {
+                  "name": "ConfigV4"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigLimits",
+      "docs": [
+        "Versioned size caps stored on Global / Validator / Proposal."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "V1",
+            "fields": [
+              {
+                "defined": {
+                  "name": "ConfigLimitsV1"
+                }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigLimitsV1",
+      "docs": [
+        "Size-cap fields for one limits schema version."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "max_url_len",
+            "type": "u16"
+          },
+          {
+            "name": "max_sets_per_section",
+            "type": "u8"
+          },
+          {
+            "name": "max_urls_per_set",
+            "type": "u8"
+          },
+          {
+            "name": "max_vp_entries_per_set",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigStaging",
+      "docs": [
+        "Ephemeral upload buffer. Create → append chunks → commit into live PDA → close."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "kind",
+            "docs": [
+              "0 = global, 1 = validator, 2 = proposal."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "vote",
+            "docs": [
+              "Vote pubkey for validator/proposal staging; default for global."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "expected_len",
+            "type": "u32"
+          },
+          {
+            "name": "data",
+            "type": "bytes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigV2",
+      "docs": [
+        "V2 payload: section lists plus global `enable_tpu_p2c_update`.",
+        "",
+        "`String` / `Vec` fields are dynamically sized: account bytes grow/shrink via",
+        "`realloc_to_fit` on every init/update. Caps come from account `ConfigLimits`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "block_engine",
+            "type": {
+              "defined": {
+                "name": "BlockEngineV1"
+              }
+            }
+          },
+          {
+            "name": "p2c",
+            "type": {
+              "defined": {
+                "name": "P2cV1"
+              }
+            }
+          },
+          {
+            "name": "virtual_priority",
+            "type": {
+              "defined": {
+                "name": "VirtualPriorityV1"
+              }
+            }
+          },
+          {
+            "name": "enable_tpu_p2c_update",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigV3",
+      "docs": [
+        "V3 payload: same sections as V2, but `enable_tpu_p2c_update` + `p2c_type` live per P2C URL."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "block_engine",
+            "type": {
+              "defined": {
+                "name": "BlockEngineV1"
+              }
+            }
+          },
+          {
+            "name": "p2c",
+            "type": {
+              "defined": {
+                "name": "P2cV3"
+              }
+            }
+          },
+          {
+            "name": "virtual_priority",
+            "type": {
+              "defined": {
+                "name": "VirtualPriorityV1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ConfigV4",
+      "docs": [
+        "V4 payload: one block-engine URL per UUID; one P2C URL per UUID with optional mev/resell/tpu."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "block_engine",
+            "type": {
+              "defined": {
+                "name": "BlockEngineV4"
+              }
+            }
+          },
+          {
+            "name": "p2c",
+            "type": {
+              "defined": {
+                "name": "P2cV4"
+              }
+            }
+          },
+          {
+            "name": "virtual_priority",
+            "type": {
+              "defined": {
+                "name": "VirtualPriorityV1"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "GlobalConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "limits",
+            "type": {
+              "defined": {
+                "name": "ConfigLimits"
+              }
+            }
+          },
+          {
+            "name": "config",
+            "type": {
+              "defined": {
+                "name": "Config"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cEntryV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2cUrl"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cConfig",
+      "docs": [
+        "ConfigV3 P2C endpoint with per-URL TPU→P2C gate and P2C type."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "enable_tpu_p2c_update",
+            "type": "bool"
+          },
+          {
+            "name": "p2c_type",
+            "type": {
+              "defined": {
+                "name": "P2cType"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cEntryV3",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2cConfig"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cEntryV4",
+      "docs": [
+        "One gRPC URL per UUID with independent stream options.",
+        "",
+        "- `resell`: open `StartExpiringPacketStream` (ReSell hash; no boost; no TPU).",
+        "- `mev`: open `StartExpiringMevPacketStream` (Mev hash / boost).",
+        "- `enable_tpu_p2c_update`: with `mev`, optionally open `StartExpiringTpuPacketStream`.",
+        "",
+        "Both `mev` and `resell` may be true → two scheduler connections to the same URL."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "type": "string"
+          },
+          {
+            "name": "mev",
+            "type": "bool"
+          },
+          {
+            "name": "resell",
+            "type": "bool"
+          },
+          {
+            "name": "enable_tpu_p2c_update",
+            "docs": [
+              "TPU→P2C forwarding. Only valid when `mev` is true."
+            ],
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cType",
+      "docs": [
+        "Endpoint role for post-pack streams."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Mev"
+          },
+          {
+            "name": "ReSell"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cUrl",
+      "docs": [
+        "ConfigV2 P2C endpoint (url only). Same Borsh layout as the former `P2cConfig`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "url",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "docs": [
+              "Dynamic list of named endpoint groups; realloc when this grows/shrinks."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2cEntryV1"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cV3",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2cEntryV3"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "P2cV4",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "P2cEntryV4"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Uuid",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "ValidatorConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "manager",
+            "type": "pubkey"
+          },
+          {
+            "name": "operator",
+            "docs": [
+              "Key allowed to create/update the proposal PDA for this vote."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "vote",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "limits",
+            "type": {
+              "defined": {
+                "name": "ConfigLimits"
+              }
+            }
+          },
+          {
+            "name": "config",
+            "type": {
+              "defined": {
+                "name": "Config"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ValidatorProposal",
+      "docs": [
+        "Per-vote draft config. Live clients ignore this until manager approve."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vote",
+            "type": "pubkey"
+          },
+          {
+            "name": "operator",
+            "docs": [
+              "Operator who proposed; receives rent on approve/reject close."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "limits",
+            "type": {
+              "defined": {
+                "name": "ConfigLimits"
+              }
+            }
+          },
+          {
+            "name": "config",
+            "type": {
+              "defined": {
+                "name": "Config"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VirtualPriorityConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "key",
+            "type": "pubkey"
+          },
+          {
+            "name": "value",
+            "docs": [
+              "Fraction of tip used for virtual priority; must be in `[0.0, 1.0]`."
+            ],
+            "type": "f64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "VirtualPriorityEntryV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": {
+              "defined": {
+                "name": "Uuid"
+              }
+            }
+          },
+          {
+            "name": "url",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "VirtualPriorityConfig"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "VirtualPriorityV1",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sets",
+            "docs": [
+              "Dynamic list of named priority groups; realloc when this grows/shrinks."
+            ],
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "VirtualPriorityEntryV1"
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

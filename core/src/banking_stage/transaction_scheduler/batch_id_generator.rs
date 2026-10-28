@@ -1,6 +1,6 @@
 use crate::banking_stage::scheduler_messages::TransactionBatchId;
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct BatchIdGenerator {
     next_id: u64,
 }

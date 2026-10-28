@@ -278,6 +278,7 @@ fn new_executed_processing_result(
                 return_data: None,
                 executed_units: 0,
                 accounts_deltas,
+                tips: 0,
             },
             programs_modified_by_tx: HashMap::new(),
         },
@@ -1942,6 +1943,7 @@ fn test_load_and_execute_commit_transactions_fees_only(define_ltds_fee_only_sema
                 loaded_accounts_data_size,
             },
             fee_payer_post_balance: fee_payer_initial_balance - 5000,
+            tips: 0,
         })]
     );
 }
@@ -2016,6 +2018,7 @@ fn test_load_and_execute_commit_transactions_failure() {
                 loaded_accounts_data_size: 149, // size of system account (initially recipient does not exist)
             },
             fee_payer_post_balance: starting_balance - 5000,
+            tips: 0,
         })]
     );
 }
@@ -2083,6 +2086,7 @@ fn test_load_and_execute_commit_transactions_success() {
                 loaded_accounts_data_size: 149, // size of system account (initially recipient does not exist)
             },
             fee_payer_post_balance: starting_balance - 5000 - transfer_amount,
+            tips: 0,
         })]
     );
 }

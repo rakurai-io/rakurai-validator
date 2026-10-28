@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+package shared;
+
+import "google/protobuf/timestamp.proto";
+
+message Header {
+  google.protobuf.Timestamp ts = 1;
+}
+
+message Heartbeat {
+  uint64 count = 1;
+}

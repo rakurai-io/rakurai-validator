@@ -92,6 +92,7 @@ pub(crate) struct EpochBoundaryStakes {
 }
 
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct StakesCache(RwLock<Stakes<StakeAccount>>);
 
 impl StakesCache {
@@ -99,7 +100,7 @@ impl StakesCache {
         Self(RwLock::new(stakes))
     }
 
-    pub(crate) fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
+    pub fn stakes(&self) -> RwLockReadGuard<'_, Stakes<StakeAccount>> {
         self.0.read().unwrap()
     }
 
@@ -218,6 +219,7 @@ impl StakesCache {
 /// stake-delegations.
 #[cfg_attr(feature = "frozen-abi", derive(StableAbi, StableAbiSample))]
 #[derive(Default, Clone, PartialEq, Debug, SchemaWrite)]
+#[repr(C)]
 #[cfg_attr(
     feature = "dev-context-only-utils",
     field_qualifiers(

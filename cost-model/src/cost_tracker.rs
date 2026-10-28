@@ -72,6 +72,7 @@ pub struct CostTrackerStats {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct CostTrackerLimits {
     pub account_cost: u64,
     pub block_cost: u64,
@@ -103,9 +104,11 @@ impl Default for CostTrackerLimits {
 }
 
 #[derive(Debug)]
+#[repr(C)]
 pub struct CostTracker {
     limits: CostTrackerLimits,
-    cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
+    /// Writable-account cost map. Public for rakurai-scheduler post-analysis / throttling.
+    pub cost_by_writable_accounts: HashMap<Pubkey, u64, ahash::RandomState>,
     block_cost: SharedBlockCost,
     transaction_count: Saturating<u64>,
     allocated_accounts_data_size: SharedAllocatedAccountsDataSize,
@@ -320,6 +323,10 @@ impl CostTracker {
 
     pub fn block_cost_limit(&self) -> u64 {
         self.limits.block_cost
+    }
+
+    pub fn account_cost_limit(&self) -> u64 {
+        self.limits.account_cost
     }
 
     pub fn transaction_count(&self) -> u64 {
