@@ -1,5 +1,5 @@
 {
-  "name": "SparkGeyserPlugin-84b5435b",
+  "name": "SparkGeyserPlugin",
   "log_level": "info",
   "check_version": true,
   "zmq_auth": {
@@ -87,5 +87,5 @@
       }
     }
   },
-  "libpath": "./libspark_geyser_plugin-4_4_0-84b5435b.so"
+  "libpath": "./libspark_geyser_plugin-4_4_0.so"
 }
