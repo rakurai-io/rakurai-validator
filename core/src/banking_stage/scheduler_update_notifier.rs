@@ -46,7 +46,7 @@ use {
     },
     tokio_stream::wrappers::ReceiverStream,
     tonic::{
-        Request, Status,
+        Request, Response, Status, Streaming,
         codegen::InterceptedService,
         service::Interceptor,
         transport::{Channel, Endpoint},
@@ -1044,7 +1044,10 @@ async fn auth_and_connect(
             .start_expiring_packet_stream(ReceiverStream::new(rx))
             .await
         {
-            Ok(_response) => Some(tx),
+            Ok(response) => {
+                spawn_inbound_drain(response, "resell", url, actual_url, uuid);
+                Some(tx)
+            }
             Err(error) => {
                 warn!(
                     "SchedulerUpdateNotifier: StartExpiringPacketStream unavailable \
@@ -1065,7 +1068,10 @@ async fn auth_and_connect(
             .start_expiring_mev_packet_stream(ReceiverStream::new(rx))
             .await
         {
-            Ok(_response) => Some(tx),
+            Ok(response) => {
+                spawn_inbound_drain(response, "mev", url, actual_url, uuid);
+                Some(tx)
+            }
             Err(error) => {
                 warn!(
                     "SchedulerUpdateNotifier: StartExpiringMevPacketStream unavailable \
@@ -1086,7 +1092,10 @@ async fn auth_and_connect(
             .start_expiring_tpu_packet_stream(ReceiverStream::new(tpu_grpc_rx))
             .await
         {
-            Ok(_tpu_response) => Some(tpu_grpc_tx),
+            Ok(tpu_response) => {
+                spawn_inbound_drain(tpu_response, "tpu", url, actual_url, uuid);
+                Some(tpu_grpc_tx)
+            }
             Err(error) => {
                 warn!(
                     "SchedulerUpdateNotifier: StartExpiringTpuPacketStream unavailable \
@@ -1108,7 +1117,10 @@ async fn auth_and_connect(
             .start_p2c_update_count_stream(ReceiverStream::new(count_grpc_rx))
             .await
         {
-            Ok(_count_response) => Some(count_grpc_tx),
+            Ok(count_response) => {
+                spawn_inbound_drain(count_response, "count", url, actual_url, uuid);
+                Some(count_grpc_tx)
+            }
             Err(error) => {
                 warn!(
                     "SchedulerUpdateNotifier: StartP2cUpdateCountStream unavailable \
@@ -1413,6 +1425,45 @@ async fn forward_packet_batch_update(
         })
         .await
         .map_err(|error| NotifierError::Stream(error.to_string()))
+}
+
+/// Reads and discards everything the server sends on a P2C response stream.
+///
+/// h2 >= 0.4.16 charges every small inbound DATA frame against a per-connection budget that
+/// is only refunded when the frame is read. Dropping the response unread lets the budget run
+/// out, and h2 then tears down the whole connection with GOAWAY(ENHANCE_YOUR_CALM), which
+/// surfaces here only as "channel closed" on the next send. Draining the stream keeps the
+/// budget topped up and lets us log the status the server closed the stream with.
+fn spawn_inbound_drain<T: Send + 'static>(
+    response: Response<Streaming<T>>,
+    stream: &'static str,
+    url: &str,
+    actual_url: &str,
+    uuid: &str,
+) {
+    let mut inbound = response.into_inner();
+    let (url, actual_url, uuid) = (url.to_string(), actual_url.to_string(), uuid.to_string());
+    tokio::spawn(async move {
+        loop {
+            match inbound.message().await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    debug!(
+                        "SchedulerUpdateNotifier: {stream} inbound stream ended url={url} \
+                         actual_url={actual_url} uuid={uuid}"
+                    );
+                    break;
+                }
+                Err(status) => {
+                    warn!(
+                        "SchedulerUpdateNotifier: {stream} inbound stream closed url={url} \
+                         actual_url={actual_url} uuid={uuid}: {status}"
+                    );
+                    break;
+                }
+            }
+        }
+    });
 }
 
 fn keypair_from_cluster(cluster_info: &Arc<ClusterInfo>) -> Arc<solana_keypair::Keypair> {
